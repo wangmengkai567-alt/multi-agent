@@ -33,6 +33,12 @@ data/
 venv/
 env/
 
+# Local test and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # ========================
 # Claude Code
 # ========================
