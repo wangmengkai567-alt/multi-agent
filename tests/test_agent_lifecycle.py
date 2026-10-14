@@ -44,6 +44,8 @@ async def isolated_runtime(sandbox_dir, monkeypatch):
     monkeypatch.setattr(runtime, "monitor", recorder)
     monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
     monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
+    monkeypatch.setattr(server, "run_db_path", sandbox_dir / "data" / "runs.db")
+    monkeypatch.setattr(server, "monitor", recorder)
     yield recorder
     await server.manager.shutdown()
     await runtime.shutdown_agent()
@@ -190,7 +192,8 @@ async def test_background_completion_and_exception(isolated_runtime, monkeypatch
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: agent)
     async with server.lifespan(server.app):
         response = await server.run_task(server.TaskRequest(query="question", thread_id="background"))
-        assert response == {"status": "started", "thread_id": "background"}
+        assert response["status"] == "started" and response["thread_id"] == "background"
+        assert response["run_id"]
         task = next(iter(server.app.state.agent_tasks))
         await asyncio.gather(task, return_exceptions=True)
         await asyncio.sleep(0)
@@ -209,7 +212,7 @@ async def test_shutdown_cancels_before_closing_database(isolated_runtime, monkey
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: agent)
     async with server.lifespan(server.app):
         saver = runtime.checkpointer
-        await server.run_task(server.TaskRequest(query="question", thread_id="cancelled"))
+        response = await server.run_task(server.TaskRequest(query="question", thread_id="cancelled"))
         task = next(iter(server.app.state.agent_tasks))
         await agent.started.wait()
         delivery = asyncio.create_task(asyncio.Event().wait())
@@ -222,6 +225,15 @@ async def test_shutdown_cancels_before_closing_database(isolated_runtime, monkey
     assert not isolated_runtime.results and not isolated_runtime.errors
     with pytest.raises(ValueError, match="closed|active"):
         await saver.conn.execute("SELECT 1")
+
+    from api.run_store import RunStore
+
+    store = await RunStore.open(server.run_db_path)
+    try:
+        saved = await store.get(response["run_id"])
+        assert saved["status"] == "cancelled" and saved["ended_at"]
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

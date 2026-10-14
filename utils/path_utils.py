@@ -1,14 +1,8 @@
 import os
 from pathlib import Path
-from typing import Optional
 
 
-def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
-    import os
-from pathlib import Path
-from typing import Optional
-
-def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
+def resolve_path(filename: str, session_dir: str | None = None) -> str:
     """
     统一的文件路径解析工具方法。
 
@@ -41,6 +35,30 @@ def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
     Returns:
         str: 解析后的绝对路径
     """
+    from agent.runtime.context import get_run_context
+
+    context = get_run_context()
+    if context is not None:
+        work_dir = context.work_dir.resolve()
+        normalized = filename.replace("\\", "/")
+        for prefix in ("/workspace/", "/mnt/data/", "/home/user/"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+                break
+        path = Path(normalized)
+        if path.is_absolute():
+            candidate = path.resolve()
+        else:
+            # Model prompts use a project-relative output path. Strip exactly
+            # this round's prefix, while preserving nested subdirectories.
+            prefix = f"output/session_{context.thread_id}/run_{context.run_id}/"
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix) :]
+            candidate = (work_dir / normalized).resolve()
+        if not candidate.is_relative_to(work_dir):
+            raise ValueError("File path is outside the current run directory")
+        return str(candidate)
+
     path = Path(filename)
     path_str = filename.replace("\\", "/")  # 统一处理字符串匹配
 
@@ -49,7 +67,7 @@ def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
     for prefix in virtual_prefixes:
         if path_str.startswith(prefix):
             # 去掉前缀
-            cleaned = path_str[len(prefix):].lstrip("/")
+            cleaned = path_str[len(prefix) :].lstrip("/")
             path = Path(cleaned)
             path_str = str(path).replace("\\", "/")
             break
@@ -73,9 +91,9 @@ def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
     is_unix_abs = path_str.startswith("/")
 
     # 如果是绝对路径 (Windows带盘符 或 Unix/开头)
-    if path.is_absolute() or (os.name == 'nt' and is_unix_abs):
+    if path.is_absolute() or (os.name == "nt" and is_unix_abs):
         # Windows 特殊情况：以 / 开头但无盘符，视为相对路径
-        if os.name == 'nt' and is_unix_abs and not path.drive:
+        if os.name == "nt" and is_unix_abs and not path.drive:
             full_path = session_path / path_str.lstrip("/")
         else:
             full_path = path.resolve()

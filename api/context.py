@@ -1,5 +1,6 @@
 from contextvars import ContextVar
-from typing import Optional
+
+from agent.runtime.context import get_run_context
 
 # =================================================================================================
 # 核心知识点: ContextVars (上下文变量)
@@ -30,11 +31,11 @@ from typing import Optional
 
 # - 作用 ：用来记录 “当前是谁在执行任务” 。
 # - 场景 ：当 Agent 打印日志或者通过 WebSocket 给前端发消息时，它需要知道：“我现在是正在服务张三，还是李四？” 这样消息才不会发错人。
-_session_dir_ctx: ContextVar[Optional[str]] = ContextVar("session_dir", default=None)
+_session_dir_ctx: ContextVar[str | None] = ContextVar("session_dir", default=None)
 
 # - 作用 ：用来记录 “当前是谁在执行任务” 。
 # - 场景 ：当 Agent 打印日志或者通过 WebSocket 给前端发消息时，它需要知道：“我现在是正在服务张三，还是李四？” 这样消息才不会发错人。
-_thread_id_ctx: ContextVar[Optional[str]] = ContextVar("thread_id", default=None)
+_thread_id_ctx: ContextVar[str | None] = ContextVar("thread_id", default=None)
 
 
 def set_session_context(path: str):
@@ -48,12 +49,13 @@ def set_session_context(path: str):
     return _session_dir_ctx.set(path)
 
 
-def get_session_context() -> Optional[str]:
+def get_session_context() -> str | None:
     """
     获取当前请求链路的会话目录。
     可以在任何深层调用的工具函数中直接使用，无需层层传递参数。
     """
-    return _session_dir_ctx.get()
+    context = get_run_context()
+    return str(context.work_dir) if context else _session_dir_ctx.get()
 
 
 def set_thread_context(thread_id: str):
@@ -63,11 +65,12 @@ def set_thread_context(thread_id: str):
     return _thread_id_ctx.set(thread_id)
 
 
-def get_thread_context() -> Optional[str]:
+def get_thread_context() -> str | None:
     """
     获取当前请求链路的 Thread ID。
     """
-    return _thread_id_ctx.get()
+    context = get_run_context()
+    return context.thread_id if context else _thread_id_ctx.get()
 
 
 def reset_session_context(session_token, thread_token=None):

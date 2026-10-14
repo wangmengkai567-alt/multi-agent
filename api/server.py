@@ -7,11 +7,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -20,39 +20,76 @@ sys.path.insert(0, str(project_root))
 
 # Import agent runner and monitor
 from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
-from api.monitor import manager  # noqa: E402
+from agent.runtime.context import RunContext, reset_run_context, set_run_context  # noqa: E402
+from api.monitor import manager, monitor  # noqa: E402
+from api.run_store import RunConflict, RunStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
+run_db_path = project_root / "data" / "runs.db"
 
 
-def _task_finished(task):
+def _task_finished(task, run_id):
     app.state.agent_tasks.discard(task)
+    if app.state.run_tasks.get(run_id) is task:
+        del app.state.run_tasks[run_id]
     if not task.cancelled():
         error = task.exception()
         if error is not None:
-            logger.error("Agent background task failed", exc_info=(type(error), error, error.__traceback__))
+            logger.error("Agent run %s failed", run_id, exc_info=(type(error), error, error.__traceback__))
+
+
+async def _execute_run(store, record, context):
+    token = set_run_context(context)
+    try:
+        if not await store.start(context.run_id):
+            return
+        answer = await run_deep_agent(record["question"], context.thread_id)
+        if await store.finish(context.run_id, "completed", answer=answer):
+            monitor.report_task_result(answer)
+    except asyncio.CancelledError:
+        await store.finish(context.run_id, "cancelled", error="Service execution cancelled")
+        raise
+    except Exception as exc:
+        await store.finish(context.run_id, "failed", error=str(exc))
+        raise
+    finally:
+        reset_run_context(token)
 
 
 @asynccontextmanager
 async def lifespan(app):
     app.state.agent_tasks = set()
+    app.state.run_tasks = {}
+    app.state.submission_lock = asyncio.Lock()
     app.state.stopping = False
+    store = None
     try:
         await initialize_agent()
+        store = await RunStore.open(run_db_path)
+        app.state.run_store = store
         output_dir.mkdir(exist_ok=True)
         updated_dir.mkdir(exist_ok=True)
         manager.set_loop(asyncio.get_running_loop())
         yield
     finally:
         app.state.stopping = True
-        tasks = list(app.state.agent_tasks)
+        # Wait for an admission already in progress before snapshotting tasks.
+        async with app.state.submission_lock:
+            tasks = list(app.state.agent_tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         try:
             await manager.shutdown()
         finally:
-            await shutdown_agent()
+            try:
+                if store is not None:
+                    try:
+                        await store.interrupt_active("Service shut down before execution completed")
+                    finally:
+                        await store.close()
+            finally:
+                await shutdown_agent()
 
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
@@ -95,27 +132,49 @@ app.add_middleware(
 
 
 class TaskRequest(BaseModel):
-    query: str
-    thread_id: str = None
+    query: str = Field(min_length=1)
+    thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
 
 
 @app.post("/api/task")
 async def run_task(request: TaskRequest):
-    # 1. [ID 初始化]
     thread_id = request.thread_id or str(uuid.uuid4())
+    async with app.state.submission_lock:
+        if app.state.stopping:
+            raise HTTPException(status_code=503, detail="Service is shutting down")
+        store = app.state.run_store
+        run_id = str(uuid.uuid4())
+        try:
+            record = await store.create(thread_id, request.query, run_id=run_id)
+        except asyncio.CancelledError:
+            # A cancelled await can race a committed insert in the DB worker.
+            # The server-generated ID lets us settle precisely that reservation.
+            await store.finish(run_id, "cancelled", error="Task submission cancelled")
+            raise
+        except RunConflict as exc:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "busy",
+                    "thread_id": thread_id,
+                    "run_id": exc.run_id,
+                },
+            )
+        run_id = record["run_id"]
+        context = RunContext(run_id, thread_id, output_dir / f"session_{thread_id}" / f"run_{run_id}")
+        task = asyncio.create_task(_execute_run(store, record, context), name=f"run:{run_id}")
+        app.state.agent_tasks.add(task)
+        app.state.run_tasks[run_id] = task
+        task.add_done_callback(lambda completed: _task_finished(completed, run_id))
+    return {"status": "started", "thread_id": thread_id, "run_id": run_id}
 
-    # 2. [后台执行] 异步运行 Agent，不阻塞主线程
-    # 注意：这里简单的使用 asyncio.create_task 触发，由 main_agent 内部负责实时推送
-    if app.state.stopping:
-        from fastapi import HTTPException
 
-        raise HTTPException(status_code=503, detail="Service is shutting down")
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id), name=f"agent:{thread_id}")
-    app.state.agent_tasks.add(task)
-    task.add_done_callback(_task_finished)
-
-    # 3. [立即响应]
-    return {"status": "started", "thread_id": thread_id}
+@app.get("/api/runs/{run_id}")
+async def get_run(run_id: str):
+    record = await app.state.run_store.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return record
 
 
 @app.post("/api/upload")
