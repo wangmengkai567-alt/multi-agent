@@ -10,10 +10,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Overwrite
 
+from agent.runtime.backend import run_backend
 from agent.runtime.context import RunContext, get_run_context, reset_run_context, set_run_context
 from agent.runtime.hooks import HookCall, HookToolMiddleware, hook_subagents, pipeline
+from agent.runtime.models import budget_model
+from agent.runtime.policies import load_runtime_policy
 from api.context import reset_session_context, set_session_context, set_thread_context
 from api.monitor import monitor
+from utils.path_utils import confined_path, validate_filename, validate_identifier
 
 checkpoint_db_path = Path(__file__).parents[1] / "data" / "checkpoints.db"
 main_agent = None
@@ -36,8 +40,10 @@ def _build_agent(saver):
     from tools.upload_file_read_tool import read_file_content
 
     subagents = hook_subagents([database_query_agent, network_search_agent, knowledge_base_agent])
+    subagents = [dict(spec, model=budget_model(spec.get("model", model), "sub_model")) for spec in subagents]
     return create_deep_agent(
-        model=model,
+        model=budget_model(model, "main_model"),
+        backend=run_backend,
         system_prompt=main_agent_content["system_prompt"],
         tools=[generate_markdown, convert_md_to_pdf, read_file_content],
         checkpointer=saver,
@@ -54,6 +60,7 @@ async def initialize_agent():
             return main_agent
         stack = AsyncExitStack()
         try:
+            load_runtime_policy()  # Reject malformed limits before opening resources or constructing clients.
             checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
             saver = await stack.enter_async_context(AsyncSqliteSaver.from_conn_string(str(checkpoint_db_path)))
             await saver.setup()
@@ -80,6 +87,7 @@ project_root_path = Path(__file__).parents[1].resolve()
 
 async def run_deep_agent(task_query, session_id):
     """Run the root graph using this round's context and output directory."""
+    validate_identifier(session_id)
     context = get_run_context()
     standalone = context is None
     if standalone:
@@ -96,6 +104,7 @@ async def run_deep_agent(task_query, session_id):
     try:
         if standalone:
             pipeline.emit("before_run", HookCall("main", context.run_id))
+        confined_path(".", session_dir)
         session_dir.mkdir(parents=True, exist_ok=True)
         relative_dir = session_dir.relative_to(project_root_path).as_posix()
         upload_dir = project_root_path / "updated" / f"session_{session_id}"
@@ -103,16 +112,24 @@ async def run_deep_agent(task_query, session_id):
         if upload_dir.exists():
             files = [path for path in upload_dir.iterdir() if path.is_file()]
             for path in files:
-                shutil.copy2(path, session_dir / path.name)
+                validate_filename(path.name)
+                source = confined_path(str(path), project_root_path / "updated")
+                target = confined_path(f"uploads/{path.name}", session_dir)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
             if files:
-                upload_prompt = "\n[已上传文件] 本轮工作目录中的文件：\n" + "\n".join(path.name for path in files)
+                upload_prompt = "\n[已上传文件] 本轮工作目录中的只读文件：\n" + "\n".join(
+                    f"uploads/{path.name}" for path in files
+                )
         path_instruction = f"""
         【工作环境指令】
         工作目录: {relative_dir}
         {upload_prompt}
         新生成文件必须保存到本轮工作目录 '{relative_dir}/filename'。
-        读取上传文件时直接传文件名，不带目录前缀；存在上传文件时请先读取并分析内容。
-        使用相对路径，禁止使用绝对路径。
+        读取上传文件时传 uploads/文件名；存在上传文件时请先读取并分析内容。
+        业务文件工具使用相对路径。框架文件工具使用本轮虚拟路径，如 /report.md、/uploads/文件名。
+        /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写。
+        禁止访问本机真实绝对路径或其他轮次目录。
         """
         config = {"configurable": {"thread_id": session_id}}
         agent = await initialize_agent()

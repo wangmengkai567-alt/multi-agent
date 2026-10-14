@@ -4,6 +4,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import RLock
 
 
 @dataclass
@@ -14,6 +15,9 @@ class RunContext:
     deadline: datetime | None = None
     event_sink: object | None = field(default=None, repr=False)
     hook_failures: list[str] = field(default_factory=list, repr=False)
+    policy: object | None = field(default=None, repr=False)
+    skill_dir: Path | None = None
+    budget_lock: object = field(default_factory=RLock, repr=False)
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
     )

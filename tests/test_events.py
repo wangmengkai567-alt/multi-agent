@@ -133,8 +133,14 @@ async def test_sequence_resets_between_runs_and_persists_on_reopen(outlet, sandb
     assert [event["event_seq"] for event in await store.list_events("run1")] == [1, 2]
     reopened = await RunStore.open(sandbox_dir / "runs.db")
     try:
-        assert (await reopened.list_events("run1"))[-1]["data"] == {"result": "one answer"}
-        assert (await reopened.list_events("run2"))[-1]["data"] == {"error": "two error"}
+        completed = (await reopened.list_events("run1"))[-1]["data"]
+        failed = (await reopened.list_events("run2"))[-1]["data"]
+        assert completed["result"] == "one answer" and failed["error"] == "two error"
+        assert (
+            completed["call_counts"]
+            == failed["call_counts"]
+            == dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
+        )
     finally:
         await reopened.close()
 

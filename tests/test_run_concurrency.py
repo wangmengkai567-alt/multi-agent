@@ -179,7 +179,7 @@ async def test_next_round_keeps_previous_answer_and_files(service):
     assert (await client.get(f"/api/runs/{first['run_id']}")).json() == before
     for version, record in enumerate((first, second), start=1):
         directory = agent.contexts[record["run_id"]].work_dir
-        assert (directory / "uploaded.txt").read_text(encoding="utf-8") == f"upload version {version}"
+        assert (directory / "uploads" / "uploaded.txt").read_text(encoding="utf-8") == f"upload version {version}"
         assert record["run_id"] in (directory / "report.md").read_text(encoding="utf-8")
         prompt = agent.inputs[record["run_id"]]["messages"][0]["content"]
         assert f"run_{record['run_id']}" in prompt and "uploaded.txt" in prompt

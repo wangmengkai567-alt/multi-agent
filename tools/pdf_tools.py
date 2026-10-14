@@ -1,23 +1,23 @@
 import logging
-import sys
 from pathlib import Path
 
 try:
-    from typing import Annotated, Optional
+    from typing import Annotated
 except ImportError:
-    from typing_extensions import Annotated, Optional
+    from typing import Annotated
 
 from langchain_core.tools import tool
-from api.monitor import monitor
+
 from api.context import get_session_context
+from api.monitor import monitor
 from utils.path_utils import resolve_path
 from utils.word_converter import convert_md_to_pdf_via_word
 
 
 @tool
 def convert_md_to_pdf(
-        md_filename: Annotated[str, "要转换的Markdown文档路径（包含.md后缀）"],
-        pdf_filename: Annotated[Optional[str], "输出的PDF文件路径（可选，默认与源文件同名）"] = None
+    md_filename: Annotated[str, "要转换的Markdown文档路径（包含.md后缀）"],
+    pdf_filename: Annotated[str | None, "输出的PDF文件路径（可选，默认与源文件同名）"] = None,
 ) -> str:
     """
     将Markdown文档转换为PDF（基于Word引擎）
@@ -28,32 +28,33 @@ def convert_md_to_pdf(
     try:
         # 1. 路径预处理
         session_dir = get_session_context()
-        md_path = Path(md_filename).with_suffix('.md')
+        md_path = Path(md_filename).with_suffix(".md")
         md_abs_path = Path(resolve_path(str(md_path), session_dir))
 
         # 2. 检查源文件
         if not md_abs_path.exists():
-            return f"错误：文件不存在 {md_abs_path}"
+            raise FileNotFoundError("Source Markdown file does not exist")
 
         # 3. 确定输出路径
         if pdf_filename:
-            pdf_path = Path(pdf_filename).with_suffix('.pdf')
-            pdf_abs_path = Path(resolve_path(str(pdf_path), session_dir))
+            pdf_path = Path(pdf_filename).with_suffix(".pdf")
+            pdf_abs_path = Path(resolve_path(str(pdf_path), session_dir, write=True))
         else:
-            pdf_abs_path = md_abs_path.with_suffix('.pdf')
+            pdf_abs_path = Path(resolve_path(str(md_abs_path.with_suffix(".pdf")), session_dir, write=True))
 
         # 4. 调用核心转换逻辑
         return convert_md_to_pdf_via_word(md_abs_path, pdf_abs_path)
 
     except Exception as e:
         logging.error(f"转换失败: {e}", exc_info=True)
-        return f"转换失败: {str(e)}"
+        raise
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # 测试代码
     # 强制覆盖当前模块中的 get_session_context
-    get_session_context = lambda: "./test_session_123"
+    def get_session_context():
+        return "./test_session_123"
 
     # 创建测试文件
     Path("./test_session_123/sub_dir").mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,7 @@
 import asyncio
 import logging
-import shutil
 import sys
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,8 +23,11 @@ from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  #
 from agent.runtime.context import RunContext, reset_run_context, set_run_context  # noqa: E402
 from agent.runtime.events import EventSink  # noqa: E402
 from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
+from agent.runtime.policies import load_runtime_policy  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
+from utils.path_utils import PathDenied, confined_path, validate_filename, validate_identifier  # noqa: E402
+from utils.secure_paths import iter_confined_files  # noqa: E402
 
 logger = logging.getLogger(__name__)
 run_db_path = project_root / "data" / "runs.db"
@@ -82,6 +85,7 @@ async def lifespan(app):
     store = None
     sink = None
     try:
+        app.state.runtime_policy = load_runtime_policy()
         await initialize_agent()
         store = await RunStore.open(run_db_path)
         app.state.run_store = store
@@ -133,7 +137,7 @@ static_dir = current_dir / "static"
 app.mount("/static", FastAPIStaticFiles(directory=str(static_dir)), name="static")
 
 # 挂载输出目录 (前端可直接访问生成的文件)
-app.mount("/output", FastAPIStaticFiles(directory=str(output_dir), check_dir=False), name="output")
+# Output files are served through the guarded route below.
 
 
 # 首页
@@ -187,7 +191,11 @@ async def run_task(request: TaskRequest):
             )
         run_id = record["run_id"]
         context = RunContext(
-            run_id, thread_id, output_dir / f"session_{thread_id}" / f"run_{run_id}", event_sink=app.state.event_sink
+            run_id,
+            thread_id,
+            output_dir / f"session_{thread_id}" / f"run_{run_id}",
+            event_sink=app.state.event_sink,
+            policy=app.state.runtime_policy,
         )
         record = dict(record, question=request.query)
         task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}")
@@ -215,129 +223,72 @@ async def get_run_history(run_id: str):
 
 @app.post("/api/upload")
 async def upload_files(files: list[UploadFile] = File(...), thread_id: str = Form(...)):
-    """
-    文件上传接口 (File Upload)。
-
-    目标：
-    1. 接收用户上传的一个或多个文件。
-    2. 保存到 `updated/session_{thread_id}` 目录。
-    3. 供 Agent 在后续任务中读取和分析。
-
-    Args:
-        files (list[UploadFile]): 文件对象列表。
-        thread_id (str): 关联的任务会话 ID。
-    """
-    # 1. [目录准备] 确保上传目录存在
-    target_dir = updated_dir / f"session_{thread_id}"
+    try:
+        validate_identifier(thread_id)
+        names = [validate_filename(file.filename) for file in files]
+        if len({name.casefold() for name in names}) != len(names):
+            raise PathDenied("Duplicate upload filenames")
+        target_dir = confined_path(f"session_{thread_id}", updated_dir)
+        targets = [confined_path(name, target_dir) for name in names]
+    except PathDenied as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    limit = app.state.runtime_policy.files.max_upload_bytes
+    if any(file.size is not None and file.size > limit for file in files):
+        raise HTTPException(status_code=413, detail="Upload exceeds the configured size limit")
     target_dir.mkdir(parents=True, exist_ok=True)
+    # Stage and validate the whole batch before replacing any existing upload.
+    with tempfile.TemporaryDirectory(dir=target_dir, prefix="upload-") as staging:
+        for file, name in zip(files, names, strict=True):
+            size = 0
+            staged = Path(staging) / name
+            with staged.open("wb") as stream:
+                while chunk := await file.read(65536):
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(status_code=413, detail="Upload exceeds the configured size limit")
+                    stream.write(chunk)
+        for name, target in zip(names, targets, strict=True):
+            confined_path(str(target), updated_dir)
+            (Path(staging) / name).replace(target)
+    return {"status": "uploaded", "files": names}
 
-    saved_files = []
-    # 2. [保存] 遍历并写入文件
-    for file in files:
-        file_path = target_dir / file.filename
-        # 使用二进制模式写入，支持各种文件格式 (图片、PDF、文本等)
-        # shutil.copyfileobj 高效复制文件流，避免一次性加载大文件到内存
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        saved_files.append(file.filename)
 
-    # 3. [响应] 返回成功保存的文件列表
-    return {"status": "uploaded", "files": saved_files}
+def output_file(value, *, virtual=False):
+    try:
+        path = confined_path(value, output_dir, virtual=virtual)
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="File not found")
+        return path
+    except PathDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 @app.get("/api/download")
 async def download_file(path: str):
-    """
-    文件下载接口 (File Download)。
+    file = output_file(path)
+    return FileResponse(file, filename=file.name)
 
-    目标：
-    1. 根据绝对路径下载文件。
-    2. 严格的安全检查，防止越权访问。
 
-    Args:
-        path (str): 文件的绝对路径 (通常从 list_files 接口获取)。
-    """
-    # 1. [安全检查] 路径解析与越权校验
-    try:
-        abs_path = Path(path).resolve()
-        output_abs = output_dir.resolve()
-
-        # 必须确保请求的文件在 output 目录下
-        if not abs_path.is_relative_to(output_abs):
-            return {"error": "拒绝访问: 只能下载输出目录下的文件"}
-    except Exception:
-        return {"error": "无效的路径参数"}
-    # 2. [存在性检查]
-    if not abs_path.exists():
-        return {"error": "文件不存在"}
-
-    # 3. [响应] 返回文件流 (浏览器自动触发下载)
-    return FileResponse(abs_path, filename=abs_path.name)
+@app.get("/output/{path:path}")
+async def static_output(path: str):
+    return FileResponse(output_file(path, virtual=True))
 
 
 @app.get("/api/files")
-async def list_files(path: str = None):
-    """
-    文件列表查询接口 (File Explorer)。
-
-    目标：
-    1. 列出指定目录下的所有生成文件。
-    2. 提供文件元数据（大小、时间、下载链接）。
-    3. 严格的安全检查，防止路径遍历攻击。
-
-    Args:
-        path (str): 目标目录的绝对路径 (必须在 output 目录下)。不传则默认使用 output 目录。
-    """
-    # 默认使用 output 目录
-    if path is None:
-        path = str(output_dir)
-
-    # 1. [调试] 打印请求路径
-    print(f"[DEBUG] 请求文件列表: {path}")
-
+async def list_files(path: str | None = None):
     try:
-        # 2. [解析] 获取绝对路径对象
-        abs_path = Path(path).resolve()
-        output_abs = output_dir.resolve()
-
-        # 3. [安全] 检查路径是否越界 (Path Traversal Check)
-        if not abs_path.is_relative_to(output_abs):
-            print(f"[ERROR] 拒绝访问: {abs_path} 不在 {output_abs} 目录下")
-            return {"error": "拒绝访问: 只能访问输出目录下的文件"}
-
-    except Exception as e:
-        print(f"[ERROR] 路径解析失败: {e}")
-        return {"error": f"路径无效: {e}"}
-
-    # 4. [检查] 目录是否存在
-    if not abs_path.exists():
-        return {"error": "目录不存在"}
-
+        base = confined_path(path or ".", output_dir)
+    except PathDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if not base.is_dir():
+        raise HTTPException(status_code=404, detail="Directory not found")
     files = []
-    try:
-        # 5. [遍历] 递归查找所有文件
-        for file_path in abs_path.rglob("*"):
-            if file_path.is_file():
-                # 计算相对路径，生成下载 URL
-                stat = file_path.stat()
-                files.append(
-                    {
-                        "name": file_path.name,
-                        "type": "file",
-                        "path": str(file_path),
-                        # "url": f"/outputs/{url_path}",
-                        "size": stat.st_size,
-                        "mtime": stat.st_mtime,
-                    }
-                )
-
-    except Exception as e:
-        print(f"[ERROR] 遍历文件失败: {e}")
-        return {"error": str(e)}
-
-    # 6. [排序] 按修改时间倒序排列 (最新的在前)
-    files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
-    print(f"[DEBUG] 找到 {len(files)} 个文件")
+    for file in iter_confined_files(base):
+        info = file.stat()
+        files.append(
+            {"name": file.name, "type": "file", "path": str(file), "size": info.st_size, "mtime": info.st_mtime}
+        )
+    files.sort(key=lambda item: item["mtime"], reverse=True)
     return {"files": files}
 
 

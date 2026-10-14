@@ -135,9 +135,11 @@ async def test_real_file_tools_use_this_run_directory(sandbox_dir):
         assert (run_dir / "nested" / "report.md").read_text(encoding="utf-8") == "# 本轮文档"
         assert read_file_content.invoke({"filename": "nested/report.md"}) == "# 本轮文档"
         assert resolve_path("/workspace/nested/report.md") == str(run_dir / "nested" / "report.md")
-        with pytest.raises(ValueError, match="current run"):
+        from utils.path_utils import PathDenied
+
+        with pytest.raises(PathDenied, match="traversal"):
             resolve_path("../run_other/report.md")
-        with pytest.raises(ValueError, match="current run"):
+        with pytest.raises(PathDenied, match="allowed directory"):
             resolve_path(str(sandbox_dir / "outside.md"))
     finally:
         reset_run_context(token)

@@ -1,10 +1,11 @@
 """Fixed project hook pipeline around actual execution (sync and async)."""
 
+import asyncio
 import logging
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
-from time import monotonic
+from time import monotonic, sleep
 from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware
@@ -38,25 +39,28 @@ class HookCall:
     target: str | None = None
     check_status: str = "not_checked"
     executed: bool = False
+    attempt: int = 0
 
 
 def error_category(error):
+    from agent.runtime.policies import classify_tool_error
+
     if isinstance(error, HookRejected):
-        return "rejected"
+        return classify_tool_error(error.__cause__) if error.__cause__ else "rejected"
     if isinstance(error, BaseException) and type(error).__name__ == "CancelledError":
         return "cancelled"
     if isinstance(error, TimeoutError):
         return "timeout"
     if isinstance(error, EventPersistenceError):
         return "recording"
-    return "execution"
+    return classify_tool_error(error)
 
 
 def record_hook(name, call):
     context = get_run_context()
     if context is None or context.event_sink is None:
         return  # Standalone execution makes no persistence claim.
-    data = {"hook": name, "elapsed_ms": call.elapsed_ms, "args": call.args}
+    data = {"hook": name, "elapsed_ms": call.elapsed_ms, "args": call.args, "attempt": call.attempt}
     if name == "after_tool":
         data["result_length"] = len(str(call.result)) if call.result is not None else 0
         data["result_type"] = type(call.result).__name__
@@ -113,7 +117,8 @@ def prepare_run(call):
 
 
 def default_pipeline():
-    # Runtime rules will be added here in step 07, before any business handler.
+    from agent.runtime.policies import before_run_policy, before_tool_policy
+
     recorders = {}
     for name in HOOK_NAMES:
         if name not in ("before_run", "after_run"):
@@ -122,8 +127,9 @@ def default_pipeline():
             recorders[name] = (recorder,)
     return HookPipeline(
         {
-            "before_run": (prepare_run,),
+            "before_run": (prepare_run, before_run_policy),
             **recorders,
+            "before_tool": (before_tool_policy, *recorders["before_tool"]),
         }
     )
 
@@ -160,15 +166,41 @@ class HookToolMiddleware(AgentMiddleware):
         )
 
     def _before(self, request, call):
+        tool = getattr(request, "tool", None)
+        if tool is not None:
+            try:
+                tool.tool_call_schema.model_validate(call.args)
+            except ValueError as exc:
+                raise HookRejected("Invalid tool arguments") from exc
         if request.tool_call["name"] == "task":
             if call.target not in self.allowed_targets:
                 raise HookRejected(f"Subagent target is not allowed: {call.target}")
             self.hooks.emit("before_delegate", call)
         self.hooks.emit("before_tool", call)
 
+    def _retry_delay(self, request, call, exc):
+        from agent.runtime.policies import classify_tool_error, policy_for_run
+
+        if get_run_context() is None:
+            return None
+        limits = policy_for_run().retry
+        if (
+            request.tool_call["name"] not in limits.tools
+            or call.attempt >= limits.max_retries
+            or classify_tool_error(exc) != "transient"
+        ):
+            return None
+        return limits.delay_seconds
+
     def _error(self, call, exc):
         call.error = exc
-        call.status = error_category(exc) if error_category(exc) in ("rejected", "cancelled") else "failed"
+        call.status = (
+            "rejected"
+            if isinstance(exc, HookRejected)
+            else "cancelled"
+            if error_category(exc) == "cancelled"
+            else "failed"
+        )
         self.hooks.emit("on_error", call)
 
     def _returned(self, call):
@@ -192,46 +224,68 @@ class HookToolMiddleware(AgentMiddleware):
     def wrap_tool_call(self, request, handler):
         call = self._call(request)
         token = active_call.set(call)
-        started = monotonic()
         try:
-            self._before(request, call)
-            call.executed = True
-            call.result = handler(request)
-            self._returned(call)
-            return call.result
-        except HookRejected as exc:
-            self._error(call, exc)
-            return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
-        except BaseException as exc:
-            self._error(call, exc)
-            raise
+            while True:
+                started = monotonic()
+                try:
+                    self._before(request, call)
+                    call.executed = True
+                    call.result = handler(request)
+                    self._returned(call)
+                    return call.result
+                except HookRejected as exc:
+                    self._error(call, exc)
+                    return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
+                except Exception as exc:
+                    self._error(call, exc)
+                    delay = self._retry_delay(request, call, exc)
+                    if delay is None:
+                        raise
+                except BaseException as exc:
+                    self._error(call, exc)
+                    raise
+                finally:
+                    self._after(request, call, started)
+                call.attempt += 1
+                call.error, call.status, call.result, call.executed = None, "running", None, False
+                sleep(delay)
         finally:
-            try:
-                self._after(request, call, started)
-            finally:
-                active_call.reset(token)
+            active_call.reset(token)
 
     async def awrap_tool_call(self, request, handler):
         call = self._call(request)
         token = active_call.set(call)
-        started = monotonic()
         try:
-            self._before(request, call)
-            call.executed = True
-            call.result = await handler(request)
-            self._returned(call)
-            return call.result
-        except HookRejected as exc:
-            self._error(call, exc)
-            return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
-        except BaseException as exc:
-            self._error(call, exc)
-            raise
+            while True:
+                started = monotonic()
+                try:
+                    self._before(request, call)
+                    call.executed = True
+                    call.result = await handler(request)
+                    self._returned(call)
+                    return call.result
+                except HookRejected as exc:
+                    self._error(call, exc)
+                    return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
+                except Exception as exc:
+                    self._error(call, exc)
+                    delay = self._retry_delay(request, call, exc)
+                    if delay is None:
+                        raise
+                except BaseException as exc:
+                    self._error(call, exc)
+                    raise
+                finally:
+                    self._after(request, call, started)
+                call.attempt += 1
+                call.error, call.status, call.result, call.executed = None, "running", None, False
+                try:
+                    await asyncio.sleep(delay)
+                except asyncio.CancelledError as exc:
+                    self._error(call, exc)
+                    raise
         finally:
-            try:
-                self._after(request, call, started)
-            finally:
-                active_call.reset(token)
+            active_call.reset(token)
 
 
 class HookSubagentRunnable(Runnable):

@@ -4,6 +4,8 @@
 
 ---
 
+第 07 步的运行配置集中在 `config/runtime.yml`：工具执行前检查 SQL、文件路径和调用预算；用户源文件位于本轮 `uploads/` 并保持只读。数据库查询需要独立的 `MYSQL_READONLY_USER`、`MYSQL_READONLY_PASSWORD`，旧管理员字段不再用于查询；账号会在实际查询前接受权限核验。人工配置示例见 `sql/read_only_user.example.sql`，验证范围和限制见 `docs/implementation/07-policies.md`。
+
 ## 🏗️ 架构
 
 ### 整体架构图

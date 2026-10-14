@@ -171,6 +171,8 @@ class EventSink:
         error = redact_text(error) if error is not None else None
         kind = "task_result" if status == "completed" else "error" if status == "failed" else f"run_{status}"
         data = {"result": answer} if status == "completed" else {"error": error}
+        if hasattr(context, "call_counts"):
+            data["call_counts"] = dict(context.call_counts)
         hook_failures = getattr(context, "hook_failures", [])
         if recording_error or hook_failures:
             data.update(

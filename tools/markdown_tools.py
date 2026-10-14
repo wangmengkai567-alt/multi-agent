@@ -4,24 +4,25 @@ from pathlib import Path
 try:
     from typing import Annotated
 except ImportError:
-    from typing_extensions import Annotated
+    from typing import Annotated
 from langchain_core.tools import tool
-from api.monitor import monitor
+
 from api.context import get_session_context
+from api.monitor import monitor
 from utils.path_utils import resolve_path
 
 
 # Markdown生成工具
 @tool
 def generate_markdown(
-        content: Annotated[str, "要写入Markdown文档的文本内容"],
-        filename: Annotated[str, "Markdown文档的文件名（不包含扩展名或包含.md）"],
-        path: Annotated[str, "文件保存的绝对路径"] = ""
+    content: Annotated[str, "要写入Markdown文档的文本内容"],
+    filename: Annotated[str, "Markdown文档的文件名（不包含扩展名或包含.md）"],
+    path: Annotated[str, "文件保存的绝对路径"] = "",
 ):
     """根据提供的文本内容，生成对应的Markdown(.md)文件"""
     monitor.report_tool("Markdown文档生成工具", {"写入的文本内容": content})
-    if not filename.endswith('.md'):
-        filename += '.md'
+    if not filename.endswith(".md"):
+        filename += ".md"
 
     # 获取上下文中的会话目录
     session_dir = get_session_context()
@@ -33,7 +34,7 @@ def generate_markdown(
         full_input_path = str(Path(path) / filename)
     else:
         full_input_path = filename
-    full_path_str = resolve_path(full_input_path, session_dir)
+    full_path_str = resolve_path(full_input_path, session_dir, write=True)
     file_path = Path(full_path_str)
 
     # 获取父目录
@@ -44,12 +45,12 @@ def generate_markdown(
             parent_dir.mkdir(parents=True, exist_ok=True)
 
         # 使用 Path 直接写入文本
-        file_path.write_text(content, encoding='utf-8')
+        file_path.write_text(content, encoding="utf-8")
 
         return f"Markdown文件 '{file_path}' 已成功生成并保存。"
     except Exception as e:
         logging.error(f"写入Markdown文件失败: {e}", exc_info=True)
-        return f"生成Markdown文件失败: {str(e)}"
+        raise
 
 
 # -------------------------- 测试代码（仅修改这里，给session_dir配置固定值） --------------------------
@@ -63,15 +64,11 @@ if __name__ == "__main__":
     # ========== 极简测试逻辑（只传path/filename，session_dir已初始化） ==========
     test_content = "# 测试文档\n这是给session_dir配置固定值后的测试内容"
     test_filename = "测试文件"  # 无.md后缀，测试自动补全
-    test_path = "sub_dir"       # 相对路径
+    test_path = "sub_dir"  # 相对路径
 
     # 调用生成函数
     print("===== 开始测试（session_dir已配置为：./test_session_123） =====")
-    result = generate_markdown.invoke({
-        "content": test_content,
-        "filename": test_filename,
-        "path": test_path
-    })
+    result = generate_markdown.invoke({"content": test_content, "filename": test_filename, "path": test_path})
 
     # 验证结果
     print(f"\n调用结果：{result}")

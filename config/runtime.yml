@@ -1,0 +1,19 @@
+budgets:
+  total: 80
+  main_model: 20
+  sub_model: 30
+  review: 5
+  tool: 40
+  retry: 6
+sql:
+  allowed_tables: [orders]
+  max_rows: 100
+  timeout_seconds: 10
+  max_query_chars: 12000
+files:
+  skill_directory: skills
+  max_upload_bytes: 10485760
+retry:
+  max_retries: 1
+  delay_seconds: 0.25
+  tools: [internet_search, list_sql_tables, get_table_data, execute_sql_query, get_assistant_list]

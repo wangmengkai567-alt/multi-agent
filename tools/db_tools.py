@@ -1,213 +1,125 @@
+"""Read-only MySQL tools: validated SQL, verified grants and bounded reads."""
+
+import csv
+import io
 import os
+import re
+from contextlib import contextmanager
+
 from dotenv import load_dotenv
-from api.monitor import monitor
-from mysql.connector import connect, Error
 from langchain_core.tools import tool
+from mysql.connector import connect
 
-load_dotenv()
+from agent.runtime.policies import PolicyError, policy_for_run, require_db_credentials, validate_sql, validate_table
+from api.monitor import monitor
 
 
-# 加载配置文件方便后续使用
 def get_db_config():
-    """Get database configuration from environment variables."""
-    config = {
+    load_dotenv()
+    require_db_credentials()
+    limits = policy_for_run().sql
+    database = os.getenv("MYSQL_DATABASE")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", database):
+        raise PolicyError("Database name must be a simple identifier")
+    return {
         "host": os.getenv("MYSQL_HOST", "localhost"),
         "port": int(os.getenv("MYSQL_PORT", "3306")),
-        "user": os.getenv("MYSQL_USER"),
-        "password": os.getenv("MYSQL_PASSWORD"),
-        "database": os.getenv("MYSQL_DATABASE"),
-        "charset": os.getenv("MYSQL_CHARSET", "utf8mb4"),
-        "collation": os.getenv("MYSQL_COLLATION", "utf8mb4_unicode_ci"),
-        "autocommit": True,
-        "connection_timeout": int(os.getenv("MYSQL_TIMEOUT", "10")),
-        "sql_mode": os.getenv("MYSQL_SQL_MODE", "TRADITIONAL"),
+        "user": os.environ["MYSQL_READONLY_USER"],
+        "password": os.environ["MYSQL_READONLY_PASSWORD"],
+        "database": database,
+        "charset": "utf8mb4",
+        "autocommit": False,
+        "connection_timeout": limits.timeout_seconds,
+        "read_timeout": limits.timeout_seconds,
+        "write_timeout": limits.timeout_seconds,
+        "allow_local_infile": False,
+        "use_pure": True,
     }
-    # 移除 None 值（核心必要操作）
-    config = {k: v for k, v in config.items() if v is not None}
 
-    # 补充：校验核心配置是否存在（可选但推荐）
-    required_keys = ["user", "password", "database"]
-    missing_keys = [k for k in required_keys if k not in config]
-    if missing_keys:
-        raise ValueError(f"缺失数据库核心配置：{', '.join(missing_keys)}")
 
-    return config
+def validate_readonly_grants(grants, database):
+    """Fail closed on write privileges, roles, global SELECT or unknown grants."""
+    if not grants:
+        raise PolicyError("Could not verify database account grants")
+    selectable = False
+    for row in grants:
+        grant = row[0]
+        match = re.fullmatch(
+            r"GRANT (.+?) ON (`[^`]+`|\*|[A-Za-z0-9_]+)\.(`[^`]+`|\*|[A-Za-z0-9_]+) TO (?:`[^`]+`|'[^']+')@(?:`[^`]+`|'[^']+')",
+            grant,
+            re.IGNORECASE,
+        )
+        if not match:
+            raise PolicyError("Database account has unsupported grants or roles")
+        privileges = {part.strip().upper() for part in match[1].split(",")}
+        schema, table = match[2].strip("`"), match[3].strip("`")
+        if privileges == {"USAGE"} and schema == "*" and table == "*":
+            continue
+        if not privileges <= {"SELECT", "SHOW VIEW"} or schema != database:
+            raise PolicyError("Database account must have only read-only privileges in the configured database")
+        if "SELECT" in privileges:
+            selectable = True
+    if not selectable:
+        raise PolicyError("Database account has no SELECT privilege")
 
-@tool
-def list_sql_tables()->str:
-    """
-    查询当前库中所有可用的表！
-    作用：为了模型识别有哪些可用的表！方便进行后续的自定义sql查询
-    :return: 有表： 可用的表有：表1,表2,表3....  没有表: 没有可用的表   出现异常：查询出现异常：异常信息
-    """
 
-    # 埋点,调用工具了告诉前端哪个工具被调用了！！
-    monitor.report_tool(tool_name="数据库表名查询工具：list_sql_tables", args={})
-    # 加载数据库信息配置
+@contextmanager
+def readonly_cursor():
     config = get_db_config()
-
-    # 1. 创建一个链接
-    # 2. 创建cursor
-    # 3. cursor执行sql语句
-    # 4. cursor获取返回结果
-    # 5. 释放连接和cursor资源
-    # 确保要捕捉异常信息，返回异常提示，避免直接报错！
-    try:
-        # 确保资源使用完毕一定释放 with
-        with connect(**config) as  conn:
-            with conn.cursor() as cursor:
-                sql = "show tables"
-                cursor.execute(sql)
-                # 捕捉执行结果 要所有的表名称
-                # [(表1),(表2),(表3)]
-                tables = cursor.fetchall()
-                if not tables:
-                    return "没有可用的表"
-                # 可用的表有：表1,表2,表3....
-                # [表1,表2,表3]
-                table_names = [table[0] for table in tables]
-                return f"可用的表有：{', '.join(table_names)}"
-    except Error as e:
-        return f"查询出现异常：{str(e)}"
+    limits = policy_for_run().sql
+    with connect(**config) as connection:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SHOW GRANTS")
+                validate_readonly_grants(cursor.fetchall(), config["database"])
+                cursor.execute("SET SESSION MAX_EXECUTION_TIME = %s", (limits.timeout_seconds * 1000,))
+                cursor.execute("SET SESSION sql_mode = 'STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION'")
+                connection.start_transaction(readonly=True)
+                yield cursor
+        finally:
+            connection.rollback()
 
 
-@tool
-def get_table_data(table_name)->str:
-    """
-    查询指定表名的数据！当前工具调用之前，必须先调用list_sql_tables完成表名的校验！
-    此工具的作用：1.可以完成单表数据的查询 2. 可以为多表查询提供表结果信息（列名&数据格式）
-    :param table_name: 表名
-    :return: csv格式的数据（模拟表格数据格式）
-             1.第一行是列信息，列之间使用,（英文的逗号）分割
-             2.第二行开始是表数据，值之间也使用,(英文的逗号)分割
-             3.行和行之间使用\n分割
-             4.至多表数据查询100条
-             例如：
-                id,name,age\n -> 列头
-                1,张三,18\n
-                1,张三,18\n    -> 至多查询100条
-                1,张三,18\n
-                1,张三,18\n
-    """
-    # 埋点,调用工具了告诉前端哪个工具被调用了！！
-    monitor.report_tool(tool_name="数据库表数据查询工具：get_table_data", args={"table_name":table_name})
-
-    # 获取数据库参数
-    config = get_db_config()
-    # 1. 创建一个链接
-    # 2. 创建cursor
-    # 3. cursor执行sql语句
-    # 4. cursor获取返回结果
-    # 5. 释放连接和cursor资源
-    # 确保要捕捉异常信息，返回异常提示，避免直接报错！
-    try:
-        # 1. 创建一个链接
-        with connect(**config) as  conn:
-            # 2. 创建cursor
-            with conn.cursor() as cursor:
-                # 3. cursor执行sql语句
-                sql = f"select * from {table_name} limit 100"
-                cursor.execute(sql)
-                # 4. cursor获取返回结果
-                # 4.1 获取列的信息
-                # 返回的查询结果的列的信息
-                # description => [(id,列长度...),(),()]
-                # 如果查询没有结果 -》 description 也是None
-                description = cursor.description
-                if not description:
-                    return f"数据表：{table_name}为空没有数据！"
-                # 4.2 获取查询结果
-                # description =>  [(id,列长度...),(date,....),()] => 元组 index = 0 列名
-                # [列1,列2,列3...]
-                columns = [ desc[0] for desc in description ] # [1,2,3,4]
-                # 表数据
-                # [(1,张三),(2,李四),(3,二狗子)]
-                rows = cursor.fetchall()
-                # (1,张三) -> ('1','张三') -> '1,张三'
-                # ['1,张三','1,张三','1,张三','1,张三','1,张三']
-                results = [ ",".join(map(str,row)) for row in rows]
-
-                # columns -> csv -> header
-                # id,name,age
-                header_str = ",".join(columns)
-                # '1,张三'\n
-                data_str = "\n".join(results)
-                return f"{header_str}\n{data_str}"
-    except Error as e:
-        return f"查询出现异常：{str(e)}"
+def run_select(query):
+    bounded = validate_sql(query)
+    with readonly_cursor() as cursor:
+        cursor.execute(bounded)
+        if not cursor.description:
+            raise PolicyError("Query did not return a read-only result set")
+        rows = cursor.fetchmany(policy_for_run().sql.max_rows)
+        output = io.StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\n")
+        writer.writerow([item[0] for item in cursor.description])
+        writer.writerows(rows)
+        return output.getvalue()
 
 
 @tool
-def execute_sql_query(query)->str:
-    """
-    执行自定义查询sql语句！切记：执行之前，需要通过执行 list_sql_tables明确表名！执行get_table_data
-    明确表结构和数据格式！
-    :param query: 要执行的自定义sql语句
-    :return: csv格式的数据（模拟表格数据格式）
-             1.第一行是列信息，列之间使用,（英文的逗号）分割
-             2.第二行开始是表数据，值之间也使用,(英文的逗号)分割
-             3.行和行之间使用\n分割
-             4.至多表数据查询100条
-             例如：
-                id,name,age\n -> 列头
-                1,张三,18\n
-                1,张三,18\n    -> 至多查询100条
-                1,张三,18\n
-                1,张三,18\n
-    """
-    # 埋点,调用工具了告诉前端哪个工具被调用了！！
-    monitor.report_tool(tool_name="数据库表数据查询工具：execute_sql_query", args={"query":query})
-
-    # 获取数据库参数
-    config = get_db_config()
-    # 1. 创建一个链接
-    # 2. 创建cursor
-    # 3. cursor执行sql语句
-    # 4. cursor获取返回结果
-    # 5. 释放连接和cursor资源
-    # 确保要捕捉异常信息，返回异常提示，避免直接报错！
-    try:
-        # 1. 创建一个链接
-        with connect(**config) as  conn:
-            # 2. 创建cursor
-            with conn.cursor() as cursor:
-                # 3. cursor执行sql语句
-                cursor.execute(query)
-                # 4. cursor获取返回结果
-                # 4.1 获取列的信息
-                # 返回的查询结果的列的信息
-                # description => [(id,列长度...),(),()]
-                # 如果查询没有结果 -》 description 也是None
-                description = cursor.description
-                if not description:
-                    return f"执行自定义SQL语句查询没有结果，sql为：{query}！"
-                # 4.2 获取查询结果
-                # description =>  [(id,列长度...),(date,....),()] => 元组 index = 0 列名
-                # [列1,列2,列3...]
-                columns = [ desc[0] for desc in description ] # [1,2,3,4]
-                # 表数据
-                # [(1,张三),(2,李四),(3,二狗子)]
-                rows = cursor.fetchall()
-                # (1,张三) -> ('1','张三') -> '1,张三'
-                # ['1,张三','1,张三','1,张三','1,张三','1,张三']
-                results = [ ",".join(map(str,row)) for row in rows]
-
-                # columns -> csv -> header
-                # id,name,age
-                header_str = ",".join(columns)
-                # '1,张三'\n
-                data_str = "\n".join(results)
-                return f"{header_str}\n{data_str}"
-    except Error as e:
-        return f"查询出现异常：{str(e)}"
+def list_sql_tables() -> str:
+    """List only configured allowed tables in the current read-only database."""
+    monitor.report_tool("数据库表名查询工具：list_sql_tables", {})
+    with readonly_cursor() as cursor:
+        # One exact lookup per permitted table; never return unrestricted metadata.
+        names = []
+        for name in policy_for_run().sql.allowed_tables:
+            cursor.execute("SHOW TABLES LIKE %s", (name,))
+            row = cursor.fetchone()
+            if row and row[0] == name:
+                names.append(name)
+        return "可用的表有：" + ", ".join(names) if names else "没有可用的表"
 
 
+@tool
+def get_table_data(table_name: str) -> str:
+    """Read columns and a bounded sample from a configured allowed table."""
+    validate_table(table_name)
+    monitor.report_tool("数据库表数据查询工具：get_table_data", {"table_name": table_name})
+    return run_select(f"SELECT * FROM `{table_name}`")
 
-if __name__ == "__main__":
-    print(execute_sql_query("SELECT * FROM orders WHERE category = '数码电子'"))
 
-
-
-
-
-
+@tool
+def execute_sql_query(query: str) -> str:
+    """Execute one validated SELECT, with allowed tables, row limit and timeout."""
+    validate_sql(query)
+    monitor.report_tool("数据库表数据查询工具：execute_sql_query", {"query": query})
+    return run_select(query)

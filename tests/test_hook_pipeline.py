@@ -326,6 +326,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         state = await runtime._build_agent(None).ainvoke({"messages": [("user", "query")]})
         assert state["messages"][-1].content == "done"
         assert executions == ["db", "search", "knowledge"]
+        assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 0, "tool": 6, "retry": 0}
         await sink.flush(context.run_id)
         events = (await store.history(context.run_id))["events"]
         for target in executions:
