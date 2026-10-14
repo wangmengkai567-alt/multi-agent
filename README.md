@@ -1,28 +1,6 @@
-<p align="center">
-  <h1 align="center">🤖 MultiAgent-Search</h1>
-  <p align="center"><b>轻量级多智能体协作系统 —— AI Agent 开发入门实战项目</b></p>
-  <p align="center">
-    <img src="https://img.shields.io/badge/Python-3.10+-blue.svg" alt="Python">
-    <img src="https://img.shields.io/badge/FastAPI-0.129-green.svg" alt="FastAPI">
-    <img src="https://img.shields.io/badge/LangGraph-1.0-orange.svg" alt="LangGraph">
-    <img src="https://img.shields.io/badge/deepagents-0.4-purple.svg" alt="deepagents">
-    <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
-    <img src="https://img.shields.io/badge/适合-学习练手-brightgreen.svg" alt="learning">
-  </p>
-</p>
-
----
-
 ## 🎯 这是什么
 
-一个 **不到 1000 行代码** 的 AI Agent 学习项目。用最精简的方式展示如何基于 LangChain 生态构建**多智能体协作系统** — 一个"主智能体"像团队负责人一样调度三个"子智能体"（网络搜索、数据库查询、知识库检索）协同完成复杂任务。
-
-**如果你是这样的人，这项目就是为你准备的 👇**
-
-- 正在学 LangChain / LangGraph，想找一个**完整、能跑**的实战项目
-- 对"多智能体编排"感兴趣，但不想一上来就看复杂的 AutoGPT / CrewAI 源码
-- 想理解 **FastAPI + WebSocket + Agent** 怎么组合成一个真实可用的系统
-- 面试前需要一个 AI Agent 项目充实简历，并且能讲清楚每个设计决策
+针对开源项项目：`https://github.com/jayergood/MultiAgent-Search` 的二次开发
 
 ---
 
