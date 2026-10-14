@@ -26,8 +26,14 @@ class RecordingMonitor:
     def report_session_dir(self, path):
         pass
 
-    def report_assistant(self, name, args):
+    def report_assistant(self, name, args, **kwargs):
         self.assistants.append((name, args))
+
+    def report_tool_result(self, message):
+        pass
+
+    def report_tool_request(self, *args):
+        pass
 
     def report_task_result(self, result):
         self.results.append(result)
@@ -45,7 +51,6 @@ async def isolated_runtime(sandbox_dir, monkeypatch):
     monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
     monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
     monkeypatch.setattr(server, "run_db_path", sandbox_dir / "data" / "runs.db")
-    monkeypatch.setattr(server, "monitor", recorder)
     yield recorder
     await server.manager.shutdown()
     await runtime.shutdown_agent()
@@ -201,9 +206,11 @@ async def test_background_completion_and_exception(isolated_runtime, monkeypatch
         assert isolated_runtime.assistants == [("search", {"description": "lookup"})]
         if fail:
             assert "controlled execution failure" in caplog.text
-            assert isolated_runtime.errors and not isolated_runtime.results
+            events = await server.app.state.run_store.list_events(response["run_id"])
+            assert events[-1]["status"] == "failed" and not isolated_runtime.results
         else:
-            assert isolated_runtime.results == ["ANSWER"]
+            events = await server.app.state.run_store.list_events(response["run_id"])
+            assert events[-1]["data"]["result"] == "ANSWER"
 
 
 @pytest.mark.asyncio

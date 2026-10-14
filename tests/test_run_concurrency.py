@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import httpx
@@ -75,21 +76,26 @@ class GatedAgent:
         )
 
 
-@pytest_asyncio.fixture
-async def service(sandbox_dir, monkeypatch):
+@asynccontextmanager
+async def service_runtime(sandbox_dir, monkeypatch):
     agent = GatedAgent()
     recorder = MonitorRecorder()
     monkeypatch.setattr(runtime, "checkpoint_db_path", sandbox_dir / "checkpoints.db")
     monkeypatch.setattr(runtime, "project_root_path", sandbox_dir)
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: agent)
     monkeypatch.setattr(runtime, "monitor", recorder)
-    monkeypatch.setattr(server, "monitor", recorder)
     monkeypatch.setattr(server, "run_db_path", sandbox_dir / "runs.db")
     monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
     monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
     async with server.lifespan(server.app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
             yield client, agent, recorder
+
+
+@pytest_asyncio.fixture
+async def service(sandbox_dir, monkeypatch):
+    async with service_runtime(sandbox_dir, monkeypatch) as value:
+        yield value
 
 
 async def wait_started(agent):
@@ -145,7 +151,8 @@ async def test_two_sessions_run_concurrently_without_mixed_outputs(service):
         saved = (await client.get(f"/api/runs/{record['run_id']}")).json()
         assert saved["status"] == "completed" and saved["answer"] == expected
         assert (context.work_dir / "report.md").read_text(encoding="utf-8") == expected
-        assert ("answer", record["thread_id"], record["run_id"], expected) in recorder.events
+        events = await server.app.state.run_store.list_events(record["run_id"])
+        assert events[-1]["data"]["result"] == expected
     assert get_run_context() is None and get_thread_context() is None and get_session_context() is None
     assert not server.app.state.run_tasks and not server.app.state.agent_tasks
 

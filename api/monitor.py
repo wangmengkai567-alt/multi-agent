@@ -5,6 +5,8 @@ from typing import Any
 
 from fastapi import WebSocket
 
+from agent.runtime.context import get_run_context
+from agent.runtime.events import make_event, redact_text, sanitize
 from api.context import get_thread_context
 
 # 尝试导入全局运行时（用于脚本模式下的流式输出）
@@ -43,63 +45,87 @@ class ToolMonitor:
         """设置 FastAPI 的 WebSocket 管理器"""
         self.websocket_manager = manager
 
-    def _emit(self, event_type: str, message: str, data: dict[str, Any] | None = None):
-        """内部发送方法"""
+    def _emit(self, event_type, message, data=None, *, actor="main", status="info", call_id=None, parent_call_id=None):
+        context = get_run_context()
+        if context is not None and context.event_sink is not None:
+            event = make_event(
+                context.thread_id,
+                context.run_id,
+                event_type,
+                message,
+                data,
+                actor=actor,
+                status=status,
+                call_id=call_id,
+                parent_call_id=parent_call_id or context.run_id,
+            )
+            context.event_sink.submit(event)
+            return
+        # Explicit standalone compatibility; no claim of persistence.
         payload = {
             "type": "monitor_event",
             "event": event_type,
-            "message": message,
-            "data": data or {},
+            "message": redact_text(message),
+            "data": sanitize(data or {}),
             "timestamp": datetime.datetime.now().isoformat(),
         }
-
-        # 1. 优先尝试通过 FastAPI WebSocket 发送 (定向推送)
-        if self.websocket_manager:
+        if self.websocket_manager and get_thread_context():
             try:
-                # 获取当前线程 ID
-                thread_id = get_thread_context()
-
-                # 确保 loop 已加载 [fastapi的事件循环]
-                manager_loop = self.websocket_manager.loop
-
-                if manager_loop:
-                    if thread_id:
-                        self.websocket_manager.schedule_delivery(payload, thread_id)
-                    else:
-                        # 如果没有 thread_id，说明可能是系统级消息，或者未上下文环境
-                        pass
-            except Exception as e:
-                print(f"[Monitor] WebSocket send failed: {e}")
-
-        # 2. 尝试通过全局 runtime 输出 (DeepAgents 脚本模式)
-        # 这使得 simple_agents.py 中的 MockRuntime 能接收到数据
+                self.websocket_manager.schedule_delivery(payload, get_thread_context())
+            except Exception:
+                logging.getLogger(__name__).exception("Standalone monitor delivery failed")
         if builtins and hasattr(builtins, "runtime") and hasattr(builtins.runtime, "stream_writer"):
             try:
                 builtins.runtime.stream_writer(payload)
             except Exception:
-                pass
-
-        # 3. 控制台保底输出 (方便调试)
-        # 加上特殊前缀，方便肉眼识别
-        print(f"\n[Monitor:{event_type}] {message}")
+                logging.getLogger(__name__).exception("Standalone runtime delivery failed")
+        print(f"[Monitor:{event_type}] {payload['message']}")
 
     def report_tool(self, tool_name: str, args: dict[str, Any] = None):
-        """报告工具开始执行"""
-        self._emit("tool_start", f"开始执行工具: {tool_name}", {"tool_name": tool_name, "args": args})
-
-    def report_assistant(self, assistant_name: str, args: dict[str, Any] = None):
-        """报告正在调用的子智能体进度"""
         self._emit(
-            "assistant_call", f"正在调用助手: {assistant_name}", {"assistant_name": assistant_name, "args": args}
+            "tool_start",
+            f"开始执行工具: {tool_name}",
+            {"tool_name": tool_name, "args": args},
+            actor=tool_name,
+            status="started",
+        )
+
+    def report_assistant(self, assistant_name: str, args: dict[str, Any] = None, *, call_id=None):
+        self._emit(
+            "assistant_call",
+            f"模型请求助手: {assistant_name}",
+            {"assistant_name": assistant_name, "args": args},
+            actor=assistant_name,
+            status="requested",
+            call_id=call_id,
+        )
+
+    def report_tool_request(self, name, args, call_id):
+        self._emit(
+            "tool_requested",
+            f"模型请求工具: {name}",
+            {"tool_name": name, "args": args},
+            actor=name,
+            status="requested",
+            call_id=call_id,
+        )
+
+    def report_tool_result(self, message):
+        self._emit(
+            "tool_returned",
+            "工具调用返回",
+            {"tool_name": message.name, "result_length": len(str(message.content))},
+            actor=message.name or "tool",
+            status="failed" if message.status == "error" else "returned",
+            call_id=message.tool_call_id,
         )
 
     def report_task_result(self, result: str):
-        """报告任务最终结果"""
-        self._emit("task_result", "任务执行完成", {"result": result})
+        self._emit("task_result", "任务执行完成", {"result": result}, status="completed")
 
     def report_session_dir(self, path: str):
         """报告任务工作目录"""
-        self._emit("session_created", f"工作目录已创建: {path}", {"path": path})
+        self._emit("session_created", "本轮工作目录已创建", {"path": path}, actor="workspace", status="ready")
 
 
 # 全局单例实例

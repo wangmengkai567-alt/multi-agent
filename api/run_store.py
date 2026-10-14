@@ -1,6 +1,7 @@
 """Versioned SQLite run records with atomic admission and terminal transitions."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -43,7 +44,7 @@ class RunStore:
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError(f"Unsupported run database schema version: {version}")
             if version == 0:
                 try:
@@ -71,7 +72,93 @@ class RunStore:
                     await self.connection.rollback()
                     raise
 
-    async def create(self, thread_id: str, question: str, *, run_id: str | None = None) -> dict:
+            if version < 2:
+                try:
+                    await self.connection.executescript("""
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE events (
+                            run_id TEXT NOT NULL REFERENCES runs(run_id),
+                            event_seq INTEGER NOT NULL,
+                            thread_id TEXT NOT NULL,
+                            event TEXT NOT NULL,
+                            call_id TEXT NOT NULL,
+                            parent_call_id TEXT,
+                            actor TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            timestamp TEXT NOT NULL,
+                            message TEXT NOT NULL,
+                            data TEXT NOT NULL,
+                            PRIMARY KEY(run_id,event_seq)
+                        );
+                        PRAGMA user_version = 2;
+                        COMMIT;
+                    """)
+                except BaseException:
+                    await self.connection.rollback()
+                    raise
+
+    async def _append_event(self, event):
+        record = await self._get(event["run_id"])
+        if record is None or record["thread_id"] != event["thread_id"]:
+            raise ValueError("Event does not belong to an existing run/session")
+        async with self.connection.execute(
+            "SELECT COALESCE(MAX(event_seq),0)+1 FROM events WHERE run_id=?", (event["run_id"],)
+        ) as cursor:
+            seq = (await cursor.fetchone())[0]
+        saved = dict(event, event_seq=seq)
+        await self.connection.execute(
+            """INSERT INTO events
+               (run_id,event_seq,thread_id,event,call_id,parent_call_id,actor,status,timestamp,message,data)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                saved["run_id"],
+                seq,
+                saved["thread_id"],
+                saved["event"],
+                saved["call_id"],
+                saved["parent_call_id"],
+                saved["actor"],
+                saved["status"],
+                saved["timestamp"],
+                saved["message"],
+                json.dumps(saved["data"], ensure_ascii=False),
+            ),
+        )
+        return saved
+
+    async def append_event(self, event):
+        async with self._lock:
+            try:
+                await self.connection.execute("BEGIN IMMEDIATE")
+                saved = await self._append_event(event)
+                await self.connection.commit()
+                return saved
+            except BaseException:
+                await self.connection.rollback()
+                raise
+
+    async def _list_events(self, run_id):
+        async with self.connection.execute(
+            "SELECT * FROM events WHERE run_id=? ORDER BY event_seq", (run_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [dict(row, data=json.loads(row["data"])) for row in rows]
+
+    async def list_events(self, run_id: str):
+        async with self._lock:
+            return await self._list_events(run_id)
+
+    async def history(self, run_id: str):
+        async with self._lock:
+            record = await self._get(run_id)
+            return {"run": record, "events": await self._list_events(run_id)} if record else None
+
+    async def list_active(self):
+        async with self._lock:
+            async with self.connection.execute("SELECT * FROM runs WHERE status IN ('queued','running')") as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def create(self, thread_id: str, question: str, *, run_id: str | None = None, event=None) -> dict:
         run_id = run_id or str(uuid4())
         record = dict(
             run_id=run_id,
@@ -89,6 +176,8 @@ class RunStore:
                     "INSERT INTO runs (run_id,thread_id,question,status,created_at) VALUES (?,?,?,'queued',?)",
                     (run_id, thread_id, question, record["created_at"]),
                 )
+                if event is not None:
+                    record["saved_event"] = await self._append_event(event)
                 await self.connection.commit()
             except aiosqlite.IntegrityError:
                 await self.connection.rollback()
@@ -113,7 +202,7 @@ class RunStore:
         async with self._lock:
             return await self._get(run_id)
 
-    async def start(self, run_id: str) -> bool:
+    async def start(self, run_id: str, *, event=None):
         async with self._lock:
             try:
                 cursor = await self.connection.execute(
@@ -121,13 +210,14 @@ class RunStore:
                 )
                 changed = cursor.rowcount == 1
                 await cursor.close()
+                saved = await self._append_event(event) if changed and event is not None else None
                 await self.connection.commit()
-                return changed
+                return saved if event is not None else changed
             except BaseException:
                 await self.connection.rollback()
                 raise
 
-    async def finish(self, run_id: str, status: str, *, answer=None, error=None) -> bool:
+    async def finish(self, run_id: str, status: str, *, answer=None, error=None, event=None):
         if status not in TERMINAL:
             raise ValueError(f"Not a terminal status: {status}")
         if status == "completed" and not isinstance(answer, str):
@@ -141,8 +231,9 @@ class RunStore:
                 )
                 changed = cursor.rowcount == 1
                 await cursor.close()
+                saved = await self._append_event(event) if changed and event is not None else None
                 await self.connection.commit()
-                return changed
+                return saved if event is not None else changed
             except BaseException:
                 await self.connection.rollback()
                 raise

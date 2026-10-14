@@ -21,7 +21,8 @@ sys.path.insert(0, str(project_root))
 # Import agent runner and monitor
 from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
 from agent.runtime.context import RunContext, reset_run_context, set_run_context  # noqa: E402
-from api.monitor import manager, monitor  # noqa: E402
+from agent.runtime.events import EventSink  # noqa: E402
+from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -35,22 +36,25 @@ def _task_finished(task, run_id):
     if not task.cancelled():
         error = task.exception()
         if error is not None:
-            logger.error("Agent run %s failed", run_id, exc_info=(type(error), error, error.__traceback__))
+            logger.error(
+                "Agent execution/recording raised for run %s",
+                run_id,
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
 
-async def _execute_run(store, record, context):
+async def _execute_run(record, context):
     token = set_run_context(context)
     try:
-        if not await store.start(context.run_id):
+        if not await context.event_sink.start(context):
             return
         answer = await run_deep_agent(record["question"], context.thread_id)
-        if await store.finish(context.run_id, "completed", answer=answer):
-            monitor.report_task_result(answer)
+        await context.event_sink.finish(context, "completed", answer=answer)
     except asyncio.CancelledError:
-        await store.finish(context.run_id, "cancelled", error="Service execution cancelled")
+        await context.event_sink.finish(context, "cancelled", error="Service execution cancelled")
         raise
     except Exception as exc:
-        await store.finish(context.run_id, "failed", error=str(exc))
+        await context.event_sink.finish(context, "failed", error=str(exc))
         raise
     finally:
         reset_run_context(token)
@@ -63,10 +67,13 @@ async def lifespan(app):
     app.state.submission_lock = asyncio.Lock()
     app.state.stopping = False
     store = None
+    sink = None
     try:
         await initialize_agent()
         store = await RunStore.open(run_db_path)
         app.state.run_store = store
+        sink = EventSink(store, manager.schedule_delivery)
+        app.state.event_sink = sink
         output_dir.mkdir(exist_ok=True)
         updated_dir.mkdir(exist_ok=True)
         manager.set_loop(asyncio.get_running_loop())
@@ -80,16 +87,20 @@ async def lifespan(app):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         try:
-            await manager.shutdown()
+            if sink is not None:
+                try:
+                    await sink.interrupt_active("Service shut down before execution completed")
+                finally:
+                    await sink.close()
         finally:
             try:
-                if store is not None:
-                    try:
-                        await store.interrupt_active("Service shut down before execution completed")
-                    finally:
-                        await store.close()
+                await manager.shutdown()
             finally:
-                await shutdown_agent()
+                try:
+                    if store is not None:
+                        await store.close()
+                finally:
+                    await shutdown_agent()
 
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
@@ -142,14 +153,15 @@ async def run_task(request: TaskRequest):
     async with app.state.submission_lock:
         if app.state.stopping:
             raise HTTPException(status_code=503, detail="Service is shutting down")
-        store = app.state.run_store
         run_id = str(uuid.uuid4())
         try:
-            record = await store.create(thread_id, request.query, run_id=run_id)
+            record = await app.state.event_sink.create(thread_id, request.query, run_id)
         except asyncio.CancelledError:
             # A cancelled await can race a committed insert in the DB worker.
             # The server-generated ID lets us settle precisely that reservation.
-            await store.finish(run_id, "cancelled", error="Task submission cancelled")
+            await app.state.event_sink.finish(
+                RunContext(run_id, thread_id, output_dir), "cancelled", error="Task submission cancelled"
+            )
             raise
         except RunConflict as exc:
             return JSONResponse(
@@ -161,8 +173,11 @@ async def run_task(request: TaskRequest):
                 },
             )
         run_id = record["run_id"]
-        context = RunContext(run_id, thread_id, output_dir / f"session_{thread_id}" / f"run_{run_id}")
-        task = asyncio.create_task(_execute_run(store, record, context), name=f"run:{run_id}")
+        context = RunContext(
+            run_id, thread_id, output_dir / f"session_{thread_id}" / f"run_{run_id}", event_sink=app.state.event_sink
+        )
+        record = dict(record, question=request.query)
+        task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}")
         app.state.agent_tasks.add(task)
         app.state.run_tasks[run_id] = task
         task.add_done_callback(lambda completed: _task_finished(completed, run_id))
@@ -175,6 +190,14 @@ async def get_run(run_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return record
+
+
+@app.get("/api/runs/{run_id}/history")
+async def get_run_history(run_id: str):
+    history = await app.state.run_store.history(run_id)
+    if history is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return history
 
 
 @app.post("/api/upload")

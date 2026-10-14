@@ -6,7 +6,7 @@ from contextlib import AsyncExitStack, aclosing
 from pathlib import Path
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Overwrite
 
@@ -117,6 +117,7 @@ async def run_deep_agent(task_query, session_id):
             config=config,
             stream_mode="updates",
         )
+        seen_events = set()
         async with aclosing(stream):
             async for chunk in stream:
                 # updates keys identify graph nodes; message type defines the action.
@@ -126,17 +127,40 @@ async def run_deep_agent(task_query, session_id):
                     messages = state.get("messages", [])
                     if isinstance(messages, Overwrite):
                         messages = messages.value
-                    if isinstance(messages, AIMessage):
+                        if isinstance(messages, list | tuple):
+                            current = [
+                                i
+                                for i, item in enumerate(messages)
+                                if isinstance(item, HumanMessage) and item.content == task_query + path_instruction
+                            ]
+                            if current:
+                                messages = messages[current[-1] + 1 :]
+                            elif any(isinstance(item, HumanMessage) for item in messages):
+                                continue
+                    if isinstance(messages, AIMessage | ToolMessage):
                         messages = [messages]
                     if not isinstance(messages, list | tuple):
                         continue
                     for message in messages:
+                        if isinstance(message, ToolMessage):
+                            marker = ("returned", message.tool_call_id)
+                            if marker not in seen_events:
+                                seen_events.add(marker)
+                                monitor.report_tool_result(message)
                         if not isinstance(message, AIMessage):
                             continue
                         for call in message.tool_calls:
+                            marker = ("requested", call["id"])
+                            if marker in seen_events:
+                                continue
+                            seen_events.add(marker)
                             if call["name"] == "task":
                                 args = call["args"]
-                                monitor.report_assistant(args["subagent_type"], {"description": args["description"]})
+                                monitor.report_assistant(
+                                    args["subagent_type"], {"description": args["description"]}, call_id=call["id"]
+                                )
+                            else:
+                                monitor.report_tool_request(call["name"], call["args"], call["id"])
 
         # Only the completed root state is authoritative. Intermediate AI text,
         # tool messages and subagent updates are not final task answers.
@@ -149,7 +173,8 @@ async def run_deep_agent(task_query, session_id):
             monitor.report_task_result(final.text)
         return final.text
     except Exception as exc:
-        monitor._emit("error", f"执行主智能发生异常信息：{exc}")
+        if standalone:
+            monitor._emit("error", f"执行主智能发生异常信息：{exc}")
         raise
     finally:
         reset_session_context(session_token, thread_token)
