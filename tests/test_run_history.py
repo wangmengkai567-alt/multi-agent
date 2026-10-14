@@ -100,8 +100,10 @@ async def test_failure_reason_is_saved_once_and_redacted(history_service, monkey
     await complete(agent, record["run_id"])
     history = (await client.get(f"/api/runs/{record['run_id']}/history")).json()
     assert history["run"]["status"] == "failed"
-    failure = [event for event in history["events"] if event["status"] == "failed"]
+    failure = [event for event in history["events"] if event["event"] == "error"]
     assert len(failure) == 1 and failure[0]["data"]["error"] == history["run"]["error"]
+    classified = [event for event in history["events"] if event["event"] == "on_error"]
+    assert len(classified) == 1 and classified[0]["data"]["error_category"] == "execution"
 
 
 @pytest.mark.asyncio

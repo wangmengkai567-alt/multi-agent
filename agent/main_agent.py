@@ -11,6 +11,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Overwrite
 
 from agent.runtime.context import RunContext, get_run_context, reset_run_context, set_run_context
+from agent.runtime.hooks import HookCall, HookToolMiddleware, hook_subagents, pipeline
 from api.context import reset_session_context, set_session_context, set_thread_context
 from api.monitor import monitor
 
@@ -34,12 +35,14 @@ def _build_agent(saver):
     from tools.pdf_tools import convert_md_to_pdf
     from tools.upload_file_read_tool import read_file_content
 
+    subagents = hook_subagents([database_query_agent, network_search_agent, knowledge_base_agent])
     return create_deep_agent(
         model=model,
         system_prompt=main_agent_content["system_prompt"],
         tools=[generate_markdown, convert_md_to_pdf, read_file_content],
         checkpointer=saver,
-        subagents=[database_query_agent, network_search_agent, knowledge_base_agent],
+        subagents=subagents,
+        middleware=[HookToolMiddleware(allowed_targets=[spec["name"] for spec in subagents])],
     )
 
 
@@ -91,6 +94,8 @@ async def run_deep_agent(task_query, session_id):
     session_token = set_session_context(str(session_dir))
     thread_token = set_thread_context(session_id)
     try:
+        if standalone:
+            pipeline.emit("before_run", HookCall("main", context.run_id))
         session_dir.mkdir(parents=True, exist_ok=True)
         relative_dir = session_dir.relative_to(project_root_path).as_posix()
         upload_dir = project_root_path / "updated" / f"session_{session_id}"
@@ -170,10 +175,14 @@ async def run_deep_agent(task_query, session_id):
         if snapshot.next or not isinstance(final, AIMessage) or final.tool_calls or not final.text:
             raise RuntimeError("Agent completed without a final assistant answer")
         if standalone:
+            pipeline.emit("after_run", HookCall("main", context.run_id, status="completed", result=final.text))
             monitor.report_task_result(final.text)
         return final.text
-    except Exception as exc:
+    except BaseException as exc:
         if standalone:
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            pipeline.emit("on_error", HookCall("main", context.run_id, status=status, error=exc))
+            pipeline.emit("after_run", HookCall("main", context.run_id, status=status, error=exc))
             monitor._emit("error", f"执行主智能发生异常信息：{exc}")
         raise
     finally:

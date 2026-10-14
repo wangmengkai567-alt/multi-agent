@@ -82,12 +82,17 @@ class ToolMonitor:
         print(f"[Monitor:{event_type}] {payload['message']}")
 
     def report_tool(self, tool_name: str, args: dict[str, Any] = None):
+        from agent.runtime.hooks import active_call
+
+        call = active_call.get()
         self._emit(
-            "tool_start",
-            f"开始执行工具: {tool_name}",
+            "tool_progress" if call else "tool_start",
+            f"工具执行中: {tool_name}" if call else f"开始执行工具: {tool_name}",
             {"tool_name": tool_name, "args": args},
             actor=tool_name,
-            status="started",
+            status="running" if call else "started",
+            call_id=call.call_id if call else None,
+            parent_call_id=call.parent_call_id if call else None,
         )
 
     def report_assistant(self, assistant_name: str, args: dict[str, Any] = None, *, call_id=None):

@@ -22,6 +22,7 @@ sys.path.insert(0, str(project_root))
 from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
 from agent.runtime.context import RunContext, reset_run_context, set_run_context  # noqa: E402
 from agent.runtime.events import EventSink  # noqa: E402
+from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
 
@@ -45,19 +46,31 @@ def _task_finished(task, run_id):
 
 async def _execute_run(record, context):
     token = set_run_context(context)
+    outcome = HookCall("main", context.run_id)
+    answer = None
+    error = None
     try:
         if not await context.event_sink.start(context):
             return
+        pipeline.emit("before_run", outcome)
         answer = await run_deep_agent(record["question"], context.thread_id)
-        await context.event_sink.finish(context, "completed", answer=answer)
+        outcome.status, outcome.result = "completed", answer
     except asyncio.CancelledError:
-        await context.event_sink.finish(context, "cancelled", error="Service execution cancelled")
+        outcome.status = "cancelled"
+        error = "Service execution cancelled"
+        pipeline.emit("on_error", HookCall("main", context.run_id, status="cancelled", error=asyncio.CancelledError()))
         raise
     except Exception as exc:
-        await context.event_sink.finish(context, "failed", error=str(exc))
+        outcome.status, outcome.error = "failed", exc
+        error = str(exc)
+        pipeline.emit("on_error", outcome)
         raise
     finally:
-        reset_run_context(token)
+        try:
+            if outcome.status != "running":
+                await finish_run(context, outcome, answer=answer, error=error)
+        finally:
+            reset_run_context(token)
 
 
 @asynccontextmanager

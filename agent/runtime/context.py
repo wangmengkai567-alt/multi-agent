@@ -13,6 +13,7 @@ class RunContext:
     work_dir: Path
     deadline: datetime | None = None
     event_sink: object | None = field(default=None, repr=False)
+    hook_failures: list[str] = field(default_factory=list, repr=False)
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
     )
