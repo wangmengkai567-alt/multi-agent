@@ -44,7 +44,7 @@ async def test_run_record_persists_across_reopen(sandbox_dir):
         assert saved["status"] == "completed" and saved["ended_at"] is not None
         assert await store.get("missing") is None
         async with store.connection.execute("PRAGMA user_version") as cursor:
-            assert (await cursor.fetchone())[0] == 2
+            assert (await cursor.fetchone())[0] == 3
     finally:
         await store.close()
 

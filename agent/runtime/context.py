@@ -18,6 +18,7 @@ class RunContext:
     policy: object | None = field(default=None, repr=False)
     skill_dir: Path | None = None
     budget_lock: object = field(default_factory=RLock, repr=False)
+    delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
     )

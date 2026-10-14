@@ -12,7 +12,7 @@ from langgraph.types import Overwrite
 
 from agent.runtime.backend import run_backend
 from agent.runtime.context import RunContext, get_run_context, reset_run_context, set_run_context
-from agent.runtime.hooks import HookCall, HookToolMiddleware, hook_subagents, pipeline
+from agent.runtime.hooks import HookCall, HookToolMiddleware, pipeline
 from agent.runtime.models import budget_model
 from agent.runtime.policies import load_runtime_policy
 from api.context import reset_session_context, set_session_context, set_thread_context
@@ -32,15 +32,14 @@ def _build_agent(saver):
 
     from agent.llm import model
     from agent.prompts import main_agent_content
-    from agent.subagents.database_query_agent import database_query_agent
-    from agent.subagents.knowledge_base_agent import knowledge_base_agent
-    from agent.subagents.network_search_agent import network_search_agent
+    from agent.subagent_factory import build_subagents
+    from agent.subagent_registry import load_default_registry
     from tools.markdown_tools import generate_markdown
     from tools.pdf_tools import convert_md_to_pdf
     from tools.upload_file_read_tool import read_file_content
 
-    subagents = hook_subagents([database_query_agent, network_search_agent, knowledge_base_agent])
-    subagents = [dict(spec, model=budget_model(spec.get("model", model), "sub_model")) for spec in subagents]
+    registry = load_default_registry()
+    subagents = build_subagents(registry, model)
     return create_deep_agent(
         model=budget_model(model, "main_model"),
         backend=run_backend,
@@ -48,7 +47,7 @@ def _build_agent(saver):
         tools=[generate_markdown, convert_md_to_pdf, read_file_content],
         checkpointer=saver,
         subagents=subagents,
-        middleware=[HookToolMiddleware(allowed_targets=[spec["name"] for spec in subagents])],
+        middleware=[HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True)],
     )
 
 

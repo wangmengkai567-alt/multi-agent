@@ -149,10 +149,11 @@ async def finish_run(context, call, *, answer=None, error=None):
 
 
 class HookToolMiddleware(AgentMiddleware):
-    def __init__(self, actor="main", *, allowed_targets=(), hooks=None):
+    def __init__(self, actor="main", *, allowed_targets=(), hooks=None, managed_delegation=False):
         self.actor = actor
         self.allowed_targets = frozenset(allowed_targets)
         self.hooks = hooks or pipeline
+        self.managed_delegation = managed_delegation
 
     def _call(self, request):
         parent = active_call.get()
@@ -175,7 +176,10 @@ class HookToolMiddleware(AgentMiddleware):
         if request.tool_call["name"] == "task":
             if call.target not in self.allowed_targets:
                 raise HookRejected(f"Subagent target is not allowed: {call.target}")
-            self.hooks.emit("before_delegate", call)
+            if not isinstance(call.args.get("description"), str) or not call.args["description"].strip():
+                raise HookRejected("Task description must not be empty")
+            if not self.managed_delegation:
+                self.hooks.emit("before_delegate", call)
         self.hooks.emit("before_tool", call)
 
     def _retry_delay(self, request, call, exc):
@@ -218,7 +222,7 @@ class HookToolMiddleware(AgentMiddleware):
     def _after(self, request, call, started):
         call.elapsed_ms = (monotonic() - started) * 1000
         self.hooks.emit("after_tool", call)
-        if request.tool_call["name"] == "task" and call.executed:
+        if request.tool_call["name"] == "task" and call.executed and not self.managed_delegation:
             self.hooks.emit("after_subagent", call)
 
     def wrap_tool_call(self, request, handler):

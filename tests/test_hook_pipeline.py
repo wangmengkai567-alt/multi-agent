@@ -271,7 +271,9 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
     def probe(value: str):
         """Fake business query."""
         executions.append(value)
-        assert active_call.get().parent_call_id == f"delegate-{value}"
+        assert (
+            active_call.get().parent_call_id == get_run_context().delegation_calls[f"delegate-{value}"][-1]["call_id"]
+        )
         return "private document must not be logged"
 
     responses = []
@@ -332,7 +334,8 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         for target in executions:
             child = [event for event in events if event["actor"] == f"{target}:probe"]
             assert [event["event"] for event in child] == ["before_tool", "after_tool"]
-            assert all(event["parent_call_id"] == f"delegate-{target}" for event in child)
+            subtask = context.delegation_calls[f"delegate-{target}"][-1]
+            assert all(event["parent_call_id"] == subtask["call_id"] for event in child)
             assert all(event["call_id"] == f"tool-{target}" for event in child)
         assert len([event for event in events if event["event"] == "after_subagent"]) == 3
         assert all(

@@ -96,11 +96,15 @@ class ToolMonitor:
         )
 
     def report_assistant(self, assistant_name: str, args: dict[str, Any] = None, *, call_id=None):
+        from agent.subagent_registry import DISPLAY_NAMES
+
+        target = assistant_name
+        assistant_name = DISPLAY_NAMES.get(target, target)
         self._emit(
             "assistant_call",
             f"模型请求助手: {assistant_name}",
-            {"assistant_name": assistant_name, "args": args},
-            actor=assistant_name,
+            {"assistant_name": assistant_name, "target": target, "args": args},
+            actor=target,
             status="requested",
             call_id=call_id,
         )
@@ -116,13 +120,28 @@ class ToolMonitor:
         )
 
     def report_tool_result(self, message):
+        context = get_run_context()
+        calls = context.delegation_calls.get(message.tool_call_id, []) if context else []
+        subtask = calls[-1] if calls else None
         self._emit(
             "tool_returned",
-            "工具调用返回",
-            {"tool_name": message.name, "result_length": len(str(message.content))},
+            f"{subtask['display_name']}返回主助手" if subtask else "工具调用返回",
+            {
+                "tool_name": message.name,
+                "result_length": len(str(message.content)),
+                **(
+                    {
+                        "request_call_id": message.tool_call_id,
+                        "assistant_name": subtask["display_name"],
+                        "target": subtask["target"],
+                    }
+                    if subtask
+                    else {}
+                ),
+            },
             actor=message.name or "tool",
             status="failed" if message.status == "error" else "returned",
-            call_id=message.tool_call_id,
+            call_id=subtask["call_id"] if subtask else message.tool_call_id,
         )
 
     def report_task_result(self, result: str):

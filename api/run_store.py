@@ -44,7 +44,7 @@ class RunStore:
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise RuntimeError(f"Unsupported run database schema version: {version}")
             if version == 0:
                 try:
@@ -96,6 +96,127 @@ class RunStore:
                 except BaseException:
                     await self.connection.rollback()
                     raise
+
+            if version < 3:
+                try:
+                    await self.connection.executescript("""
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE subtasks (
+                            call_id TEXT PRIMARY KEY,
+                            run_id TEXT NOT NULL REFERENCES runs(run_id),
+                            thread_id TEXT NOT NULL,
+                            request_call_id TEXT,
+                            target TEXT NOT NULL,
+                            display_name TEXT NOT NULL,
+                            description TEXT NOT NULL,
+                            description_length INTEGER NOT NULL,
+                            description_sha256 TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK(status IN
+                                ('queued','running','completed','failed','rejected','cancelled','interrupted')),
+                            deadline TEXT,
+                            created_at TEXT NOT NULL,
+                            ended_at TEXT,
+                            result TEXT,
+                            error TEXT,
+                            check_status TEXT NOT NULL,
+                            CHECK((status IN ('queued','running') AND ended_at IS NULL)
+                                OR (status NOT IN ('queued','running') AND ended_at IS NOT NULL))
+                        );
+                        CREATE INDEX subtasks_by_run ON subtasks(run_id,created_at);
+                        PRAGMA user_version = 3;
+                        COMMIT;
+                    """)
+                except BaseException:
+                    await self.connection.rollback()
+                    raise
+
+    async def _list_subtasks(self, run_id):
+        async with self.connection.execute(
+            "SELECT * FROM subtasks WHERE run_id=? ORDER BY created_at,call_id", (run_id,)
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+    async def list_subtasks(self, run_id):
+        async with self._lock:
+            return await self._list_subtasks(run_id)
+
+    async def record_subtask(self, record, event):
+        """Persist the lifecycle row and its event in one transaction."""
+        async with self._lock:
+            try:
+                await self.connection.execute("BEGIN IMMEDIATE")
+                run = await self._get(record["run_id"])
+                if run is None or run["thread_id"] != record["thread_id"]:
+                    raise ValueError("Subtask does not belong to the run/session")
+                if (
+                    event["run_id"] != record["run_id"]
+                    or event["call_id"] != record["call_id"]
+                    or event["thread_id"] != record["thread_id"]
+                ):
+                    raise ValueError("Subtask event identity mismatch")
+                async with self.connection.execute(
+                    "SELECT * FROM subtasks WHERE call_id=?", (record["call_id"],)
+                ) as cursor:
+                    existing = await cursor.fetchone()
+                if existing and any(
+                    existing[key] != record[key]
+                    for key in ("run_id", "thread_id", "target", "request_call_id", "description_sha256", "deadline")
+                ):
+                    raise ValueError("Subtask identity cannot be changed")
+                if existing and existing["status"] not in ACTIVE:
+                    await self.connection.rollback()
+                    return None
+                if run["status"] not in ACTIVE:
+                    if not existing:
+                        await self.connection.rollback()
+                        return None
+                    record = dict(
+                        record,
+                        status="cancelled" if run["status"] == "cancelled" else "interrupted",
+                        result=None,
+                        error="Parent run has already ended",
+                        ended_at=_now(),
+                    )
+                    event = dict(
+                        event,
+                        status=record["status"],
+                        event=f"subagent_{record['status']}",
+                        message="主任务已结束，子任务不再发布结果",
+                    )
+                if existing is None:
+                    if record["status"] != "queued":
+                        raise ValueError("Subtask must be queued before execution")
+                    columns = tuple(record)
+                    await self.connection.execute(
+                        "INSERT INTO subtasks ("
+                        + ",".join(columns)
+                        + ") VALUES ("
+                        + ",".join("?" for _ in columns)
+                        + ")",
+                        tuple(record[column] for column in columns),
+                    )
+                else:
+                    if record["status"] == "queued" or (
+                        existing["status"] == "queued" and record["status"] == "completed"
+                    ):
+                        raise ValueError("Invalid subtask state transition")
+                    await self.connection.execute(
+                        "UPDATE subtasks SET status=?,result=?,error=?,ended_at=?,check_status=? WHERE call_id=?",
+                        (
+                            record["status"],
+                            record["result"],
+                            record["error"],
+                            record["ended_at"],
+                            record["check_status"],
+                            record["call_id"],
+                        ),
+                    )
+                saved = await self._append_event(event)
+                await self.connection.commit()
+                return saved
+            except BaseException:
+                await self.connection.rollback()
+                raise
 
     async def _append_event(self, event):
         record = await self._get(event["run_id"])
@@ -151,7 +272,15 @@ class RunStore:
     async def history(self, run_id: str):
         async with self._lock:
             record = await self._get(run_id)
-            return {"run": record, "events": await self._list_events(run_id)} if record else None
+            return (
+                {
+                    "run": record,
+                    "events": await self._list_events(run_id),
+                    "subtasks": await self._list_subtasks(run_id),
+                }
+                if record
+                else None
+            )
 
     async def list_active(self):
         async with self._lock:

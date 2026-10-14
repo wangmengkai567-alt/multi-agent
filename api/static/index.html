@@ -215,6 +215,12 @@ const $$ = s => document.querySelectorAll(s);
 const tagMap = {
   session_created: { dot:'s', tag:'s', text:'会话' },
   assistant_call:  { dot:'a', tag:'a', text:'调度' },
+  subagent_queued: { dot:'a', tag:'a', text:'助手接收' },
+  subagent_running:{ dot:'a', tag:'a', text:'助手执行' },
+  subagent_completed:{ dot:'a', tag:'a', text:'助手返回' },
+  subagent_failed: { dot:'e', tag:'e', text:'助手失败' },
+  subagent_rejected:{ dot:'e', tag:'e', text:'助手拒绝' },
+  subagent_cancelled:{ dot:'e', tag:'e', text:'助手取消' },
   tool_start:      { dot:'t', tag:'t', text:'工具' },
   task_result:     { dot:'r', tag:'r', text:'完成' },
   error:           { dot:'e', tag:'e', text:'错误' },

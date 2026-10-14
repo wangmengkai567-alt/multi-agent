@@ -155,13 +155,14 @@ async def test_version_one_migrates_without_losing_runs(sandbox_dir):
     await store.close()
     with sqlite3.connect(path) as connection:
         connection.execute("DROP TABLE events")
+        connection.execute("DROP TABLE subtasks")
         connection.execute("PRAGMA user_version = 1")
     store = await RunStore.open(path)
     try:
         assert await store.get(record["run_id"]) == before
         assert await store.list_events(record["run_id"]) == []
         async with store.connection.execute("PRAGMA user_version") as cursor:
-            assert (await cursor.fetchone())[0] == 2
+            assert (await cursor.fetchone())[0] == 3
     finally:
         await store.close()
 

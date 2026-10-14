@@ -127,13 +127,22 @@ class EventSink:
             try:
                 if event is None:
                     return
-                saved = await self.store.append_event(event)
-                self._dispatch(saved)
+                subtask = event.pop("_subtask", None)
+                saved = (
+                    await self.store.record_subtask(subtask, event)
+                    if subtask is not None
+                    else await self.store.append_event(event)
+                )
+                if saved is not None:
+                    self._dispatch(saved)
             except Exception as exc:
                 self.failures.append((event["run_id"], exc))
                 logger.exception("Event was NOT saved: run=%s", event["run_id"])
             finally:
                 self.queue.task_done()
+
+    def submit_subtask(self, record, event):
+        self.submit(dict(event, _subtask=dict(record)))
 
     async def flush(self, run_id=None):
         # Flush thread-safe queue insertions scheduled by synchronous tools.
