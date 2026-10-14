@@ -1,22 +1,17 @@
-import sys
-import os
-
-# 修复 Windows GBK 编码问题：强制所有输出使用 UTF-8
-os.environ["PYTHONIOENCODING"] = "utf-8"
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-
-import uuid
 import asyncio
-import uvicorn
+import logging
+import shutil
+import sys
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
-from fastapi.responses import FileResponse, HTMLResponse
+
+import uvicorn
+from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
 from pydantic import BaseModel
-from typing import List
-import shutil
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -24,28 +19,61 @@ project_root = current_dir.parent
 sys.path.insert(0, str(project_root))
 
 # Import agent runner and monitor
-# 注意：agent.main_agent 导入时会初始化 main_agent，这可能需要几秒钟
-from agent.main_agent import run_deep_agent
-from api.monitor import manager
+from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
+from api.monitor import manager  # noqa: E402
 
-app = FastAPI(title="DeepAgents API")
+logger = logging.getLogger(__name__)
+
+
+def _task_finished(task):
+    app.state.agent_tasks.discard(task)
+    if not task.cancelled():
+        error = task.exception()
+        if error is not None:
+            logger.error("Agent background task failed", exc_info=(type(error), error, error.__traceback__))
+
+
+@asynccontextmanager
+async def lifespan(app):
+    app.state.agent_tasks = set()
+    app.state.stopping = False
+    try:
+        await initialize_agent()
+        output_dir.mkdir(exist_ok=True)
+        updated_dir.mkdir(exist_ok=True)
+        manager.set_loop(asyncio.get_running_loop())
+        yield
+    finally:
+        app.state.stopping = True
+        tasks = list(app.state.agent_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await manager.shutdown()
+        finally:
+            await shutdown_agent()
+
+
+app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 
 # 挂载输出目录，以便前端访问生成的静态文件
 # 假设输出目录位于项目根目录下的 output
 output_dir = project_root / "output"
-output_dir.mkdir(exist_ok=True)
+
 
 # 定义上传目录 updated
 updated_dir = project_root / "updated"
-updated_dir.mkdir(exist_ok=True)
+
 
 # 挂载静态文件目录 (前端调试页面)
 static_dir = current_dir / "static"
-static_dir.mkdir(exist_ok=True)
+
 app.mount("/static", FastAPIStaticFiles(directory=str(static_dir)), name="static")
 
 # 挂载输出目录 (前端可直接访问生成的文件)
-app.mount("/output", FastAPIStaticFiles(directory=str(output_dir)), name="output")
+app.mount("/output", FastAPIStaticFiles(directory=str(output_dir), check_dir=False), name="output")
+
 
 # 首页
 @app.get("/", response_class=HTMLResponse)
@@ -55,6 +83,7 @@ async def root():
         return index_path.read_text(encoding="utf-8")
     return "<h1>MultiAgent-Search API</h1><p>访问 <a href='/docs'>/docs</a> 查看 API 文档</p>"
 
+
 # 配置 CORS
 app.add_middleware(
     CORSMiddleware,
@@ -63,19 +92,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 class TaskRequest(BaseModel):
     query: str
     thread_id: str = None
-
-@app.on_event("startup")
-async def startup_event():
-    """
-    服务启动时，获取当前运行的事件循环，并绑定到 WebSocket 管理器。
-    确保后台线程能通过 run_coroutine_threadsafe 准确投递消息。
-    """
-    loop = asyncio.get_running_loop()
-    manager.set_loop(loop)
-    print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
 
 
 @app.post("/api/task")
@@ -85,14 +106,20 @@ async def run_task(request: TaskRequest):
 
     # 2. [后台执行] 异步运行 Agent，不阻塞主线程
     # 注意：这里简单的使用 asyncio.create_task 触发，由 main_agent 内部负责实时推送
-    asyncio.create_task(run_deep_agent(request.query, thread_id))
+    if app.state.stopping:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail="Service is shutting down")
+    task = asyncio.create_task(run_deep_agent(request.query, thread_id), name=f"agent:{thread_id}")
+    app.state.agent_tasks.add(task)
+    task.add_done_callback(_task_finished)
 
     # 3. [立即响应]
     return {"status": "started", "thread_id": thread_id}
 
 
 @app.post("/api/upload")
-async def upload_files(files: List[UploadFile] = File(...), thread_id: str = Form(...)):
+async def upload_files(files: list[UploadFile] = File(...), thread_id: str = Form(...)):
     """
     文件上传接口 (File Upload)。
 
@@ -102,7 +129,7 @@ async def upload_files(files: List[UploadFile] = File(...), thread_id: str = For
     3. 供 Agent 在后续任务中读取和分析。
 
     Args:
-        files (List[UploadFile]): 文件对象列表。
+        files (list[UploadFile]): 文件对象列表。
         thread_id (str): 关联的任务会话 ID。
     """
     # 1. [目录准备] 确保上传目录存在
@@ -198,14 +225,16 @@ async def list_files(path: str = None):
             if file_path.is_file():
                 # 计算相对路径，生成下载 URL
                 stat = file_path.stat()
-                files.append({
-                    "name": file_path.name,
-                    "type": "file",
-                    "path": str(file_path),
-                    # "url": f"/outputs/{url_path}",
-                    "size": stat.st_size,
-                    "mtime": stat.st_mtime
-                })
+                files.append(
+                    {
+                        "name": file_path.name,
+                        "type": "file",
+                        "path": str(file_path),
+                        # "url": f"/outputs/{url_path}",
+                        "size": stat.st_size,
+                        "mtime": stat.st_mtime,
+                    }
+                )
 
     except Exception as e:
         print(f"[ERROR] 遍历文件失败: {e}")
@@ -253,10 +282,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
             data = await websocket.receive_text()
 
             # 4. [响应] 回复 pong 消息
-            await websocket.send_json({
-                "type": "pong",
-                "message": f"服务端已收到: {data}"
-            })
+            await websocket.send_json({"type": "pong", "message": f"服务端已收到: {data}"})
 
     except WebSocketDisconnect:
         # 5. [清理] 客户端主动断开
@@ -267,6 +293,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         # 6. [异常] 发生错误时断开
         print(f"[WebSocket] 连接异常: {e}")
         manager.disconnect(websocket, thread_id)
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)

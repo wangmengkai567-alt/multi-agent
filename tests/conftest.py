@@ -1,7 +1,7 @@
 """Offline test defaults, including protection during test collection.
 
-Do not import api.server or agent.main_agent here: they currently construct
-external clients and open the application's checkpoint database on import.
+Application lifecycle tests inject fake agent builders and temporary databases.
+External network access remains disabled during collection and execution.
 """
 
 import os
