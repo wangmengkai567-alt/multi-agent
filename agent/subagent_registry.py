@@ -16,6 +16,21 @@ class ModelConfig:
 class ReviewConfig:
     enabled: bool = False
     max_refinements: int = 1
+    model_check: bool = False
+    required_tools: tuple[str, ...] = ()
+    required_fields: tuple[str, ...] = ()
+    require_sources: bool = False
+
+    def __post_init__(self):
+        if type(self.max_refinements) is not int or self.max_refinements not in (0, 1):
+            raise ValueError("At most one refinement is allowed")
+        if any(type(value) is not bool for value in (self.enabled, self.model_check, self.require_sources)):
+            raise ValueError("Review flags must be booleans")
+        for values in (self.required_tools, self.required_fields):
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise ValueError("Review requirements must be immutable non-empty strings")
 
 
 @dataclass(frozen=True)
@@ -40,8 +55,8 @@ class SubagentRegistry:
                 raise ValueError("Expert display name, description and prompt are required")
             if not isinstance(spec.tools, tuple) or not isinstance(spec.allowed_skill_ids, tuple):
                 raise ValueError("Registry collections must be immutable tuples")
-            if spec.model_config != ModelConfig() or spec.review_config != ReviewConfig() or spec.allowed_skill_ids:
-                raise ValueError("Custom model profiles, review and Skill loading are not yet enabled")
+            if spec.model_config != ModelConfig() or spec.allowed_skill_ids:
+                raise ValueError("Custom model profiles and Skill loading are not yet enabled")
             registered[spec.agent_id] = spec
         self.specs = MappingProxyType(registered)
 
@@ -67,6 +82,16 @@ def load_default_registry():
                 source["description"],
                 source["system_prompt"],
                 tuple(source["tools"]),
+                review_config=ReviewConfig(
+                    enabled=True,
+                    model_check=True,
+                    required_tools={
+                        "db": ("get_table_data", "execute_sql_query"),
+                        "search": ("internet_search",),
+                        "knowledge": ("create_ask_delete",),
+                    }[agent_id],
+                    require_sources=agent_id == "search",
+                ),
             )
             for agent_id, source in sources
         ]

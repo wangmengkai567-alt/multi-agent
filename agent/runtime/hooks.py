@@ -221,6 +221,9 @@ class HookToolMiddleware(AgentMiddleware):
 
     def _after(self, request, call, started):
         call.elapsed_ms = (monotonic() - started) * 1000
+        from agent.reflection import capture_tool
+
+        capture_tool(call)
         self.hooks.emit("after_tool", call)
         if request.tool_call["name"] == "task" and call.executed and not self.managed_delegation:
             self.hooks.emit("after_subagent", call)

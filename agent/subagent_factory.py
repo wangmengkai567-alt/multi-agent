@@ -6,6 +6,7 @@ from deepagents.middleware.summarization import SummarizationMiddleware, _comput
 from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 
+from agent.reflection import ResultReviewer
 from agent.runtime.backend import run_backend
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.hooks import HookToolMiddleware
@@ -47,7 +48,9 @@ def build_subagents(registry, model, *, models=None, hooks=None):
             {
                 "name": spec.agent_id,
                 "description": f"{spec.display_name}：{spec.description}",
-                "runnable": DelegationRunnable(spec, executor, hooks=hooks),
+                "runnable": DelegationRunnable(
+                    spec, executor, hooks=hooks, reviewer=ResultReviewer(spec.review_config, raw_model)
+                ),
             }
         )
     return result

@@ -1,3 +1,5 @@
+review:
+  on_check_failure: reject
 budgets:
   total: 80
   main_model: 20

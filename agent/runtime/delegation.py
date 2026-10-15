@@ -1,5 +1,6 @@
 """The one lifecycle owner at the actual expert execution boundary."""
 
+import json
 import logging
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -9,18 +10,21 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
+from agent.reflection import ResultReviewer, ReviewResult, tool_evidence
 from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event, redact_text
 from agent.runtime.hooks import HookCall, HookRejected, active_call, pipeline
+from agent.runtime.policies import BudgetExceeded, classify_tool_error, reserve_calls
 
 
 class DelegationRunnable(Runnable):
-    def __init__(self, spec, executor, *, hooks=None):
+    def __init__(self, spec, executor, *, hooks=None, reviewer=None):
         from agent.subagent_registry import DISPLAY_NAMES
 
         if spec.agent_id not in DISPLAY_NAMES:
             raise ValueError("Invalid expert executor target")
         self.spec, self.executor, self.hooks = spec, executor, hooks or pipeline
+        self.reviewer = reviewer or ResultReviewer(spec.review_config)
 
     def _prepare(self, inputs):
         context = get_run_context()
@@ -132,15 +136,108 @@ class DelegationRunnable(Runnable):
         if call.executed:
             self.hooks.emit("after_subagent", call)
 
+    def _review_event(self, context, call, result, attempt, kind="subagent_review"):
+        if context.event_sink is None:
+            return
+        try:
+            context.event_sink.submit(
+                make_event(
+                    context.thread_id,
+                    context.run_id,
+                    kind,
+                    f"{self.spec.display_name}："
+                    + ("补充查询" if kind == "subagent_refinement" else "结果检查：" + result.verdict),
+                    dict(result.model_dump(), attempt=attempt),
+                    actor=self.spec.agent_id,
+                    status=result.verdict,
+                    call_id=call.call_id,
+                    parent_call_id=call.parent_call_id,
+                )
+            )
+        except Exception as exc:
+            context.hook_failures.append(f"review {call.call_id}: {redact_text(str(exc))}")
+
+    def _checked(self, context, call, record, result, review, attempt):
+        call.check_status = record["check_status"] = review.verdict
+        self._review_event(context, call, review, attempt)
+        if review.verdict == "passed":
+            return result
+        if review.verdict == "check_incomplete" and self.reviewer.allow_unchecked(review):
+            review_text = json.dumps(
+                dict(review=review.model_dump(), unchecked_result=record["result"]), ensure_ascii=False
+            )
+        else:
+            review_text = json.dumps(dict(review=review.model_dump()), ensure_ascii=False)
+            call.status = "failed"
+            record["error"] = redact_text("; ".join(review.issues))
+        # Never present rejected expert prose as an accepted answer to the parent.
+        result = dict(result, messages=[AIMessage(content=review_text)])
+        call.result = result
+        record["result"] = redact_text(review_text)
+        return result
+
+    def _refine(self, context, call, input, review, attempt):
+        if review.verdict != "insufficient" or attempt >= self.spec.review_config.max_refinements:
+            return None
+        if context.deadline is not None and context.deadline <= datetime.now(UTC):
+            return None
+        reserve_calls("retry")
+        self._review_event(context, call, review, attempt + 1, "subagent_refinement")
+        return dict(input, messages=[*input["messages"], HumanMessage(content=review.revision_instruction)])
+
+    def _dependency(self, error):
+        category = classify_tool_error(error.__cause__ or error)
+        if isinstance(error, BudgetExceeded) or category == "budget":
+            return ReviewResult(verdict="budget_exhausted", issues=["调用预算耗尽"])
+        if category in ("configuration", "permission", "transient"):
+            return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + redact_text(str(error))])
+        return ReviewResult(verdict="tool_failed", issues=["子任务执行失败：" + redact_text(str(error))])
+
     def invoke(self, input, config=None, **kwargs):
+        return self._invoke(input, config, **kwargs)
+
+    def _invoke(self, input, config=None, **kwargs):
         context, call, record = self._prepare(input)
         token = active_call.set(call)
         started = monotonic()
         try:
             self._start(context, call, record)
-            result = self.executor.invoke(input, config, **kwargs)
-            self._returned(call, record, result)
-            return result
+            current = input
+            for attempt in range(self.spec.review_config.max_refinements + 1):
+                evidence = []
+                evidence_token = tool_evidence.set(evidence)
+                dependency = None
+                try:
+                    try:
+                        result = self.executor.invoke(current, config, **kwargs)
+                    except Exception as exc:
+                        dependency = self._dependency(exc) if self.spec.review_config.enabled else None
+                        if dependency is None:
+                            raise
+                        result = {"messages": [AIMessage(content="")]}
+                finally:
+                    tool_evidence.reset(evidence_token)
+                self._returned(call, record, result)
+                if not self.spec.review_config.enabled:
+                    return result
+                review = dependency or self.reviewer.review_sync(
+                    input["messages"][-1].text, record["result"], evidence, config
+                )
+                checked = self._checked(context, call, record, result, review, attempt)
+                try:
+                    current = self._refine(context, call, input, review, attempt)
+                except BudgetExceeded:
+                    return self._checked(
+                        context,
+                        call,
+                        record,
+                        result,
+                        ReviewResult(verdict="budget_exhausted", issues=["补充查询预算耗尽"]),
+                        attempt,
+                    )
+                if current is None:
+                    return checked
+                call.status, record["error"] = "running", None
         except BaseException as exc:
             self._error(call, record, exc)
             raise
@@ -156,9 +253,42 @@ class DelegationRunnable(Runnable):
         started = monotonic()
         try:
             self._start(context, call, record)
-            result = await self.executor.ainvoke(input, config, **kwargs)
-            self._returned(call, record, result)
-            return result
+            current = input
+            for attempt in range(self.spec.review_config.max_refinements + 1):
+                evidence = []
+                evidence_token = tool_evidence.set(evidence)
+                dependency = None
+                try:
+                    try:
+                        result = await self.executor.ainvoke(current, config, **kwargs)
+                    except Exception as exc:
+                        dependency = self._dependency(exc) if self.spec.review_config.enabled else None
+                        if dependency is None:
+                            raise
+                        result = {"messages": [AIMessage(content="")]}
+                finally:
+                    tool_evidence.reset(evidence_token)
+                self._returned(call, record, result)
+                if not self.spec.review_config.enabled:
+                    return result
+                review = dependency or await self.reviewer.review(
+                    input["messages"][-1].text, record["result"], evidence, config
+                )
+                checked = self._checked(context, call, record, result, review, attempt)
+                try:
+                    current = self._refine(context, call, input, review, attempt)
+                except BudgetExceeded:
+                    return self._checked(
+                        context,
+                        call,
+                        record,
+                        result,
+                        ReviewResult(verdict="budget_exhausted", issues=["补充查询预算耗尽"]),
+                        attempt,
+                    )
+                if current is None:
+                    return checked
+                call.status, record["error"] = "running", None
         except BaseException as exc:
             self._error(call, record, exc)
             raise

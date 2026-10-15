@@ -93,11 +93,16 @@ class RetryLimits(StrictConfig):
         return self
 
 
+class ReviewLimits(StrictConfig):
+    on_check_failure: str = Field(default="reject", pattern="^(reject|return_unchecked)$")
+
+
 class RuntimePolicy(StrictConfig):
     budgets: Budgets
     sql: SQLLimits
     files: FileLimits
     retry: RetryLimits
+    review: ReviewLimits = Field(default_factory=ReviewLimits)
 
 
 def load_runtime_policy(path=None):

@@ -263,7 +263,25 @@ def test_fixed_handler_order_and_child_configuration():
 
 @pytest.mark.asyncio
 async def test_production_builder_and_persisted_child_correlation(sandbox_dir, monkeypatch):
+    from dataclasses import replace
+
     import agent.main_agent as runtime
+    import agent.subagent_registry as registry_module
+    from agent.reflection import ReviewResult
+    from agent.subagent_registry import ReviewConfig, SubagentRegistry
+
+    original_registry = registry_module.load_default_registry
+
+    def fake_requirements_registry():
+        # Fake business tools use their own evidence contract; production review remains enabled.
+        return SubagentRegistry(
+            [
+                replace(spec, review_config=ReviewConfig(enabled=True, model_check=True, required_tools=("probe",)))
+                for spec in original_registry().specs.values()
+            ]
+        )
+
+    monkeypatch.setattr(registry_module, "load_default_registry", fake_requirements_registry)
 
     executions = []
 
@@ -283,6 +301,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
                 call("task", {"subagent_type": target, "description": "query"}, f"delegate-{target}"),
                 call("probe", {"value": target}, f"tool-{target}"),
                 AIMessage(content=f"answer-{target}"),
+                AIMessage(content=ReviewResult(verdict="passed").model_dump_json()),
             ]
         )
     responses.append(AIMessage(content="done"))
@@ -328,7 +347,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         state = await runtime._build_agent(None).ainvoke({"messages": [("user", "query")]})
         assert state["messages"][-1].content == "done"
         assert executions == ["db", "search", "knowledge"]
-        assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 0, "tool": 6, "retry": 0}
+        assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 3, "tool": 6, "retry": 0}
         await sink.flush(context.run_id)
         events = (await store.history(context.run_id))["events"]
         for target in executions:
@@ -338,9 +357,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
             assert all(event["parent_call_id"] == subtask["call_id"] for event in child)
             assert all(event["call_id"] == f"tool-{target}" for event in child)
         assert len([event for event in events if event["event"] == "after_subagent"]) == 3
-        assert all(
-            event["data"]["check_status"] == "not_checked" for event in events if event["event"] == "after_subagent"
-        )
+        assert all(event["data"]["check_status"] == "passed" for event in events if event["event"] == "after_subagent")
         assert "private document" not in str(events)
     finally:
         reset_run_context(token)
