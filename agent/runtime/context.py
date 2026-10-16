@@ -18,6 +18,12 @@ class RunContext:
     policy: object | None = field(default=None, repr=False)
     skill_dir: Path | None = None
     skill_ids: tuple[str, ...] = ()
+    business_mode: str = "ordinary"
+    required_sources: tuple[str, ...] = ()
+    required_uploads: tuple[str, ...] = ()
+    workflow: dict | None = field(default=None, repr=False)
+    upload_reads: dict = field(default_factory=dict, repr=False)
+    upload_coverage: dict = field(default_factory=dict, repr=False)
     skill_states: set = field(default_factory=set, repr=False)
     skill_reads: dict = field(default_factory=dict, repr=False)
     skill_bodies: dict = field(default_factory=dict, repr=False)

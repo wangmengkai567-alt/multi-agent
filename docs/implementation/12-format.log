@@ -1,0 +1,4 @@
+$ .venv/Scripts/python.exe -X utf8 -m ruff format --check agent/runtime/workflows.py agent/runtime/context.py agent/runtime/hooks.py agent/runtime/policies.py agent/runtime/delegation.py agent/results.py agent/main_agent.py api/server.py tests/test_workflow_order.py
+9 files already formatted
+
+Exit code: 0

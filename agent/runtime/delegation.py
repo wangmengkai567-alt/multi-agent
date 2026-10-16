@@ -17,6 +17,7 @@ from agent.runtime.events import make_event, redact_text
 from agent.runtime.hooks import HookCall, HookRejected, active_call, pipeline
 from agent.runtime.policies import BudgetExceeded, classify_tool_error, reserve_calls
 from agent.runtime.skills import skill_scope
+from agent.runtime.workflows import prepare_delegate
 
 
 class DelegationRunnable(Runnable):
@@ -106,7 +107,6 @@ class DelegationRunnable(Runnable):
             context.hook_failures.append(f"subtask {call.call_id}: {redact_text(str(exc))}")
 
     def _start(self, context, call, record):
-        self._save(context, call, record, "queued")
         self.hooks.emit("before_delegate", call)
         if context.deadline is not None and context.deadline <= datetime.now(UTC):
             raise HookRejected("Run deadline has expired; expert execution was not started")
@@ -205,6 +205,11 @@ class DelegationRunnable(Runnable):
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
         try:
+            self._save(context, call, record, "queued")
+            if context.business_mode == "internal_external":
+                if context.event_sink is None:
+                    raise HookRejected("Workflow execution requires durable results")
+                sync_result(prepare_delegate(context, call), context.event_sink)
             self._start(context, call, record)
             if self.spec.agent_id == "search" and context.event_sink is not None:
                 input = sync_result(self.results.search_input(context, call, input), context.event_sink)
@@ -270,6 +275,8 @@ class DelegationRunnable(Runnable):
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
         try:
+            self._save(context, call, record, "queued")
+            await prepare_delegate(context, call)
             self._start(context, call, record)
             if self.spec.agent_id == "search":
                 input = await self.results.search_input(context, call, input)

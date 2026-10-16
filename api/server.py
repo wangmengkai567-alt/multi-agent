@@ -5,13 +5,14 @@ import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
-from pydantic import BaseModel, Field, StrictStr, field_validator
+from pydantic import BaseModel, Field, StrictStr, field_validator, model_validator
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -25,6 +26,7 @@ from agent.runtime.events import EventSink  # noqa: E402
 from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
 from agent.runtime.policies import load_runtime_policy  # noqa: E402
 from agent.runtime.skills import validate_skill_ids  # noqa: E402
+from agent.runtime.workflows import finalize_answer  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
 from utils.path_utils import PathDenied, confined_path, validate_filename, validate_identifier  # noqa: E402
@@ -58,6 +60,7 @@ async def _execute_run(record, context):
             return
         pipeline.emit("before_run", outcome)
         answer = await run_deep_agent(record["question"], context.thread_id)
+        answer = await finalize_answer(context, answer)
         outcome.status, outcome.result = "completed", answer
     except asyncio.CancelledError:
         outcome.status = "cancelled"
@@ -163,6 +166,9 @@ app.add_middleware(
 class TaskRequest(BaseModel):
     query: str = Field(min_length=1)
     skill_ids: list[StrictStr] | None = Field(default=None, max_length=2)
+    business_mode: Literal["ordinary", "internal_external"] = "ordinary"
+    required_sources: list[Literal["db", "search", "knowledge"]] = Field(default_factory=list, max_length=3)
+    required_uploads: list[StrictStr] = Field(default_factory=list, max_length=20)
     thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
 
     @field_validator("skill_ids")
@@ -170,6 +176,25 @@ class TaskRequest(BaseModel):
     def known_skills(cls, value):
         validate_skill_ids(value)
         return value
+
+    @field_validator("required_sources", "required_uploads")
+    @classmethod
+    def unique_requirements(cls, value, info):
+        if len(set(value)) != len(value):
+            raise ValueError("Duplicate report requirement")
+        if info.field_name == "required_uploads":
+            for name in value:
+                try:
+                    validate_filename(name)
+                except PathDenied as exc:
+                    raise ValueError(str(exc)) from exc
+        return value
+
+    @model_validator(mode="after")
+    def explicit_workflow(self):
+        if self.business_mode == "internal_external" and "ecommerce-analysis" not in (self.skill_ids or []):
+            raise ValueError("internal_external requires explicit ecommerce-analysis selection")
+        return self
 
 
 @app.post("/api/task")
@@ -205,6 +230,9 @@ async def run_task(request: TaskRequest):
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
             skill_ids=tuple(request.skill_ids or ()),
+            business_mode=request.business_mode,
+            required_sources=tuple(request.required_sources),
+            required_uploads=tuple(request.required_uploads),
         )
         record = dict(record, question=request.query)
         task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}")

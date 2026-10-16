@@ -1,0 +1,5 @@
+$ .venv/Scripts/python.exe -X utf8 -m pytest tests/test_workflow_order.py -q -p no:cacheprovider --basetemp=output/test-step12-final-targeted
+.................................                                        [100%]
+33 passed in 219.59s (0:03:39)
+
+Exit code: 0

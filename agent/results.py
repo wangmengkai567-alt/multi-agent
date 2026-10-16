@@ -160,8 +160,17 @@ class ResultService:
         await sink.flush(context.run_id)
         records = await sink.store.list_results(context.run_id, thread_id=context.thread_id, usable_only=True)
         internal = [r for r in records if r["source"] in ("db", "knowledge")]
-        if not internal:
-            return inputs  # Ordinary search is still allowed without internal results.
+        workflow = context.business_mode == "internal_external"
+        data = call.workflow_data if workflow else {}
+        if workflow:
+            from agent.runtime.workflows import refusal
+
+            approved = set(data.get("db_result_ids", []))
+            internal = [r for r in internal if r["source"] == "db" and r["result_id"] in approved]
+            if not internal and not data.get("degraded"):
+                raise refusal("database_required", "搜索必须关联本轮有效数据库结果，先完成数据库查询。")
+        if not internal and not workflow:
+            return inputs  # Ordinary search remains free of workflow prerequisites.
         references = [
             {
                 key: r[key]
@@ -182,14 +191,31 @@ class ResultService:
             for r in internal
         ]
         messages = inputs["messages"]
-        task = messages[-1].text + "\n\n" + HANDOFF_RULE + "\n" + json.dumps(references, ensure_ascii=False)
+        if data.get("degraded"):
+            from agent.runtime.workflows import DEGRADED_NOTICE
+
+            task = (
+                messages[-1].text
+                + "\n\n"
+                + DEGRADED_NOTICE
+                + "\n仅检索外部资料，不得编造或声称已有内部指标。\n"
+                + json.dumps(
+                    dict(db_failure_ids=data["db_failure_ids"], source_run_id=context.run_id), ensure_ascii=False
+                )
+            )
+        else:
+            task = messages[-1].text + "\n\n" + HANDOFF_RULE + "\n" + json.dumps(references, ensure_ascii=False)
         # Save the exact selected IDs before execution; never accept IDs claimed by the model.
         event = make_event(
             context.thread_id,
             context.run_id,
             "result_handoff",
-            "搜索任务已接收本轮内部摘要",
-            dict(result_ids=[r["result_id"] for r in internal], source_run_id=context.run_id),
+            "搜索任务已接收数据库不可用状态" if data.get("degraded") else "搜索任务已接收本轮内部摘要",
+            dict(
+                result_ids=[r["result_id"] for r in internal],
+                source_run_id=context.run_id,
+                **(dict(degraded=data["degraded"], db_failure_ids=data["db_failure_ids"]) if workflow else {}),
+            ),
             actor="search",
             status="completed",
             call_id=call.call_id,

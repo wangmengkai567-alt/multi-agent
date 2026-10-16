@@ -40,6 +40,7 @@ class HookCall:
     check_status: str = "not_checked"
     executed: bool = False
     attempt: int = 0
+    workflow_data: dict = field(default_factory=dict, repr=False)
 
 
 def error_category(error):
@@ -118,6 +119,9 @@ def prepare_run(call):
 
 def default_pipeline():
     from agent.runtime.policies import before_run_policy, before_tool_policy
+    from agent.runtime.workflows import after_tool_workflow, before_delegate_workflow, before_run_workflow
+
+    after_tool_workflow.record_only = True
 
     recorders = {}
     for name in HOOK_NAMES:
@@ -127,8 +131,10 @@ def default_pipeline():
             recorders[name] = (recorder,)
     return HookPipeline(
         {
-            "before_run": (prepare_run, before_run_policy),
+            "before_run": (prepare_run, before_run_policy, before_run_workflow),
             **recorders,
+            "before_delegate": (before_delegate_workflow, *recorders["before_delegate"]),
+            "after_tool": (after_tool_workflow, *recorders["after_tool"]),
             "before_tool": (before_tool_policy, *recorders["before_tool"]),
         }
     )
@@ -235,6 +241,9 @@ class HookToolMiddleware(AgentMiddleware):
             while True:
                 started = monotonic()
                 try:
+                    from agent.runtime.workflows import prepare_tool_sync
+
+                    prepare_tool_sync(call)
                     self._before(request, call)
                     call.executed = True
                     call.result = handler(request)
@@ -266,6 +275,9 @@ class HookToolMiddleware(AgentMiddleware):
             while True:
                 started = monotonic()
                 try:
+                    from agent.runtime.workflows import prepare_tool
+
+                    await prepare_tool(call)
                     self._before(request, call)
                     call.executed = True
                     call.result = await handler(request)

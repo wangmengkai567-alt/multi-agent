@@ -377,5 +377,8 @@ def before_tool_policy(call):
         policy_for_run()
         validate_tool_call(call)
         reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
+        from agent.runtime.workflows import before_tool_workflow
+
+        before_tool_workflow(call)
     except (PolicyError, PermissionError) as exc:
         raise HookRejected(str(exc)) from exc

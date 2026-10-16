@@ -1,0 +1,23 @@
+UTF-8 / CRLF byte audit passed: 19 files; no bare CR/LF.
+BOM preserved for existing files; new files have no BOM.
+New/changed line trailing-whitespace check passed.
+Only git status was used; git diff --check was not executed under AGENTS.md.
+README.md | UTF-8 | no BOM | CRLF | SHA256 34b9e9dc04f50ac0da0b26549716f0fce615d9318d33eb4f2351a3c1392a4991
+agent/main_agent.py | UTF-8 | no BOM | CRLF | SHA256 9a5d8e8146a5c2aa49f96023cda803a1356e4e03478335bbb591cdf0c83c48be
+agent/results.py | UTF-8 | no BOM | CRLF | SHA256 c3fc8ad979633de5d78854e1d15bdf3354ed05c5384b467ae9f80489b67b2c84
+agent/runtime/context.py | UTF-8 | no BOM | CRLF | SHA256 7f3e4b8790f2f07c8fcfb874c6b90db771ea36dc6f765534142f77f3c6c0e25d
+agent/runtime/delegation.py | UTF-8 | no BOM | CRLF | SHA256 b8e28f28e24a7cd23963eb326d81e3eb7f4079ff51a9c04c7ba46dcae9596aac
+agent/runtime/hooks.py | UTF-8 | no BOM | CRLF | SHA256 7eca8704eca1fa6c30e0adee9e1f5c462b812a96e19072a6d9dba85913c63216
+agent/runtime/policies.py | UTF-8 | no BOM | CRLF | SHA256 d9974e5e59b4b25b7f8169d38b9e1eb1b6afe6169b8ca1beb7b5e69a9c153e41
+agent/runtime/workflows.py | UTF-8 | no BOM | CRLF | SHA256 520273da55a172da504c9663f0940fbf15da67ec3848ccca7a015612f0ad23e9
+api/server.py | UTF-8 | no BOM | CRLF | SHA256 d741c217e76178bdcfbacf0d7e7b7d4b764e5706cb067f15d64dc14ebf0812d3
+docs/implementation/12-dependencies.log | UTF-8 | no BOM | CRLF | SHA256 75cc91c7abb9bdb1041571391e02c21d40cf204a7ae6ad696eaaf71026a223f8
+docs/implementation/12-environment.log | UTF-8 | no BOM | CRLF | SHA256 5e129119a7caedf83881dd93e1ddb27974b1936bee68558bddb95de54631b33b
+docs/implementation/12-format.log | UTF-8 | no BOM | CRLF | SHA256 a9d9f9f2df07dd63eb31f28ee8276555673dda999a43a83aa3f1838bd17c12b2
+docs/implementation/12-lint.log | UTF-8 | no BOM | CRLF | SHA256 f3f83a3b6180760ae3c32873363178ed599f218d48519c27cd31da323cc65d86
+docs/implementation/12-tests.log | UTF-8 | no BOM | CRLF | SHA256 9b9ccbffc62ed856f226e3994759ca17fad3e34ad79bc61a0a398956f7a1858d
+docs/implementation/12-workflows.log | UTF-8 | no BOM | CRLF | SHA256 f1022b16d36c478c1648dd4b636ec97530dcf9a9956c433b58abbf8849cbfc5a
+docs/implementation/12-workflows.md | UTF-8 | no BOM | CRLF | SHA256 18d9a3564e010d4aebd1d3053eec5c2778f523bba9cc6077fa854dc432df36cd
+docs/多Agent项目分步骤实施计划.md | UTF-8 | no BOM | CRLF | SHA256 7fd0cbbc4548e0ba95b602dd002ef8f4bedd7c4994cb5bceb562d9e84c99c75c
+tests/test_workflow_order.py | UTF-8 | no BOM | CRLF | SHA256 c118859654295f4753634622a6bca001231b6a29db7a26b8927ead9235e17545
+Self: docs/implementation/12-text-audit.log | UTF-8 | no BOM | CRLF (self hash omitted)

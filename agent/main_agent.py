@@ -15,6 +15,7 @@ from agent.runtime.context import RunContext, get_run_context, reset_run_context
 from agent.runtime.hooks import HookCall, HookToolMiddleware, pipeline
 from agent.runtime.models import budget_model
 from agent.runtime.policies import load_runtime_policy
+from agent.runtime.workflows import finalize_answer, instruction
 from api.context import reset_session_context, set_session_context, set_thread_context
 from api.monitor import monitor
 from utils.path_utils import confined_path, validate_filename, validate_identifier
@@ -135,6 +136,7 @@ async def run_deep_agent(task_query, session_id):
         /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。
         禁止访问本机真实绝对路径或其他轮次目录。
         """
+        path_instruction += instruction(context)
         config = {"configurable": {"thread_id": session_id}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))
@@ -196,8 +198,10 @@ async def run_deep_agent(task_query, session_id):
         if snapshot.next or not isinstance(final, AIMessage) or final.tool_calls or not final.text:
             raise RuntimeError("Agent completed without a final assistant answer")
         if standalone:
-            pipeline.emit("after_run", HookCall("main", context.run_id, status="completed", result=final.text))
-            monitor.report_task_result(final.text)
+            final_answer = await finalize_answer(context, final.text)
+            pipeline.emit("after_run", HookCall("main", context.run_id, status="completed", result=final_answer))
+            monitor.report_task_result(final_answer)
+            return final_answer
         return final.text
     except BaseException as exc:
         if standalone:
