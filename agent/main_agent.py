@@ -33,6 +33,7 @@ def _build_agent(saver):
     from agent.llm import model
     from agent.prompts import main_agent_content
     from agent.results import RESULT_DISPLAY_PROMPT
+    from agent.runtime.skills import ProjectSkillsMiddleware
     from agent.subagent_factory import build_subagents
     from agent.subagent_registry import load_default_registry
     from tools.markdown_tools import generate_markdown
@@ -48,7 +49,10 @@ def _build_agent(saver):
         tools=[generate_markdown, convert_md_to_pdf, read_file_content],
         checkpointer=saver,
         subagents=subagents,
-        middleware=[HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True)],
+        middleware=[
+            ProjectSkillsMiddleware(),
+            HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
+        ],
     )
 
 

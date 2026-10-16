@@ -16,6 +16,7 @@ from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event, redact_text
 from agent.runtime.hooks import HookCall, HookRejected, active_call, pipeline
 from agent.runtime.policies import BudgetExceeded, classify_tool_error, reserve_calls
+from agent.runtime.skills import skill_scope
 
 
 class DelegationRunnable(Runnable):
@@ -201,6 +202,7 @@ class DelegationRunnable(Runnable):
     def _invoke(self, input, config=None, **kwargs):
         context, call, record = self._prepare(input)
         token = active_call.set(call)
+        skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
         try:
             self._start(context, call, record)
@@ -259,11 +261,13 @@ class DelegationRunnable(Runnable):
             try:
                 self._finish(context, call, record, started)
             finally:
+                skill_scope.reset(skill_token)
                 active_call.reset(token)
 
     async def ainvoke(self, input, config=None, **kwargs):
         context, call, record = self._prepare(input)
         token = active_call.set(call)
+        skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
         try:
             self._start(context, call, record)
@@ -314,4 +318,5 @@ class DelegationRunnable(Runnable):
             try:
                 self._finish(context, call, record, started)
             finally:
+                skill_scope.reset(skill_token)
                 active_call.reset(token)

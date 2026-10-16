@@ -1,0 +1,4 @@
+$ .venv/Scripts/python.exe -X utf8 -m ruff format --check agent/runtime/skills.py agent/runtime/context.py agent/runtime/backend.py agent/runtime/delegation.py agent/subagent_registry.py agent/subagent_factory.py agent/main_agent.py api/server.py utils/secure_paths.py tools/upload_file_read_tool.py tests/test_skill_loading.py tests/test_tool_policies.py tests/test_hook_pipeline.py
+13 files already formatted
+
+Exit code: 0

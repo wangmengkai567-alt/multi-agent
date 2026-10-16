@@ -11,7 +11,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, W
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictStr, field_validator
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -24,6 +24,7 @@ from agent.runtime.context import RunContext, reset_run_context, set_run_context
 from agent.runtime.events import EventSink  # noqa: E402
 from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
 from agent.runtime.policies import load_runtime_policy  # noqa: E402
+from agent.runtime.skills import validate_skill_ids  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
 from utils.path_utils import PathDenied, confined_path, validate_filename, validate_identifier  # noqa: E402
@@ -161,7 +162,14 @@ app.add_middleware(
 
 class TaskRequest(BaseModel):
     query: str = Field(min_length=1)
+    skill_ids: list[StrictStr] | None = Field(default=None, max_length=2)
     thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+    @field_validator("skill_ids")
+    @classmethod
+    def known_skills(cls, value):
+        validate_skill_ids(value)
+        return value
 
 
 @app.post("/api/task")
@@ -196,6 +204,7 @@ async def run_task(request: TaskRequest):
             output_dir / f"session_{thread_id}" / f"run_{run_id}",
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
+            skill_ids=tuple(request.skill_ids or ()),
         )
         record = dict(record, question=request.query)
         task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}")

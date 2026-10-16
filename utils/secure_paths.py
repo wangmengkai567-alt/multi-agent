@@ -88,6 +88,7 @@ def iter_confined_files(root):
 def resolve_run_path(filename, *, write=False, virtual=False):
     from agent.runtime.context import get_run_context
     from agent.runtime.policies import PROJECT_ROOT, policy_for_run
+    from agent.runtime.skills import authorize_skill_path
 
     context = get_run_context()
     if context is None:
@@ -100,12 +101,12 @@ def resolve_run_path(filename, *, write=False, virtual=False):
     if physical.is_absolute() and physical.is_relative_to(Path(skill_dir).absolute()):
         if write:
             raise PathDenied("Skill files are read-only")
-        return confined_path(str(physical), skill_dir)
+        return authorize_skill_path(confined_path(str(physical), skill_dir), skill_dir, directories=True)
     if normalized.startswith(("/skills/", "skills/")) or normalized in ("/skills", "skills"):
         if write:
             raise PathDenied("Skill files are read-only")
         suffix = normalized.lstrip("/")[len("skills") :].lstrip("/") or "."
-        return confined_path(suffix, skill_dir)
+        return authorize_skill_path(confined_path(suffix, skill_dir), skill_dir, directories=True)
     prefix = f"output/session_{context.thread_id}/run_{context.run_id}"
     if normalized == prefix:
         normalized = "."

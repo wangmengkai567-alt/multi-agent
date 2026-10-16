@@ -6,6 +6,7 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from agent.runtime.policies import MissingConfiguration
+from agent.runtime.skills import record_read
 from api.context import get_session_context
 from api.monitor import monitor
 from utils.path_utils import resolve_path
@@ -45,7 +46,9 @@ def read_file_content(
                     data.describe().to_string(),
                 ]
             )
-        return file.read_text(encoding="utf-8")
+        content = file.read_text(encoding="utf-8")
+        record_read(file, content)
+        return content
     except ImportError as exc:
         raise MissingConfiguration("Required file reader dependency is missing") from exc
     except UnicodeDecodeError as exc:

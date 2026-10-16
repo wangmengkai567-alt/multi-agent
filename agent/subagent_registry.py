@@ -55,8 +55,11 @@ class SubagentRegistry:
                 raise ValueError("Expert display name, description and prompt are required")
             if not isinstance(spec.tools, tuple) or not isinstance(spec.allowed_skill_ids, tuple):
                 raise ValueError("Registry collections must be immutable tuples")
-            if spec.model_config != ModelConfig() or spec.allowed_skill_ids:
-                raise ValueError("Custom model profiles and Skill loading are not yet enabled")
+            from agent.runtime.skills import validate_skill_ids
+
+            validate_skill_ids(spec.allowed_skill_ids)
+            if spec.model_config != ModelConfig():
+                raise ValueError("Custom model profiles are not yet enabled")
             registered[spec.agent_id] = spec
         self.specs = MappingProxyType(registered)
 
@@ -82,6 +85,7 @@ def load_default_registry():
                 source["description"],
                 source["system_prompt"],
                 tuple(source["tools"]),
+                allowed_skill_ids=("ecommerce-analysis",) if agent_id in ("db", "search") else (),
                 review_config=ReviewConfig(
                     enabled=True,
                     model_check=True,

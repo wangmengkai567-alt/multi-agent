@@ -260,16 +260,17 @@ def test_symlink_and_junction_escape_denied_before_read_and_search(context, sand
 
 
 def test_skill_and_upload_directories_readonly_and_separate(context):
-    (context.skill_dir / "SKILL.md").write_text("instructions", encoding="utf-8")
+    (context.skill_dir / "ecommerce-analysis").mkdir()
+    (context.skill_dir / "ecommerce-analysis" / "SKILL.md").write_text("instructions", encoding="utf-8", newline="\r\n")
     (context.work_dir / "uploads").mkdir()
     (context.work_dir / "uploads" / "SKILL.md").write_text("user upload", encoding="utf-8")
-    assert resolve_run_path("/skills/SKILL.md").read_text(encoding="utf-8") == "instructions"
+    assert resolve_run_path("/skills/ecommerce-analysis/SKILL.md").read_text(encoding="utf-8") == "instructions"
     assert resolve_run_path("uploads/SKILL.md").read_text(encoding="utf-8") == "user upload"
-    for value in ("/skills/SKILL.md", "uploads/SKILL.md"):
+    for value in ("/skills/ecommerce-analysis/SKILL.md", "uploads/SKILL.md"):
         with pytest.raises(PathDenied):
             resolve_run_path(value, write=True, virtual=True)
     backend = run_backend(None)
-    assert "instructions" in backend.read("/skills/SKILL.md")
+    assert "instructions" in backend.read("/skills/ecommerce-analysis/SKILL.md")
     assert backend.write("/skills/new.md", "attack").error
     assert backend.upload_files([("/skills/new.md", b"attack")])[0].error == "permission_denied"
     assert backend.default.write("\\uploads\\SKILL.md", "attack").error
@@ -551,8 +552,9 @@ def test_pdf_temporary_file_stays_outside_readonly_source_and_com_cleans_up(cont
 
     from utils.word_converter import convert_md_to_pdf_via_word
 
-    source = context.skill_dir / "source.md"
-    source.write_text("# Report", encoding="utf-8")
+    source = context.skill_dir / "report-writing" / "references" / "template.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("# Report", encoding="utf-8", newline="\r\n")
     output = context.work_dir / "report.pdf"
     actions = []
 
@@ -574,8 +576,10 @@ def test_pdf_temporary_file_stays_outside_readonly_source_and_com_cleans_up(cont
     monkeypatch.setattr(win32com.client, "DispatchEx", lambda name: word)
     monkeypatch.setattr(pythoncom, "CoInitialize", lambda: actions.append("initialized"))
     monkeypatch.setattr(pythoncom, "CoUninitialize", lambda: actions.append("uninitialized"))
-    assert "成功转换" in convert_md_to_pdf_via_word(resolve_run_path("/skills/source.md"), output)
-    assert output.exists() and list(context.skill_dir.iterdir()) == [source]
+    assert "成功转换" in convert_md_to_pdf_via_word(
+        resolve_run_path("/skills/report-writing/references/template.md"), output
+    )
+    assert output.exists() and list(context.skill_dir.rglob("*.md")) == [source]
     assert not actions[1].exists()
     assert actions[-3:] == ["doc closed", "word closed", "uninitialized"]
 

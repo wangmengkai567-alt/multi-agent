@@ -17,6 +17,10 @@ class RunContext:
     hook_failures: list[str] = field(default_factory=list, repr=False)
     policy: object | None = field(default=None, repr=False)
     skill_dir: Path | None = None
+    skill_ids: tuple[str, ...] = ()
+    skill_states: set = field(default_factory=set, repr=False)
+    skill_reads: dict = field(default_factory=dict, repr=False)
+    skill_bodies: dict = field(default_factory=dict, repr=False)
     budget_lock: object = field(default_factory=RLock, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(

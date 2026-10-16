@@ -1,0 +1,5 @@
+$ .venv/Scripts/python.exe -X utf8 -m pytest tests/test_skill_loading.py tests/test_hook_pipeline.py::test_production_builder_and_persisted_child_correlation -q -p no:cacheprovider --basetemp=output/test-step11-final-targeted
+..............................                                           [100%]
+30 passed in 72.36s (0:01:12)
+
+Exit code: 0

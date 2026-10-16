@@ -339,7 +339,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         monkeypatch.setitem(sys.modules, name, module)
     store = await RunStore.open(sandbox_dir / "runs.db")
     sink = EventSink(store, lambda *args: None)
-    context = RunContext("production", "thread", sandbox_dir, event_sink=sink)
+    context = RunContext("production", "thread", sandbox_dir, event_sink=sink, skill_ids=("report-writing",))
     token = set_run_context(context)
     try:
         await sink.create(context.thread_id, "query", context.run_id)
@@ -347,6 +347,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         state = await runtime._build_agent(None).ainvoke({"messages": [("user", "query")]})
         assert state["messages"][-1].content == "done"
         assert "关键词或趋势一致不能作为事实证明" in str(model.seen_messages[0])
+        assert "不要求为凑字数扩写或捏造数据" in str(model.seen_messages[0])
         assert executions == ["db", "search", "knowledge"]
         assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 3, "tool": 6, "retry": 0}
         await sink.flush(context.run_id)

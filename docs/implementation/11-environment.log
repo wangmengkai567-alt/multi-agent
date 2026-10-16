@@ -1,0 +1,10 @@
+$ .venv/Scripts/python.exe -X utf8 -c "import sys; from importlib.metadata import version; print(sys.version); print(\"\\n\".join(f\"{n}=={version(n)}\" for n in (\"deepagents\", \"langchain\", \"langgraph\", \"langgraph-checkpoint-sqlite\", \"pytest\", \"aiosqlite\")))"
+3.11.15 (main, Jun 23 2026, 15:20:37) [MSC v.1944 64 bit (AMD64)]
+deepagents==0.4.3
+langchain==1.2.10
+langgraph==1.0.9
+langgraph-checkpoint-sqlite==3.0.3
+pytest==8.3.5
+aiosqlite==0.22.1
+
+Exit code: 0

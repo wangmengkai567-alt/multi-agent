@@ -88,6 +88,8 @@ class GuardedFilesystemBackend(FilesystemBackend):
 
 
 def run_backend(runtime):
+    from agent.runtime.skills import SkillBackend, skill_scope
+
     context = get_run_context()
     if context is None:
         raise PathDenied("A run context is required for the filesystem backend")
@@ -95,5 +97,5 @@ def run_backend(runtime):
     skill_dir = context.skill_dir or PROJECT_ROOT / limits.files.skill_directory
     return CompositeBackend(
         default=GuardedFilesystemBackend(confined_path(".", context.work_dir)),
-        routes={"/skills/": GuardedFilesystemBackend(confined_path(".", Path(skill_dir)), readonly=True)},
+        routes={"/skills/": SkillBackend(confined_path(".", Path(skill_dir)), skill_scope.get()[1])},
     )
