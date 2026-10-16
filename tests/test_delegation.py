@@ -108,6 +108,7 @@ async def test_three_real_task_routes_and_durable_server_ids(runtime, asynchrono
             "subagent_queued",
             "before_delegate",
             "subagent_running",
+            "result_saved",
             "subagent_completed",
             "after_subagent",
         ]
@@ -262,13 +263,13 @@ async def test_task_row_and_event_roll_back_together(runtime, monkeypatch):
         return await original(event)
 
     monkeypatch.setattr(store, "_append_event", broken)
-    result = await DelegationRunnable(
-        spec("db"), RunnableLambda(lambda state: {"messages": [AIMessage(content="real result")]})
-    ).ainvoke({"messages": [HumanMessage(content="query")]})
-    assert result["messages"][-1].content == "real result"
+    with pytest.raises(EventPersistenceError, match="NOT saved"):
+        await DelegationRunnable(
+            spec("db"), RunnableLambda(lambda state: {"messages": [AIMessage(content="real result")]})
+        ).ainvoke({"messages": [HumanMessage(content="query")]})
     with pytest.raises(EventPersistenceError):
         await sink.flush(context.run_id)
-    assert await store.list_subtasks(context.run_id) == []
+    assert context.hook_failures and await store.list_subtasks(context.run_id) == []
 
 
 @pytest.mark.asyncio
@@ -279,7 +280,7 @@ async def test_database_upgrade_preserves_version_two_events(runtime, sandbox_di
     with sqlite3.connect(database) as old:
         # Copy current schema and data excluding the new table, then simulate v2.
         with sqlite3.connect(sandbox_dir / "runs.db") as current:
-            dump = "\n".join(line for line in current.iterdump() if "subtasks" not in line)
+            dump = "\n".join(line for line in current.iterdump() if "subtasks" not in line and "results" not in line)
         old.executescript(dump)
         old.execute("PRAGMA user_version = 2")
     upgraded = await RunStore.open(database)

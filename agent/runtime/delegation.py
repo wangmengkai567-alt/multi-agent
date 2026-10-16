@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
 from agent.reflection import ResultReviewer, ReviewResult, tool_evidence
+from agent.results import ResultService, sync_result
 from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event, redact_text
 from agent.runtime.hooks import HookCall, HookRejected, active_call, pipeline
@@ -18,13 +19,14 @@ from agent.runtime.policies import BudgetExceeded, classify_tool_error, reserve_
 
 
 class DelegationRunnable(Runnable):
-    def __init__(self, spec, executor, *, hooks=None, reviewer=None):
+    def __init__(self, spec, executor, *, hooks=None, reviewer=None, results=None):
         from agent.subagent_registry import DISPLAY_NAMES
 
         if spec.agent_id not in DISPLAY_NAMES:
             raise ValueError("Invalid expert executor target")
         self.spec, self.executor, self.hooks = spec, executor, hooks or pipeline
         self.reviewer = reviewer or ResultReviewer(spec.review_config)
+        self.results = results or ResultService()
 
     def _prepare(self, inputs):
         context = get_run_context()
@@ -202,6 +204,8 @@ class DelegationRunnable(Runnable):
         started = monotonic()
         try:
             self._start(context, call, record)
+            if self.spec.agent_id == "search" and context.event_sink is not None:
+                input = sync_result(self.results.search_input(context, call, input), context.event_sink)
             current = input
             for attempt in range(self.spec.review_config.max_refinements + 1):
                 evidence = []
@@ -219,10 +223,20 @@ class DelegationRunnable(Runnable):
                     tool_evidence.reset(evidence_token)
                 self._returned(call, record, result)
                 if not self.spec.review_config.enabled:
+                    if context.event_sink is not None:
+                        sync_result(
+                            self.results.save(context, call, record["result"], evidence, None, attempt),
+                            context.event_sink,
+                        )
                     return result
                 review = dependency or self.reviewer.review_sync(
                     input["messages"][-1].text, record["result"], evidence, config
                 )
+                if context.event_sink is not None:
+                    sync_result(
+                        self.results.save(context, call, record["result"], evidence, review, attempt),
+                        context.event_sink,
+                    )
                 checked = self._checked(context, call, record, result, review, attempt)
                 try:
                     current = self._refine(context, call, input, review, attempt)
@@ -253,6 +267,8 @@ class DelegationRunnable(Runnable):
         started = monotonic()
         try:
             self._start(context, call, record)
+            if self.spec.agent_id == "search":
+                input = await self.results.search_input(context, call, input)
             current = input
             for attempt in range(self.spec.review_config.max_refinements + 1):
                 evidence = []
@@ -270,10 +286,12 @@ class DelegationRunnable(Runnable):
                     tool_evidence.reset(evidence_token)
                 self._returned(call, record, result)
                 if not self.spec.review_config.enabled:
+                    await self.results.save(context, call, record["result"], evidence, None, attempt)
                     return result
                 review = dependency or await self.reviewer.review(
                     input["messages"][-1].text, record["result"], evidence, config
                 )
+                await self.results.save(context, call, record["result"], evidence, review, attempt)
                 checked = self._checked(context, call, record, result, review, attempt)
                 try:
                     current = self._refine(context, call, input, review, attempt)

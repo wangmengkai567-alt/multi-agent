@@ -32,6 +32,7 @@ def _build_agent(saver):
 
     from agent.llm import model
     from agent.prompts import main_agent_content
+    from agent.results import RESULT_DISPLAY_PROMPT
     from agent.subagent_factory import build_subagents
     from agent.subagent_registry import load_default_registry
     from tools.markdown_tools import generate_markdown
@@ -43,7 +44,7 @@ def _build_agent(saver):
     return create_deep_agent(
         model=budget_model(model, "main_model"),
         backend=run_backend,
-        system_prompt=main_agent_content["system_prompt"],
+        system_prompt=main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT,
         tools=[generate_markdown, convert_md_to_pdf, read_file_content],
         checkpointer=saver,
         subagents=subagents,
@@ -127,7 +128,7 @@ async def run_deep_agent(task_query, session_id):
         新生成文件必须保存到本轮工作目录 '{relative_dir}/filename'。
         读取上传文件时传 uploads/文件名；存在上传文件时请先读取并分析内容。
         业务文件工具使用相对路径。框架文件工具使用本轮虚拟路径，如 /report.md、/uploads/文件名。
-        /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写。
+        /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。
         禁止访问本机真实绝对路径或其他轮次目录。
         """
         config = {"configurable": {"thread_id": session_id}}

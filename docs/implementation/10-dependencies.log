@@ -1,0 +1,4 @@
+$ .venv/Scripts/python.exe -X utf8 -m pip check
+No broken requirements found.
+
+Exit code: 0

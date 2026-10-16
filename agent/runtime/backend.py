@@ -25,7 +25,7 @@ class GuardedFilesystemBackend(FilesystemBackend):
             return True
         path = self._resolve_path(key)
         relative = path.relative_to(self.cwd).parts
-        return bool(relative and relative[0].lower() in ("uploads", "skills"))
+        return bool(relative and relative[0].lower() in ("uploads", "skills", "results"))
 
     def write(self, file_path, content):
         if self._write_denied(file_path):

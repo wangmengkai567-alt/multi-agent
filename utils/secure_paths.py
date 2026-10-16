@@ -116,6 +116,8 @@ def resolve_run_path(filename, *, write=False, virtual=False):
             normalized = normalized[len(alias) :]
             break
     candidate = confined_path(normalized, context.work_dir, virtual=virtual)
+    if write and candidate.is_relative_to((context.work_dir / "results").resolve()):
+        raise PathDenied("Saved query results are read-only")
     if write and candidate.is_relative_to((context.work_dir / "uploads").resolve()):
         raise PathDenied("Uploaded source files are read-only")
     return candidate

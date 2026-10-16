@@ -44,7 +44,7 @@ class RunStore:
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise RuntimeError(f"Unsupported run database schema version: {version}")
             if version == 0:
                 try:
@@ -129,6 +129,115 @@ class RunStore:
                 except BaseException:
                     await self.connection.rollback()
                     raise
+
+            if version < 4:
+                try:
+                    await self.connection.executescript("""
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE results (
+                            result_id TEXT PRIMARY KEY,
+                            run_id TEXT NOT NULL REFERENCES runs(run_id),
+                            thread_id TEXT NOT NULL,
+                            call_id TEXT NOT NULL REFERENCES subtasks(call_id),
+                            attempt INTEGER NOT NULL CHECK(attempt >= 0),
+                            source TEXT NOT NULL CHECK(source IN ('db','knowledge','search')),
+                            created_at TEXT NOT NULL,
+                            query_object TEXT NOT NULL,
+                            time_range TEXT NOT NULL,
+                            statistical_scope TEXT NOT NULL,
+                            raw_text TEXT,
+                            raw_path TEXT,
+                            raw_sha256 TEXT NOT NULL,
+                            summary TEXT,
+                            check_status TEXT NOT NULL,
+                            review TEXT NOT NULL,
+                            published INTEGER NOT NULL CHECK(published IN (0,1)),
+                            UNIQUE(call_id,attempt),
+                            CHECK((raw_text IS NULL) != (raw_path IS NULL)),
+                            CHECK(published=0 OR (check_status='passed' AND summary IS NOT NULL))
+                        );
+                        CREATE INDEX results_by_run ON results(run_id,source,created_at);
+                        PRAGMA user_version = 4;
+                        COMMIT;
+                    """)
+                except BaseException:
+                    await self.connection.rollback()
+                    raise
+
+    @staticmethod
+    def _decode_result(row):
+        if row is None:
+            return None
+        record = dict(row)
+        for key in ("statistical_scope", "review"):
+            record[key] = json.loads(record[key])
+        record["published"] = bool(record["published"])
+        return record
+
+    async def record_result(self, record, event):
+        """Append an immutable attempt and event atomically; late output stays unpublished."""
+        async with self._lock:
+            try:
+                await self.connection.execute("BEGIN IMMEDIATE")
+                run = await self._get(record["run_id"])
+                async with self.connection.execute(
+                    "SELECT * FROM subtasks WHERE call_id=?", (record["call_id"],)
+                ) as cursor:
+                    task = await cursor.fetchone()
+                if (
+                    run is None
+                    or task is None
+                    or run["thread_id"] != record["thread_id"]
+                    or any(task[k] != record[k] for k in ("run_id", "thread_id"))
+                    or task["target"] != record["source"]
+                    or any(event[k] != record[k] for k in ("run_id", "thread_id", "call_id"))
+                ):
+                    raise ValueError("Result does not belong to the subtask/run/session")
+                if record["review"]["verdict"] != record["check_status"]:
+                    raise ValueError("Result review status mismatch")
+                if record["published"] and (record["check_status"] != "passed" or not record["summary"]):
+                    raise ValueError("Only checked results may publish a summary")
+                record = dict(record)
+                if run["status"] not in ACTIVE or task["status"] not in ACTIVE:
+                    record.update(published=False, summary=None)
+                columns = tuple(record)
+                values = [
+                    json.dumps(record[k], ensure_ascii=False) if k in ("review", "statistical_scope") else record[k]
+                    for k in columns
+                ]
+                await self.connection.execute(
+                    "INSERT INTO results (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")",
+                    values,
+                )
+                saved = await self._append_event(dict(event, data=dict(event["data"], published=record["published"])))
+                await self.connection.commit()
+                return saved
+            except BaseException:
+                await self.connection.rollback()
+                raise
+
+    async def _list_results(self, run_id, thread_id=None, usable_only=False):
+        sql = "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id WHERE r.run_id=?"
+        args = [run_id]
+        if thread_id is not None:
+            sql += " AND r.thread_id=?"
+            args.append(thread_id)
+        if usable_only:
+            sql += " AND r.published=1 AND r.check_status='passed' AND s.status='completed' AND s.check_status='passed'"
+        async with self.connection.execute(sql + " ORDER BY r.created_at,r.result_id", args) as cursor:
+            return [self._decode_result(row) for row in await cursor.fetchall()]
+
+    async def list_results(self, run_id, *, thread_id, usable_only=False):
+        async with self._lock:
+            return await self._list_results(run_id, thread_id, usable_only)
+
+    async def get_result(self, result_id, run_id, thread_id):
+        async with self._lock:
+            async with self.connection.execute(
+                "SELECT * FROM results WHERE result_id=? AND run_id=? AND thread_id=?",
+                (result_id, run_id, thread_id),
+            ) as cursor:
+                return self._decode_result(await cursor.fetchone())
 
     async def _list_subtasks(self, run_id):
         async with self.connection.execute(
@@ -277,6 +386,7 @@ class RunStore:
                     "run": record,
                     "events": await self._list_events(run_id),
                     "subtasks": await self._list_subtasks(run_id),
+                    "results": await self._list_results(run_id),
                 }
                 if record
                 else None

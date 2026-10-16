@@ -346,6 +346,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         await sink.start(context)
         state = await runtime._build_agent(None).ainvoke({"messages": [("user", "query")]})
         assert state["messages"][-1].content == "done"
+        assert "关键词或趋势一致不能作为事实证明" in str(model.seen_messages[0])
         assert executions == ["db", "search", "knowledge"]
         assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 3, "tool": 6, "retry": 0}
         await sink.flush(context.run_id)

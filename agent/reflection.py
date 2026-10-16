@@ -52,6 +52,9 @@ def capture_tool(call):
             status=call.status,
             error_category=error_category(call.error) if call.error else None,
             content=content,
+            query_reference={key: value for key, value in call.args.items() if key in ("table_name", "query")}
+            if call.actor.rsplit(":", 1)[-1] in ("get_table_data", "execute_sql_query")
+            else {},
         )
     )
 

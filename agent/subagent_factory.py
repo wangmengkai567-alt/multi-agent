@@ -7,6 +7,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import TodoListMiddleware
 
 from agent.reflection import ResultReviewer
+from agent.results import RESULT_PROMPT, ResultService
 from agent.runtime.backend import run_backend
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.hooks import HookToolMiddleware
@@ -18,6 +19,7 @@ def build_subagents(registry, model, *, models=None, hooks=None):
     if set(models) - set(registry.specs):
         raise ValueError("Model override refers to an unregistered expert")
     result = []
+    results = ResultService()
     for spec in registry.specs.values():
         raw_model = models.get(spec.agent_id, model)
         if getattr(raw_model, "max_retries", 0) != spec.model_config.max_retries:
@@ -27,7 +29,7 @@ def build_subagents(registry, model, *, models=None, hooks=None):
         executor = create_agent(
             model=child_model,
             tools=list(spec.tools),
-            system_prompt=spec.system_prompt,
+            system_prompt=spec.system_prompt + "\n" + RESULT_PROMPT,
             middleware=[
                 TodoListMiddleware(),
                 FilesystemMiddleware(backend=run_backend),
@@ -49,7 +51,7 @@ def build_subagents(registry, model, *, models=None, hooks=None):
                 "name": spec.agent_id,
                 "description": f"{spec.display_name}：{spec.description}",
                 "runnable": DelegationRunnable(
-                    spec, executor, hooks=hooks, reviewer=ResultReviewer(spec.review_config, raw_model)
+                    spec, executor, hooks=hooks, reviewer=ResultReviewer(spec.review_config, raw_model), results=results
                 ),
             }
         )
