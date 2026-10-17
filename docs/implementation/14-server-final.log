@@ -1,0 +1,4 @@
+[Monitor] ConnectionManager manually bound to loop: 1984858912592
+ACCEPTANCE_SERVER_STOPPED: graceful lifespan cleanup completed
+
+EXIT_CODE=0

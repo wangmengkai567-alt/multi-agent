@@ -1,287 +1,109 @@
-## 🎯 这是什么
+# MultiAgent Search
 
-针对开源项项目：`https://github.com/jayergood/MultiAgent-Search` 的二次开发
+面向电商运营分析的多助手查询项目，基于 MultiAgent-Search 二次开发。主助手通过 Deep Agents 的 task 路由调用数据分析、市场情报和内部知识三个助手，统一执行权限检查、调用预算、结果检查与事件持久化。
 
----
+首版使用单服务进程、SQLite 和本地文件目录。第14步的验收范围、实际命令与外部依赖限制见 [验收记录](docs/implementation/14-acceptance.md)。
 
-第 07 步的运行配置集中在 `config/runtime.yml`：工具执行前检查 SQL、文件路径和调用预算；用户源文件位于本轮 `uploads/` 并保持只读。数据库查询需要独立的 `MYSQL_READONLY_USER`、`MYSQL_READONLY_PASSWORD`，旧管理员字段不再用于查询；账号会在实际查询前接受权限核验。人工配置示例见 `sql/read_only_user.example.sql`，验证范围和限制见 `docs/implementation/07-policies.md`。
+## 启动
 
-第 13 步已接入总超时、按运行取消、持久事件分页读取及 WebSocket 游标重连。配置见 `config/runtime.yml` 的 `timeouts`；取消用 `POST /api/runs/{run_id}/cancel`，补读用 `GET /api/runs/{run_id}/events?after_seq=...`。退出与重启会将未完成运行标为 `interrupted`，不会自动恢复执行。接口、测试与边界见 `docs/implementation/13-reliability.md`。
+已验证环境为 Windows、Python 3.11.15。框架锁定为 deepagents 0.4.3、LangChain 1.2.10、LangGraph 1.0.9；完整依赖见 requirements-dev-win-py311.lock。
 
-第 12 步新增显式业务模式：`/api/task` 的 `business_mode` 默认 `ordinary`，可自由选择助手；`internal_external` 必须同时显式选择 `skill_ids: ["ecommerce-analysis"]`，由服务端检查本轮数据库结果、搜索关联和报告前置条件。可选 `required_sources`、`required_uploads` 指定本轮必须完成的查询和读取文件；数据库依赖不可用时只交付明确标注的外部资料降级结果。请求示例、验证与边界见 `docs/implementation/12-workflows.md`。
+在项目根目录使用 PowerShell：
 
-## 🏗️ 架构
-
-### 整体架构图
-
-```mermaid
-graph TD
-    U[👤 用户浏览器] -->|POST /api/task| S[FastAPI Server]
-    U <-->|WebSocket /ws/:id| S
-    S -->|asyncio.create_task| MA[主智能体 Orchestrator]
-    MA -->|调度| SA1[子智能体 1<br/>网络搜索]
-    MA -->|调度| SA2[子智能体 2<br/>数据库查询]
-    MA -->|调度| SA3[子智能体 3<br/>RAG知识库]
-    SA1 -->|Tavily API| W[🌐 互联网]
-    SA2 -->|MySQL| D[(数据库)]
-    SA3 -->|RAGFlow SDK| R[📚 知识库]
-    MA -->|生成| MD[Markdown 报告]
-    MD -->|转换| PDF[PDF 文件]
-    S -->|实时推送进度| U
-
-    style MA fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style SA1 fill:#fff3e0,stroke:#f57c00
-    style SA2 fill:#e8f5e9,stroke:#388e3c
-    style SA3 fill:#fce4ec,stroke:#c62828
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev-win-py311.lock
+Copy-Item .env.example .env
 ```
 
-### 请求流程图
+编辑 .env，设置 OPENAI_BASE_URL、OPENAI_API_KEY、LLM_QWEN_MAX。搜索需要 TAVILY_API_KEY；知识库需要 RAGFLOW_API_URL、RAGFLOW_API_KEY 和可访问的助手。数据库必须另配 MYSQL_READONLY_USER、MYSQL_READONLY_PASSWORD、MYSQL_HOST、MYSQL_PORT、MYSQL_DATABASE，运行时核验只读权限，不能使用旧的管理员字段回退。账号配置示例见 sql/read_only_user.example.sql。
 
-```mermaid
-sequenceDiagram
-    participant U as 用户
-    participant S as Server (FastAPI)
-    participant M as Monitor (WebSocket)
-    participant A as 主智能体
-    participant T1 as 子智能体 (搜索)
-    participant T2 as 子智能体 (数据库)
-
-    U->>S: POST /api/task {query}
-    S->>S: 生成 thread_id
-    S-->>U: {status:"started", thread_id}
-    S->>A: asyncio.create_task(agent)
-
-    U->>M: WebSocket 连接 /ws/{thread_id}
-
-    A->>M: "正在分析需求..."
-    M-->>U: 实时推送
-
-    A->>T1: "搜索最新AI动态"
-    T1->>M: "调用网络搜索工具..."
-    M-->>U: 实时推送
-    T1-->>A: 搜索结果
-
-    A->>T2: "查询历史数据"
-    T2->>M: "执行SQL查询..."
-    M-->>U: 实时推送
-    T2-->>A: 查询结果
-
-    A->>M: "正在生成Markdown报告..."
-    M-->>U: 实时推送
-    A-->>S: 任务完成
-    M-->>U: "✅ 报告已生成"
+```powershell
+.venv\Scripts\python.exe api\server.py
 ```
 
-### 数据流
+打开 [任务页面](http://localhost:8000) 或 [接口文档](http://localhost:8000/docs)。关闭终端服务时会中断未完成任务并清理连接。实际部署请按环境设置监听地址和访问控制。
 
-1. 用户 `POST /api/task` 发自然语言请求
-2. 主智能体分析需求，决定调用哪些子智能体
-3. 子智能体各司其职 — 搜网络 / 查数据库 / 翻知识库
-4. 主智能体汇总信息，生成 Markdown 报告（可转 PDF）
-5. 全过程经 WebSocket 实时推送前端
+## 页面使用
 
----
+- 输入问题，选择新会话，或在已有会话中发起新一轮。每轮有独立输出目录与运行记录；同一会话正在执行时返回忙碌提示，不覆盖原任务。
+- 普通任务可自由选择助手；两个 Skill 均可选。“内部数据与市场对照”自动选择运营分析 Skill，服务端要求先取得合格内部结果再搜索。数据库不可用时只允许明确标注的降级分析。
+- 查看 Skill 选择、正文与资源读取，助手开始，工具完成，结果检查、补充查询和失败原因。技术 ID、关联关系和原始状态在展开详情中。
+- task 调用只接受 description 和 subagent_type，完整任务说明必须放入 description；额外的 prompt 等字段会在助手执行前拒绝，避免框架静默丢失约束。
+- 运行状态区分等待、执行、完成、失败、取消、超时、中断与部分完成。部分完成由持久事件中的降级、未通过检查或记录不完整状态判断，不修改服务端原始终态。
+- “取消本轮”按 run_id 取消；“重新读取记录”同步服务端状态。刷新页面会恢复浏览器保存的任务列表，并从服务端重读完整答案与事件。断线后 WebSocket 按连续序号补发并去重。
+- 文件列表只显示当前轮次的文件，下载地址进行一次 URL 编码。移除视图只清除浏览器列表，不取消运行或删除服务端历史。
 
-## 🚀 快速开始
+浏览器只保存 thread_id、run_id、问题和当前选中项；答案与事件以 SQLite 为准。清除浏览器存储后不会自动列出所有历史会话，可通过已知 run_id 的接口读取记录。首版沿用同一会话一个活动 WebSocket 的约定，不承诺多个浏览器标签页同时订阅同一会话。
 
-### 环境要求
+## API
 
-- **Python 3.10+**
-- OpenAI 兼容的 LLM API Key（DeepSeek / 通义千问 / OpenAI 均可）
-- Tavily API Key（[免费注册](https://tavily.com)，每月 1000 次）
-
-> 📌 数据库和 RAGFlow 是可选的，不配也能跑 — 主智能体会自动跳过没有的服务。
-
-### 1. 克隆并安装
-
-```bash
-git clone https://github.com/你的用户名/MultiAgent-Search.git
-cd MultiAgent-Search
-pip install -r requirements.txt
+```powershell
+$body = @{
+    query = '检索公开电商资料，并给出来源'
+    skill_ids = @('ecommerce-analysis')
+    business_mode = 'ordinary'
+} | ConvertTo-Json
+$run = Invoke-RestMethod http://localhost:8000/api/task -Method Post -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+Invoke-RestMethod "http://localhost:8000/api/runs/$($run.run_id)/history"
 ```
 
-### 2. 配置环境变量
+| 接口 | 用途 |
+|---|---|
+| POST /api/task | query；可选 thread_id、skill_ids、business_mode、required_sources、required_uploads；返回 thread_id 和 run_id |
+| GET /api/runs/{run_id} | 原始状态、完整答案、失败原因与时间 |
+| GET /api/runs/{run_id}/history | 运行、事件、子任务、可追溯结果 |
+| GET /api/runs/{run_id}/events?after_seq=0&limit=200 | 增量补读，使用 next_seq 和 has_more 分页 |
+| POST /api/runs/{run_id}/cancel | 取消当前运行；终态保持不变 |
+| WS /ws/{thread_id}?run_id={run_id}&after_seq=0 | 本轮持久事件与实时更新 |
+| POST /api/upload | multipart files 和 thread_id；上传源文件只读 |
+| GET /api/files?path=session_{thread_id}/run_{run_id} | 本轮文件列表 |
+| GET /api/download?path=... | 经路径校验的文件下载 |
 
-```bash
-cp .env.example .env
+business_mode 为 ordinary 或 internal_external；后者必须显式包含 ecommerce-analysis。required_sources 可选 db、search、knowledge；required_uploads 指定本轮必须完整读取的上传文件。总超时、请求超时、预算、SQL 表白名单、上传大小及有限重试统一配置于 config/runtime.yml。
+
+当前配置总时限为 300 秒、模型单请求上限为 60 秒；第14步针对所配模型的 30 秒请求超时作了调整。每轮截止时间覆盖模型、检查与重试，不因补充查询重新计时。
+
+## 功能状态
+
+| 范围 | 已实现 | 验证状态 |
+|---|---|---|
+| 异步 checkpoint、运行互斥、SQLite 历史和事件 | 是 | 离线集成回归；真实模型普通查询 |
+| 七类 Hook、SQL/路径规则、调用预算 | 是 | 真实框架与业务函数计数验证；只读账号成功查询受本地配置限制 |
+| 三助手 task 路由、结果检查、最多一次补查 | 是 | 可控模型与真实框架集成；外部服务实测见验收记录 |
+| 合格结果传递、内外对照顺序与降级 | 是 | 服务端持久记录、实际执行输入与越序零执行验证 |
+| 两个 Skill 的正文和资源读取 | 是 | 真实框架文件读取；真实模型和页面联调 |
+| 总超时、取消、中断、重连补发 | 是 | 后端与生产前端脚本回归；页面刷新恢复联调 |
+| 新前端、完整答案、本轮下载 | 是 | 前端脚本测试与浏览器操作验证，详见验收记录 |
+| 自动恢复重启前执行、分布式调度、动态助手 | 否 | 后续范围 |
+| 登录鉴权、多进程部署、跨轮自动复用摘要 | 否 | 后续范围 |
+| PDF 在所有平台的完整转换链路 | 现有工具 | 本次未做端到端验收，不作为已验证功能 |
+
+不能用模型自述代替查询依据，也不能用界面“已完成”证明外部服务已成功。真实数据库、RAGFlow 和搜索的具体通过/失败记录，以验收文档为准。
+
+## 开发验证
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider --basetemp=output/pytest-local
+node tests/frontend/run-events.test.cjs
+node tests/frontend/app.test.cjs
+.venv\Scripts\python.exe -m pip check
 ```
 
-编辑 `.env`，最少填 3 个：
+pytest 在收集前移除真实凭据并阻止外部网络，使用临时数据库和目录。Node 测试直接执行生产前端脚本，验证恢复、状态转换、请求参数和下载链接。真实联调脚本 tests/manual/acceptance14.py 须显式运行，不会被 pytest 自动执行：
 
-```env
-OPENAI_BASE_URL=https://api.deepseek.com/v1
-OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
-LLM_QWEN_MAX=deepseek-chat
-TAVILY_API_KEY=tvly-xxxxxxxxxxxxxxxx
+```powershell
+# 终端一：使用 output/step14-live 的独立数据库，监听 127.0.0.1:8765
+.venv\Scripts\python.exe tests/manual/acceptance14.py --serve
+# 终端二：会实际调用配置的模型与外部服务，并保存脱敏执行日志
+.venv\Scripts\python.exe tests/manual/acceptance14.py --smoke
+# 验收结束后触发正常退出，核对端口释放
+[System.IO.File]::WriteAllBytes((Join-Path $PWD 'output\step14-live\stop'), [byte[]]@())
+Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
 ```
 
-### 3. 启动
+详细设计与逐步记录位于 docs/implementation/；总体进度见 [实施计划](docs/多Agent项目分步骤实施计划.md)。本工作区约定 Git 仅执行 status，代码与文档修改保留工作区，由用户自行管理版本。
 
-```bash
-python api/server.py
-```
+## License
 
-打开浏览器访问 `http://localhost:8000` — 内置调试页面，支持多会话标签页。
-
-或者访问 `http://localhost:8000/docs` 用 Swagger 直接调 API。
-
-### 4. 试一试
-
-```bash
-curl -X POST http://localhost:8000/api/task \
-  -H "Content-Type: application/json" \
-  -d '{"query": "搜索最近AI Agent领域的最新进展"}'
-```
-
-WebSocket 实时进度：`ws://localhost:8000/ws/{返回的 thread_id}`
-
-### 🎬 Demo
-
-<!-- TODO: 替换为你的 Demo GIF -->
-![Demo](docs/demo.gif)
-
----
-
-## 📖 你能学到什么
-
-| 知识点 | 项目中的体现 |
-|--------|------------|
-| **Orchestrator 多智能体模式** | `agent/main_agent.py` — 主智能体调度 3 个子智能体 |
-| **Prompt Engineering** | `prompt/prompts.yml` — system_prompt 约束 Agent 行为 |
-| **LangChain @tool 自定义工具** | `tools/` — 8 个工具函数的完整写法 |
-| **FastAPI 异步后台任务** | `api/server.py` — `asyncio.create_task` 非阻塞执行 |
-| **WebSocket 实时推送** | `api/monitor.py` — 工具调用进度实时推前端 |
-| **ContextVar 协程隔离** | `api/context.py` — 多用户并发数据不串台 |
-| **文件操作安全** | `utils/path_utils.py` — 12 种路径场景防护 |
-| **RAG 知识库对接** | `tools/ragflow_tools.py` — RAGFlow SDK 实战 |
-| **NL2SQL 自然语言查库** | `tools/db_tools.py` — Agent 自动写 SQL 执行 |
-| **对话持久化** | `agent/main_agent.py` — SqliteSaver checkpointer |
-
----
-
-## 📁 项目结构
-
-```
-MultiAgent-Search/
-│
-├── agent/                          # 🤖 智能体层（核心）
-│   ├── llm.py                      # 模型初始化（10 行）
-│   ├── prompts.py                  # YAML 提示词加载器
-│   ├── main_agent.py               # ★ 主智能体 + 异步执行引擎
-│   └── subagents/
-│       ├── network_search_agent.py # 网络搜索子智能体
-│       ├── database_query_agent.py # 数据库查询子智能体
-│       └── knowledge_base_agent.py # 知识库子智能体
-│
-├── api/                            # 🌐 Web 接口层
-│   ├── server.py                   # FastAPI 入口 + 路由
-│   ├── context.py                  # ContextVar 协程隔离
-│   ├── monitor.py                  # WebSocket 连接池 + 埋点监控
-│   └── static/
-│       └── index.html              # 前端调试页面
-│
-├── tools/                          # 🔧 工具函数（8 个 @tool）
-│   ├── tavily_tool.py              # 网络搜索（含超时重试）
-│   ├── db_tools.py                 # 数据库查询三件套
-│   ├── ragflow_tools.py            # RAGFlow 知识库检索
-│   ├── markdown_tools.py           # 生成 Markdown
-│   ├── pdf_tools.py                # Markdown → PDF
-│   └── upload_file_read_tool.py    # 读取上传文件
-│
-├── utils/                          # 🛠 工具层
-│   ├── path_utils.py               # 路径安全解析
-│   ├── retry.py                    # 指数退避重试装饰器
-│   └── word_converter.py           # Word COM 引擎
-│
-├── prompt/
-│   └── prompts.yml                 # 提示词配置
-│
-├── data/
-│   └── checkpoints.db              # SQLite 对话持久化
-│
-├── requirements.txt                # 依赖清单（版本锁定）
-├── .env.example                    # 环境变量模板
-├── LICENSE                         # MIT License
-└── README.md
-```
-
----
-
-## 📖 推荐阅读顺序
-
-| 顺序 | 文件 | 重点 |
-|------|------|------|
-| 1️⃣ | `agent/llm.py` | LLM 怎么初始化的（10 行） |
-| 2️⃣ | `prompt/prompts.yml` | system_prompt 怎么写、怎么约束 Agent |
-| 3️⃣ | `agent/subagents/network_search_agent.py` | 最简单的子智能体，理解"子智能体 = 字典配置" |
-| 4️⃣ | `tools/tavily_tool.py` | 完整 @tool 写法，埋点怎么做 |
-| 5️⃣ | `agent/main_agent.py` | **核心** — 主智能体怎么 orchestrate、怎么流式执行 |
-| 6️⃣ | `api/server.py` | FastAPI 怎么和 Agent 结合，异步任务怎么触发 |
-| 7️⃣ | `api/monitor.py` | WebSocket 实时推送，事件循环归属判断 |
-| 8️⃣ | `api/context.py` | ContextVar 为什么比全局变量好 |
-| 9️⃣ | `utils/path_utils.py` | Agent 文件安全 — 边界场景大全 |
-
----
-
-## 🧪 练手建议
-
-项目的设计刻意保持简洁，给你留了很多动手空间：
-
-### 入门级（加深理解）
-
-- [ ] **换个模型**：把 DeepSeek 换成通义千问或 GPT，改 `.env` 一行
-- [ ] **加一个子智能体**：比如"天气查询助手"，体验加子智能体要改多少行代码
-- [ ] **改 system_prompt**：把"电商运营分析"换成你自己的业务场景
-
-### 进阶级（工程能力）
-
-- [ ] **加反思机制**：让子智能体执行完后再自我检查，提高准确性
-- [ ] **加 JWT 认证**：给 `/api/task` 加上登录校验
-- [ ] **给子智能体加通信**：让数据库和搜索子智能体互相交换信息
-
-### 挑战级（深入学习）
-
-- [ ] **WeasyPrint 替代 Word COM**：摆脱 Windows 依赖，Linux 也能跑 PDF 转换
-- [ ] **人工审批节点**：敏感操作需用户确认才执行（LangGraph interrupt）
-- [ ] **Docker 化**：写 Dockerfile + docker-compose，一键启动
-
----
-
-## 🔧 技术栈
-
-| 层级 | 技术 | 说明 |
-|------|------|------|
-| Agent 框架 | deepagents (LangChain 官方) | 多智能体编排 |
-| 图编排 | LangGraph + SqliteSaver | 状态图 + 对话持久化 |
-| LLM 接入 | LangChain + OpenAI 兼容协议 | 一套代码适配多种模型 |
-| Web 框架 | FastAPI + Uvicorn | 异步 HTTP + 原生 WebSocket |
-| 搜索引擎 | Tavily API | AI 专用搜索，免费额度 |
-| 知识库 | RAGFlow | 开源 RAG 引擎 |
-| 数据库 | MySQL | Agent 自动写 SQL |
-| 文档生成 | markdown + WeasyPrint | MD 生成 + PDF 转换 |
-
----
-
-## ❓ FAQ
-
-### Q: 为什么选 deepagents？
-
-**A:** 自己写编排要处理状态管理、tool_call 路由、流式输出、错误恢复等一堆事。`deepagents` 封装好了，你只需定义子智能体的 name / description / tools，框架帮你调度。先理解"用框架能做什么"，再看源码"框架怎么做的"。
-
-### Q: 没有 RAGFlow 和 MySQL 能跑吗？
-
-**A:** 能。主智能体会自动判断可用服务并跳过，只配 LLM + Tavily 就能体验完整链路。这就是刻意设计的"优雅降级"。
-
-### Q: 为什么用 ContextVar 而不是全局变量？
-
-**A:** FastAPI 下多个请求跑在同一线程的不同协程里。用全局变量的话，用户 A 的数据会被用户 B 覆盖（串台）。ContextVar 是 asyncio 原生支持的协程级变量，每个请求链路互不干扰。
-
-### Q: 项目为什么不到 1000 行？
-
-**A:** 故意的。学习项目，不是生产项目。每个模块只做一件事，代码少才容易看懂。把这 1000 行读明白，多智能体 Agent 的核心概念就掌握了。
-
----
-
-## 📄 License
-
-MIT License — 随意使用、修改、分发。基于本项目做了有趣的东西，欢迎提 PR 😄
+MIT。原项目：[jayergood/MultiAgent-Search](https://github.com/jayergood/MultiAgent-Search)。

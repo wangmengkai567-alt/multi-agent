@@ -1,0 +1,72 @@
+Final delivery audit 2026-10-17T11:28:53.725227+08:00
+Scope: every modified/untracked non-ignored file reported by git status; own logs normalized to UTF-8/CRLF.
+Git config/ls-files/diff --check not run: project permits git status only.
+Runtime raw evidence was not normalized or changed; exported log bodies omitted with explicit markers.
+After the full suite, search evidence code and opt-in manual runner were updated and validated by the 78-test affected-suite, real model CLI and Ruff.
+Files differing from the full-suite start manifest: ["agent/reflection.py", "tests/manual/acceptance14.py"]
+Text files checked: 60
+Credential literal scan: PASS
+Audit result: PASS
+
+TEXT agent/main_agent.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=f875ebd2222ce0b709e9938c9497601a21cad2b7a34e4521340501d776ce4def
+TEXT agent/reflection.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=1bcddded8668a089d4d60a1b253e1d7e5cd5590e009dbc7cf89f298a5e3c9b45
+TEXT agent/runtime/delegation.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=e4532a85775a0c4f16297c6f50176f4beed3db9ae01ab1552620ae7276252507
+TEXT agent/runtime/policies.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=117ccfd4d39eebaa8c15374ce4e935092923115211f71ee2adc6400235fb086e
+TEXT api/static/app.js UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=dbbf7f028cb761ac767a5e9bec828fc75f8a06f32fe1af3dea89e50c8bf9f44a
+TEXT api/static/index.html UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=39192837e0291a4be124d8b82a018510fe5313a3ecfc674cbec32ac7f46e2b60
+TEXT config/runtime.yml UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=ef8a628daaf7550d183274faa8660763889f41d6cc049abbeb40f97f590f8479
+TEXT docs/implementation/14-acceptance.md UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=efe0dc551b6fbadef23184eb86a446576350adaa3ffc34bf16ff8fede148506e
+BINARY docs/implementation/14-browser-cancel.png bytes=56638 sha256=21edef4516dff73e1f865d9b0f7cc41a4086faeb88c23267d0c0fa04590d9644
+BINARY docs/implementation/14-browser-restored.png bytes=76238 sha256=3b7d1814d1746735522ad0592d129df7cfc1d80ec7528679029e75dad0c8f041
+TEXT docs/implementation/14-browser.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=b68ca44a694aef6060d81d92c447d46206b86ba406136e534e0111da335b8757
+TEXT docs/implementation/14-cleanup.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=00dbcf0ff39c4ac8bdea77845c6434f434813411d1a2d7130529bb73c6b584c4
+TEXT docs/implementation/14-dependencies.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=735660e08c0af19d5c85aec779e2f3875a979e2d1f158ef14458373869defe76
+TEXT docs/implementation/14-environment.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=807e556aadba178e8ee9760a6e4fb5b9775decd0b527b8afb00224c2953ddc27
+TEXT docs/implementation/14-expert-live.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=c75f7f0aa16c969b58673516f7858e6f0dd295135639b1e7f6d6d85a168f21b6
+TEXT docs/implementation/14-focused.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=f98e25ec17703cb7c7dcd4acd969284a121cb76d95dc45383ba172fa0f67fa07
+TEXT docs/implementation/14-format.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=bec220c883b5d1bfe58fc2fe5792f8707c3ee85445f50675484c1ce11fb0c35f
+TEXT docs/implementation/14-frontend-app.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=c5e9f96c0f2f08fea365221ddc218ef4d634840a974e675d6da3c5e13aac938d
+TEXT docs/implementation/14-frontend-events.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=1cb2ecd8085670f2a2d348b29cb2f3f01ce555691dc764349de4a6a16627a4c9
+TEXT docs/implementation/14-js-syntax.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=6f0e435bc56a5e3f5daaa3503711fb50c335928a660b41ff69a1a84efc2a45d4
+TEXT docs/implementation/14-lint.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=cbde00352d2d08921c712858180632d080209d7662726b7257ea8a13f38e7b8d
+TEXT docs/implementation/14-live-before-review-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=e50058d00fc9b00e6dad91816f60eeadad264e637a8a6b3a641627461dfd5d2c
+TEXT docs/implementation/14-live-busy.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=57b2ff3d078c5a1cdd9afef25310141dc5add3a25a9af2ed95898ea5ff6fc799
+TEXT docs/implementation/14-live-command.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=453753a328cceb74282eada72e45c09ab97a02bf06cf820439b33294843de0a5
+TEXT docs/implementation/14-live-frontend.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=c777c5c8368a47541afb62cf036cae09607476c384e81e2f552bef0bedad2d10
+TEXT docs/implementation/14-live-initial.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=8364d354d6e7507e01d66aa92920428ea7edc7b65c6c5c6e7c7fab3f905647b0
+TEXT docs/implementation/14-live-internal-external-before-task-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=9f8e76d7c43c58f390e85571eaef3409e15604c2bb53cc69b9fc06dca5d143ea
+TEXT docs/implementation/14-live-internal-external-timed-out.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=d3305fc5265ef233fa6eaf686a809c448a3a989c0cbdd2b8d0e44ee1af92ddb9
+TEXT docs/implementation/14-live-internal-external.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=9a50e99f48c4e8990e7390e512550a70fe6df024af2125d5503e10843e5dbbfb
+TEXT docs/implementation/14-live-real-search-before-evidence-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=8fa776f19d957f2f98ebf64d2b96459945aa1890c739f549e48a23a7b26e3e3d
+TEXT docs/implementation/14-live-real-search-before-scope-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=7b796e6b9c3637899151fb477ec7fbf8d8d79a854f63d3c01298fbaae8cf5413
+TEXT docs/implementation/14-live-real-search.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=fb0e0abbd6dc4061c94c42c2419fc87a0acff39e066875d251a167a9ccaa6ae7
+TEXT docs/implementation/14-live-request30.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=203860e2fb699958a5513f04bf2f3e43fba29377b1f873db7a657f4e43886507
+TEXT docs/implementation/14-live.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=451edebb24f0758e59ece3392e35672ebc4e39267e92c6cca992a5dc2d9d0d47
+TEXT docs/implementation/14-ragflow.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=60c6353d73786a3dd12d2ab9ad85399b6593944db8607c92a6cd1bdd9287ad2f
+TEXT docs/implementation/14-reliability-final.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=3630b27c479dc0d54602344a3dd6472b42763843b9dbacd29df7b696a327b183
+TEXT docs/implementation/14-review-diagnostic.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=6e4ca10b76491c47982607c638a36c983592b7088c528d437a5df902dac10d05
+TEXT docs/implementation/14-routing-diagnostic.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=52f9b434c9ecc5244323f8422f487a66577140bac16799ec6b4dd91842bc970d
+TEXT docs/implementation/14-search-evidence-live.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=0dae0eb53cd25badc5241d1bbed1840d40d5026f82e557d8448896e8ec3999f7
+TEXT docs/implementation/14-search-evidence.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=76d6b90e473e5b224e8000bf80c26b9f049bb3868d22e16019175c49e47d7070
+TEXT docs/implementation/14-server-before-evidence-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=f8bb2d3d616729ef8ce580f45c0d6f79b3c059520a51dbb6f6fa48e7afa7cc04
+TEXT docs/implementation/14-server-before-task-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=5eada44cfd359e1db774bf23ca5930c07bc8031b029cd802dfe729a4ea6e9cab
+TEXT docs/implementation/14-server-final.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=daf5c3c3b6d7e39c8f8324e499bb05bb3ce11b4887d361afc46934fff82df0f1
+TEXT docs/implementation/14-server-request30.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=62e0fd51f36d40957f31d109b17a77be6c964f474e4affa199afb67d1ecd82fb
+TEXT docs/implementation/14-server.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=37fe3b77c4edeca96615675218b7b41c8b2af476f4a518d0f9a603b2418ccc2c
+TEXT docs/implementation/14-status.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=4317bb9c555f35508be274740cfd965363acfabd4b96c6d179e01b3c663814d9
+TEXT docs/implementation/14-task-arguments.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=fab0650221c868e183b75b3e61736077d9b209004e27f3741328152ce99cf80f
+TEXT docs/implementation/14-task-contract-live.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=07dd5ae7d84504e22c80174aaeab856ba644b26db84d77c8cff7582fe77e7f6a
+TEXT docs/implementation/14-tests-before-assertion-update.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=765932846f76a3de62713b356c6301e29b1346f8c9f34d1e36c92bcb7fe0fed6
+TEXT docs/implementation/14-tests-before-task-fix.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=2d2b5812c1eaf00beedc3b8b8316c332fa6477b2b17ecc20bed4b90957c4c5cf
+TEXT docs/implementation/14-tests-final.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=c3a0c533e9c50bc3d8d1a4b0252fef2533a56cc4a0da097edea77e04932f0a8a
+TEXT docs/implementation/14-tests-initial.log UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=1d9d20361fe2b4a39a8f59eedb2aed0be0db137bc3c932568b52c4b3189433f1
+TEXT docs/多Agent项目分步骤实施计划.md UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=69d9b14a603737614fbc84f109917ae6797c711a345acce577b6bf782b43b760
+TEXT prompt/prompts.yml UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=ce50be78900981c30e3f8afd462fb1ae63d3361a7536db10adc3495e257cfa8d
+TEXT README.md UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=d8910bab90d105467c1c866b304a6c4debd3743ef83f662253b7efad80cdd88d
+TEXT tests/frontend/app.test.cjs UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=e63bc90b7234d09d9147b175679a35e95c512893c4207209fc8f1304c337b1f3
+TEXT tests/manual/acceptance14.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=d0517615cbe06098a5f067962ceb215a88f7ccec44bf395cd5b4d3fda3924434
+TEXT tests/test_acceptance14.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=17ef34f6779ce06eb901f63f96d518510cfdfeddea584c97e064cbdfde029b97
+TEXT tests/test_delegation.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=64123b9068a6dc5344afd13adfed2fc105cc0661cd1590376c97cb54b84083d4
+TEXT tests/test_run_concurrency.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=be21c63bc9f1fe27610aa4158d799b5324efb70125882d3fc1812d216278c7fe
+TEXT tests/test_subagent_review.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=712d1b3b7bc319d7a78a39f5494c0bbb7efa6f7ad25510d991f3c8cb1124076d
+TEXT tools/markdown_tools.py UTF8=PASS BOM=False bareLF=0 bareCR=0 trailing=0 sha256=cbbf0fe0666386e5b9310973b57dbde47ca2c74b06c3ed9aa8f3d92eb72b81e3

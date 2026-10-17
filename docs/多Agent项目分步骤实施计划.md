@@ -373,9 +373,9 @@
 - [x] 11 Skill 选择与加载
 - [x] 12 指定流程的前置条件
 - [x] 13 超时、取消与事件补发
-- [ ] 14 前端联调与验收
+- [x] 14 前端联调与验收
 
-复选框凭各步实际验证记录更新。当前第 01–13 步均已有完成记录；第 01、02 步分别见 [01-baseline.md](implementation/01-baseline.md)、[02-framework.md](implementation/02-framework.md)，第 13 步见 [13-reliability.md](implementation/13-reliability.md)，其余各步见对应实施记录。第 14 步待实施。
+复选框凭各步实际验证记录更新。当前第 01–14 步均已有完成记录；第 01、02 步分别见 [01-baseline.md](implementation/01-baseline.md)、[02-framework.md](implementation/02-framework.md)，第 13 步见 [13-reliability.md](implementation/13-reliability.md)，其余各步见对应实施记录。第 14 步见 [14-acceptance.md](implementation/14-acceptance.md)：前端、离线功能回归及真实模型/搜索/降级最小联调完成；真实 MySQL 成功查询与 RAGFlow 问答受本地配置限制，未标为已验证。
 
 ## 五、提交与回退安排
 

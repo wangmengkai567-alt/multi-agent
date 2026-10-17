@@ -49,6 +49,48 @@ def approved():
 
 
 @pytest.mark.asyncio
+async def test_search_review_keeps_actual_request_separate_from_normalized_response(runtime):
+    import json
+
+    context, store, sink, _ = runtime
+    actual = []
+    requested = "site:docs.tavily.com search"
+    url = "https://docs.tavily.com/documentation/api-reference/endpoint/search"
+
+    @tool
+    def internet_search(query: str, max_results: int, include_raw_content: bool):
+        """Return a normalized response echo with a genuine source URL."""
+        actual.append((query, max_results, include_raw_content))
+        return json.dumps({"query": "search", "results": [{"url": url, "content": "official search documentation"}]})
+
+    settings = ReviewConfig(enabled=True, model_check=True, required_tools=("internet_search",), require_sources=True)
+    child = ScriptedModel(
+        responses=[
+            call(
+                "internet_search", {"query": requested, "max_results": 2, "include_raw_content": False}, "search-tool"
+            ),
+            AIMessage(content="官方文档：" + url),
+            approved(),
+        ]
+    )
+    parent = ScriptedModel(
+        responses=[call("task", {"subagent_type": "search", "description": requested}), AIMessage(content="done")]
+    )
+    await build(SubagentRegistry([spec(settings, (internet_search,))]), parent, {"search": child}).ainvoke(
+        {"messages": [("user", requested)]}
+    )
+    assert actual == [(requested, 2, False)]
+    review_input = json.loads(child.seen_messages[-1][-1].text)
+    evidence = review_input["tools"][0]
+    assert evidence["executed"] and evidence["status"] == "completed"
+    assert evidence["request_parameters"] == {"query": requested, "max_results": 2, "include_raw_content": False}
+    assert evidence["query_reference"] == {}
+    assert json.loads(evidence["content"])["query"] == "search"
+    await sink.flush(context.run_id)
+    assert (await store.list_subtasks(context.run_id))[0]["check_status"] == "passed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sync", [False, True])
 async def test_empty_result_refined_once_and_durable(runtime, sync):
     context, store, sink, _ = runtime

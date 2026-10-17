@@ -1,0 +1,6 @@
+Final selective real model checks:
+.venv/Scripts/python.exe -u tests/manual/acceptance14.py --smoke --case internal_external
+EXIT_CODE=0
+.venv/Scripts/python.exe -u tests/manual/acceptance14.py --smoke --case real_search
+EXIT_CODE=0
+Earlier failed attempts retained in explicitly named logs.

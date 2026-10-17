@@ -1,0 +1,3423 @@
+Real production-model acceptance: 2026-10-17T02:36:18.673524+00:00
+Model: mimo-v2.6-flash
+Storage: output/step14-live (isolated)
+MySQL independent read-only credentials present: False
+
+CASE ordinary: POST /api/task HTTP 200
+{"status": "started", "thread_id": "d6438b63-4f0b-4b89-8c98-32023c1088ba", "run_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1"}
+{
+  "run": {
+    "run_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+    "thread_id": "d6438b63-4f0b-4b89-8c98-32023c1088ba",
+    "question": "这是功能验收，请只回答：普通查询联调通过。不要调用工具、助手，不要生成文件。",
+    "status": "completed",
+    "answer": "普通查询联调通过。",
+    "error": null,
+    "created_at": "2026-10-17T02:36:18.897654+00:00",
+    "ended_at": "2026-10-17T02:36:28.478545+00:00"
+  },
+  "events": [
+    {
+      "run_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "event_seq": 1,
+      "thread_id": "d6438b63-4f0b-4b89-8c98-32023c1088ba",
+      "event": "run_queued",
+      "call_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:36:18.897654+00:00",
+      "message": "任务已接收",
+      "data": {}
+    },
+    {
+      "run_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "event_seq": 2,
+      "thread_id": "d6438b63-4f0b-4b89-8c98-32023c1088ba",
+      "event": "run_started",
+      "call_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:19.101184+00:00",
+      "message": "任务开始执行",
+      "data": {}
+    },
+    {
+      "run_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "event_seq": 3,
+      "thread_id": "d6438b63-4f0b-4b89-8c98-32023c1088ba",
+      "event": "session_created",
+      "call_id": "3684ce73-668a-411a-b5c7-37a4495ca068",
+      "parent_call_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "actor": "workspace",
+      "status": "ready",
+      "timestamp": "2026-10-17T02:36:19.370035+00:00",
+      "message": "本轮工作目录已创建",
+      "data": {
+        "path": "D:\\My_workspace\\Multi-agent\\Multi-agent\\output\\step14-live\\files\\session_d6438b63-4f0b-4b89-8c98-32023c1088ba\\run_1af19639-eed3-4adf-b089-c8dec6f20fd1"
+      }
+    },
+    {
+      "run_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "event_seq": 4,
+      "thread_id": "d6438b63-4f0b-4b89-8c98-32023c1088ba",
+      "event": "task_result",
+      "call_id": "1af19639-eed3-4adf-b089-c8dec6f20fd1",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:36:28.478545+00:00",
+      "message": "任务执行完成",
+      "data": {
+        "result": "普通查询联调通过。",
+        "call_counts": {
+          "main_model": 1,
+          "sub_model": 0,
+          "review": 0,
+          "tool": 0,
+          "retry": 0
+        }
+      }
+    }
+  ],
+  "subtasks": [],
+  "results": []
+}
+ASSERTIONS ordinary: {"completed": true}
+
+CASE explicit_skill: POST /api/task HTTP 200
+{"status": "started", "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486", "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d"}
+{
+  "run": {
+    "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+    "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+    "question": "这是报告写作Skill验收。请按照已加载的报告写作说明，将这个明确标注为测试数据的事实写成一个简短Markdown报告：测试订单为10笔。不得声称真实经营数据，不查询外部信息。请使用generate_markdown生成acceptance.md，正文注明测试数据，并在最终回答中说明报告结构。",
+    "status": "completed",
+    "answer": "已生成 `acceptance.md`（正文全程标注为测试数据，未查询内部/外部信息）。\n\n**报告结构说明：**\n\n1. **一、说明** — 声明本报告为 Skill 验收测试，数据均为测试数据，不代表真实经营状况，并说明未做内外部查询。\n2. **二、测试数据** — 表格呈现唯一指标：测试订单量 10 笔，明确标注数据性质为\"测试数据\"。\n3. **三、结论** — 按 Skill 要求区分：事实依据（给定测试数据）、推断（无）、待验证事项（不构成真实经营分析）。\n4. **四、来源与限制** — 列明数据来源为本轮对话提供、外部检索为无、统计口径不适用，并记录时间范围。\n\n结构遵循 report-writing Skill 的正文组织与引用/限制标注要求，同时因属验收测试而做了最小篇幅的删改。",
+    "error": null,
+    "created_at": "2026-10-17T02:36:29.252799+00:00",
+    "ended_at": "2026-10-17T02:36:50.407753+00:00"
+  },
+  "events": [
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 1,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "run_queued",
+      "call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:36:29.252799+00:00",
+      "message": "任务已接收",
+      "data": {}
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 2,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "run_started",
+      "call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:29.702641+00:00",
+      "message": "任务开始执行",
+      "data": {}
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 3,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "session_created",
+      "call_id": "efd8c9dd-ee73-469b-beb3-87cecad67e23",
+      "parent_call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "actor": "workspace",
+      "status": "ready",
+      "timestamp": "2026-10-17T02:36:30.279237+00:00",
+      "message": "本轮工作目录已创建",
+      "data": {
+        "path": "D:\\My_workspace\\Multi-agent\\Multi-agent\\output\\step14-live\\files\\session_a1b3ac12-0830-4571-9301-5af146aac486\\run_d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d"
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 4,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "skill_state",
+      "call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "selected",
+      "timestamp": "2026-10-17T02:36:30.282158+00:00",
+      "message": "Skill report-writing: selected",
+      "data": {
+        "skill_id": "report-writing",
+        "resource": null,
+        "reason": "explicit",
+        "sha256": null
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 5,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "skill_state",
+      "call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "loaded",
+      "timestamp": "2026-10-17T02:36:30.286159+00:00",
+      "message": "Skill report-writing: loaded",
+      "data": {
+        "skill_id": "report-writing",
+        "resource": "SKILL.md",
+        "reason": "explicit",
+        "sha256": "855d116e62c0c3d938932a5f496eaebd230c1d060ec73a2f0efad4a6af5203fd"
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 6,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "tool_requested",
+      "call_id": "call_efa51e5b232e4a8e9b4a7b71",
+      "parent_call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "actor": "generate_markdown",
+      "status": "requested",
+      "timestamp": "2026-10-17T02:36:41.544228+00:00",
+      "message": "模型请求工具: generate_markdown",
+      "data": {
+        "tool_name": "generate_markdown",
+        "args": {
+          "content": "[REDACTED]",
+          "filename": "[REDACTED]"
+        }
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 7,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "before_tool",
+      "call_id": "call_efa51e5b232e4a8e9b4a7b71",
+      "parent_call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "actor": "main:generate_markdown",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:41.547189+00:00",
+      "message": "before_tool: main:generate_markdown",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "content": "[REDACTED]",
+          "filename": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 8,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "tool_progress",
+      "call_id": "call_efa51e5b232e4a8e9b4a7b71",
+      "parent_call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "actor": "Markdown文档生成工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:41.548187+00:00",
+      "message": "工具执行中: Markdown文档生成工具",
+      "data": {
+        "tool_name": "Markdown文档生成工具",
+        "args": {
+          "写入的文本内容": "[REDACTED]"
+        }
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 9,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "after_tool",
+      "call_id": "call_efa51e5b232e4a8e9b4a7b71",
+      "parent_call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "actor": "main:generate_markdown",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:36:41.550779+00:00",
+      "message": "after_tool: main:generate_markdown",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 0.0,
+        "args": {
+          "content": "[REDACTED]",
+          "filename": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 276,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 10,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "tool_returned",
+      "call_id": "call_efa51e5b232e4a8e9b4a7b71",
+      "parent_call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "actor": "generate_markdown",
+      "status": "returned",
+      "timestamp": "2026-10-17T02:36:41.553782+00:00",
+      "message": "工具调用返回",
+      "data": {
+        "tool_name": "generate_markdown",
+        "result_length": 187
+      }
+    },
+    {
+      "run_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "event_seq": 11,
+      "thread_id": "a1b3ac12-0830-4571-9301-5af146aac486",
+      "event": "task_result",
+      "call_id": "d93fcb4d-eef3-40d5-bbef-c5d0ef1c6e6d",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:36:50.407753+00:00",
+      "message": "任务执行完成",
+      "data": {
+        "result": "已生成 `acceptance.md`（正文全程标注为测试数据，未查询内部/外部信息）。\n\n**报告结构说明：**\n\n1. **一、说明** — 声明本报告为 Skill 验收测试，数据均为测试数据，不代表真实经营状况，并说明未做内外部查询。\n2. **二、测试数据** — 表格呈现唯一指标：测试订单量 10 笔，明确标注数据性质为\"测试数据\"。\n3. **三、结论** — 按 Skill 要求区分：事实依据（给定测试数据）、推断（无）、待验证事项（不构成真实经营分析）。\n4. **四、来源与限制** — 列明数据来源为本轮对话提供、外部检索为无、统计口径不适用，并记录时间范围。\n\n结构遵循 report-writing Skill 的正文组织与引用/限制标注要求，同时因属验收测试而做了最小篇幅的删改。",
+        "call_counts": {
+          "main_model": 2,
+          "sub_model": 0,
+          "review": 0,
+          "tool": 1,
+          "retry": 0
+        }
+      }
+    }
+  ],
+  "subtasks": [],
+  "results": []
+}
+ASSERTIONS explicit_skill: {"completed": true, "skill_body_loaded": true, "report_download": true, "report_crlf": true}
+
+CASE real_search: POST /api/task HTTP 200
+{"status": "started", "thread_id": "584fc338-a1f9-421b-b816-909e1e096533", "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f"}
+{
+  "run": {
+    "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+    "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+    "question": "最小功能验收：调用search助手，请把以下限制原样写入分派说明：仅调用一次internet_search，query为Tavily search official documentation，max_results=1，include_raw_content=false。仅提取一个官方来源链接和一句摘要，专家最终结果不得超过150字。不要额外检索，不查数据库或知识库，不生成文件。主助手最终回答也限150字。",
+    "status": "failed",
+    "answer": null,
+    "error": "{\"error\": \"workflow_precondition\", \"code\": \"report_not_ready\", \"next_step\": \"先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。\", \"missing_sources\": [\"search\"], \"unread_uploads\": []}",
+    "created_at": "2026-10-17T02:36:50.804477+00:00",
+    "ended_at": "2026-10-17T02:41:31.101902+00:00"
+  },
+  "events": [
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 1,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "run_queued",
+      "call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:36:50.804477+00:00",
+      "message": "任务已接收",
+      "data": {}
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 2,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "run_started",
+      "call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:51.015853+00:00",
+      "message": "任务开始执行",
+      "data": {}
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 3,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "workflow_state",
+      "call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "initialized",
+      "timestamp": "2026-10-17T02:36:51.146084+00:00",
+      "message": "流程状态：initialized",
+      "data": {
+        "business_mode": "ordinary",
+        "required_sources": [
+          "search"
+        ],
+        "required_uploads": []
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 4,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "session_created",
+      "call_id": "e05ab433-b673-4f3c-8a0b-fb59a18fe575",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "workspace",
+      "status": "ready",
+      "timestamp": "2026-10-17T02:36:51.148082+00:00",
+      "message": "本轮工作目录已创建",
+      "data": {
+        "path": "D:\\My_workspace\\Multi-agent\\Multi-agent\\output\\step14-live\\files\\session_584fc338-a1f9-421b-b816-909e1e096533\\run_0453cca1-2a10-4de7-a1ab-3a0935eb2d6f"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 5,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "assistant_call",
+      "call_id": "call_a846b567a0c74b6a93623c5d",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "search",
+      "status": "requested",
+      "timestamp": "2026-10-17T02:36:55.557121+00:00",
+      "message": "模型请求助手: 市场情报助手",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "args": {
+          "description": "[REDACTED]"
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 6,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_a846b567a0c74b6a93623c5d",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "main:task",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:55.561117+00:00",
+      "message": "before_tool: main:task",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]",
+          "prompt": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 7,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_queued",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:36:55.562116+00:00",
+      "message": "市场情报助手：任务已接收",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_a846b567a0c74b6a93623c5d",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 8,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_delegate",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:55.562420+00:00",
+      "message": "before_delegate: search",
+      "data": {
+        "hook": "before_delegate",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 9,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_running",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:36:55.562420+00:00",
+      "message": "市场情报助手：开始执行",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_a846b567a0c74b6a93623c5d",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 10,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_46e7f5d4549f46ce896f6af3",
+      "parent_call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:02.142190+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 11,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_46e7f5d4549f46ce896f6af3",
+      "parent_call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:02.156193+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 12,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_46e7f5d4549f46ce896f6af3",
+      "parent_call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:37:05.818958+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 3672.000000020489,
+        "args": {
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 7164,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 13,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "result_saved",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "check_incomplete",
+      "timestamp": "2026-10-17T02:37:34.970135+00:00",
+      "message": "查询结果与检查状态已保存",
+      "data": {
+        "result_id": "829b9913-9b64-4919-be8c-d95a3325716f",
+        "source": "search",
+        "attempt": 0,
+        "check_status": "check_incomplete",
+        "published": false
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 14,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_review",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "check_incomplete",
+      "timestamp": "2026-10-17T02:37:35.072838+00:00",
+      "message": "市场情报助手：结果检查：check_incomplete",
+      "data": {
+        "verdict": "check_incomplete",
+        "issues": [
+          "检查未完成：模型调用或检查结构失败"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": "[REDACTED]",
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 15,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_failed",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:37:35.072838+00:00",
+      "message": "市场情报助手：执行失败",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_a846b567a0c74b6a93623c5d",
+        "check_status": "check_incomplete"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 16,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_subagent",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "call_a846b567a0c74b6a93623c5d",
+      "actor": "search",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:37:35.072838+00:00",
+      "message": "after_subagent: search",
+      "data": {
+        "hook": "after_subagent",
+        "elapsed_ms": 39500.0,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0,
+        "check_status": "check_incomplete",
+        "result_length": 247
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 17,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_a846b567a0c74b6a93623c5d",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "main:task",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:37:35.073838+00:00",
+      "message": "after_tool: main:task",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 39516.00000006147,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]",
+          "prompt": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 242,
+        "result_type": "Command",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 18,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_returned",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "task",
+      "status": "returned",
+      "timestamp": "2026-10-17T02:37:35.076838+00:00",
+      "message": "市场情报助手返回主助手",
+      "data": {
+        "tool_name": "task",
+        "result_length": 128,
+        "request_call_id": "call_a846b567a0c74b6a93623c5d",
+        "assistant_name": "市场情报助手",
+        "target": "search"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 19,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "assistant_call",
+      "call_id": "call_0705688152c94dc29df8f7e2",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "search",
+      "status": "requested",
+      "timestamp": "2026-10-17T02:37:41.068634+00:00",
+      "message": "模型请求助手: 市场情报助手",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "args": {
+          "description": "[REDACTED]"
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 20,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_0705688152c94dc29df8f7e2",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "main:task",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:41.069634+00:00",
+      "message": "before_tool: main:task",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]",
+          "prompt": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 21,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_queued",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:37:41.070634+00:00",
+      "message": "市场情报助手：任务已接收",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_0705688152c94dc29df8f7e2",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 22,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_delegate",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:41.070634+00:00",
+      "message": "before_delegate: search",
+      "data": {
+        "hook": "before_delegate",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 23,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_running",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:41.070634+00:00",
+      "message": "市场情报助手：开始执行",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_0705688152c94dc29df8f7e2",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 24,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_8c43f54ef7a8454982beef71",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:49.032471+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "query": "[REDACTED]",
+          "max_results": 5
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 25,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_8c43f54ef7a8454982beef71",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:37:49.034512+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 26,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_8c43f54ef7a8454982beef71",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:37:51.487586+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 2453.000000095926,
+        "args": {
+          "query": "[REDACTED]",
+          "max_results": 5
+        },
+        "attempt": 0,
+        "result_length": 8303,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 27,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "result_saved",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "insufficient",
+      "timestamp": "2026-10-17T02:38:43.941175+00:00",
+      "message": "查询结果与检查状态已保存",
+      "data": {
+        "result_id": "c0540965-335a-4e6d-b448-22532af785b4",
+        "source": "search",
+        "attempt": 0,
+        "check_status": "insufficient",
+        "published": false
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 28,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_review",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "insufficient",
+      "timestamp": "2026-10-17T02:38:44.186488+00:00",
+      "message": "市场情报助手：结果检查：insufficient",
+      "data": {
+        "verdict": "insufficient",
+        "issues": [
+          "仅一次关键词检索，命中官方来源中 docs.tavily.com 只返回 introduction 页片段，未覆盖 Search/Extract/Research/Crawl/Map 等各端点的详细参数与响应结构",
+          "所有结果的 raw_content 均为 null，即仅有搜索摘要片段，未抓取任何官方页面正文，无法核验厂商自述的安全/合规声明",
+          "官方页面均无发布/更新日期，时间一栏只能以检索日期代替，无法确定文档时效",
+          "结果中混入 apis.io、Scalekit 等第三方来源，且第三方口径（端点清单、基址）未经官方文档二次确认"
+        ],
+        "missing_evidence": [
+          "docs.tavily.com 各端点（/search、/extract、/crawl、/map、/research）的官方参数与鉴权说明正文",
+          "官方文档页面的发布/最后更新时间",
+          "tavily.com 上 SOC 2 / ZDR / GDPR / ISO 27001 合规声明的官方页面原文",
+          "第三方来源所述端点清单与官方 API reference 的一致性核验"
+        ],
+        "revision_instruction": "[REDACTED]",
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 29,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_refinement",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "insufficient",
+      "timestamp": "2026-10-17T02:38:44.188486+00:00",
+      "message": "市场情报助手：补充查询",
+      "data": {
+        "verdict": "insufficient",
+        "issues": [
+          "仅一次关键词检索，命中官方来源中 docs.tavily.com 只返回 introduction 页片段，未覆盖 Search/Extract/Research/Crawl/Map 等各端点的详细参数与响应结构",
+          "所有结果的 raw_content 均为 null，即仅有搜索摘要片段，未抓取任何官方页面正文，无法核验厂商自述的安全/合规声明",
+          "官方页面均无发布/更新日期，时间一栏只能以检索日期代替，无法确定文档时效",
+          "结果中混入 apis.io、Scalekit 等第三方来源，且第三方口径（端点清单、基址）未经官方文档二次确认"
+        ],
+        "missing_evidence": [
+          "docs.tavily.com 各端点（/search、/extract、/crawl、/map、/research）的官方参数与鉴权说明正文",
+          "官方文档页面的发布/最后更新时间",
+          "tavily.com 上 SOC 2 / ZDR / GDPR / ISO 27001 合规声明的官方页面原文",
+          "第三方来源所述端点清单与官方 API reference 的一致性核验"
+        ],
+        "revision_instruction": "[REDACTED]",
+        "attempt": 1
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 30,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_cd33425cd0574fdab1ac4ff2",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:write_todos",
+      "status": "running",
+      "timestamp": "2026-10-17T02:38:52.993021+00:00",
+      "message": "before_tool: search:write_todos",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "todos": [
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            },
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            },
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            },
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            }
+          ]
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 31,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_144cf63b54ed48afb1031a93",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:38:52.998022+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "query": "[REDACTED]",
+          "max_results": 8
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 32,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_dc4744aa321c4c82887ef0c8",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:38:53.006019+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "query": "[REDACTED]",
+          "max_results": 8
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 33,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_cd33425cd0574fdab1ac4ff2",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:write_todos",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:38:53.013720+00:00",
+      "message": "after_tool: search:write_todos",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 30.999999959021807,
+        "args": {
+          "todos": [
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            },
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            },
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            },
+            {
+              "content": "[REDACTED]",
+              "status": "[REDACTED]"
+            }
+          ]
+        },
+        "attempt": 0,
+        "result_length": 721,
+        "result_type": "Command",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 34,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_dc4744aa321c4c82887ef0c8",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:38:53.024719+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 8
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 35,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_144cf63b54ed48afb1031a93",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:38:53.034815+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 8
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 36,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_dc4744aa321c4c82887ef0c8",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:38:55.245451+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 2234.000000054948,
+        "args": {
+          "query": "[REDACTED]",
+          "max_results": 8
+        },
+        "attempt": 0,
+        "result_length": 12814,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 37,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_144cf63b54ed48afb1031a93",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:38:57.893529+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 4905.999999959022,
+        "args": {
+          "query": "[REDACTED]",
+          "max_results": 8
+        },
+        "attempt": 0,
+        "result_length": 14583,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 38,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_d933b98379b344bca28ba0eb",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:04.880064+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "max_results": 5,
+          "query": "[REDACTED]",
+          "include_raw_content": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 39,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_d6c96cabd7d9439e91493c58",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:04.880064+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "max_results": 5,
+          "query": "[REDACTED]",
+          "include_raw_content": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 40,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_d933b98379b344bca28ba0eb",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:04.883066+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 41,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_d6c96cabd7d9439e91493c58",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:04.885065+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 42,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_d6c96cabd7d9439e91493c58",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:08.146576+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 3265.00000001397,
+        "args": {
+          "max_results": 5,
+          "query": "[REDACTED]",
+          "include_raw_content": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 587,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 43,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_d933b98379b344bca28ba0eb",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:09.269578+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 4390.00000001397,
+        "args": {
+          "max_results": 5,
+          "query": "[REDACTED]",
+          "include_raw_content": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 252,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 44,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_5857f39f3e874ccb9efd60d8",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:13.752096+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 45,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_f91cb566d9d34ad387ee9ddc",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:13.756095+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 46,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_5857f39f3e874ccb9efd60d8",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:13.776090+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 47,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_f91cb566d9d34ad387ee9ddc",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:13.777090+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 48,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_f91cb566d9d34ad387ee9ddc",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:16.476530+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 2717.9999999934807,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 88305,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 49,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_5857f39f3e874ccb9efd60d8",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:19.359960+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 5592.999999993481,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 353431,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 50,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_a17f54527e5f4c8fb4d2df69",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:read_file",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:22.881282+00:00",
+      "message": "before_tool: search:read_file",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "file_path": "[REDACTED]",
+          "limit": 60
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 51,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_386aa92eaa5b4e14b4deab1c",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:read_file",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:22.886731+00:00",
+      "message": "before_tool: search:read_file",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "file_path": "[REDACTED]",
+          "limit": 60
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 52,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_a17f54527e5f4c8fb4d2df69",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:read_file",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:22.913833+00:00",
+      "message": "after_tool: search:read_file",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 30.999999959021807,
+        "args": {
+          "file_path": "[REDACTED]",
+          "limit": 60
+        },
+        "attempt": 0,
+        "result_length": 85729,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 53,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_386aa92eaa5b4e14b4deab1c",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:read_file",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:22.916830+00:00",
+      "message": "after_tool: search:read_file",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 30.999999959021807,
+        "args": {
+          "file_path": "[REDACTED]",
+          "limit": 60
+        },
+        "attempt": 0,
+        "result_length": 83195,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 54,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_07f784fd70d04195ac8a7576",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:37.201473+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 55,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_8317c3ef11044bb4adc45043",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:37.205480+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 56,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_8317c3ef11044bb4adc45043",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:37.220380+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 4
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 57,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_07f784fd70d04195ac8a7576",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:37.223377+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 4
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 58,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_8317c3ef11044bb4adc45043",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:39.648091+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 2437.000000034459,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 99572,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 59,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_07f784fd70d04195ac8a7576",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:42.501859+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 5312.999999965541,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 36225,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 60,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_2f0e0b78fc864ee78f6bf562",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:49.040688+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 61,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_6f2801cf6d454a41b5f515b4",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:49.041687+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 62,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_2f0e0b78fc864ee78f6bf562",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:49.045688+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 63,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_6f2801cf6d454a41b5f515b4",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:39:49.048688+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 4
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 64,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_2f0e0b78fc864ee78f6bf562",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:52.220841+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 3187.000000034459,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 153960,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 65,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_6f2801cf6d454a41b5f515b4",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:39:57.895430+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 8859.000000054948,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 93608,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 66,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_a1e7499a17404828b292edfb",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:09.066416+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 67,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_788cb806159a49adb4670869",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:09.070408+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 68,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_a1e7499a17404828b292edfb",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:09.084610+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 4
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 69,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_788cb806159a49adb4670869",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:09.088607+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 70,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_a1e7499a17404828b292edfb",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:40:13.255303+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 4187.999999965541,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 402994,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 71,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_788cb806159a49adb4670869",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:40:13.355761+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 4202.999999979511,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 90368,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 72,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_1bf62d635022429795848383",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:read_file",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:22.002326+00:00",
+      "message": "before_tool: search:read_file",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "file_path": "[REDACTED]",
+          "limit": 40
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 73,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_1bf62d635022429795848383",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:read_file",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:40:22.024470+00:00",
+      "message": "after_tool: search:read_file",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 15.000000013969839,
+        "args": {
+          "file_path": "[REDACTED]",
+          "limit": 40
+        },
+        "attempt": 0,
+        "result_length": 81299,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 74,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_d46314e0f62d49028cb0d5e3",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:39.070548+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 75,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_e6ee652cff374073a8ef3e1c",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:39.071548+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 76,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_d46314e0f62d49028cb0d5e3",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:39.074549+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 77,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_e6ee652cff374073a8ef3e1c",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:39.076550+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 4
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 78,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_e6ee652cff374073a8ef3e1c",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:40:42.495938+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 3422.000000020489,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 4,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 83053,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 79,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_d46314e0f62d49028cb0d5e3",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:40:43.486414+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 4422.000000020489,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 174991,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 80,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "before_tool",
+      "call_id": "call_399bd9514a7247eeb47bbd62",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:52.834825+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 81,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_progress",
+      "call_id": "call_399bd9514a7247eeb47bbd62",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:40:52.841822+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 5
+        }
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 82,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_399bd9514a7247eeb47bbd62",
+      "parent_call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:40:55.826047+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 3000.0,
+        "args": {
+          "include_raw_content": "[REDACTED]",
+          "max_results": 5,
+          "query": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 51146,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 83,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "result_saved",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "dependency_unavailable",
+      "timestamp": "2026-10-17T02:41:26.444805+00:00",
+      "message": "查询结果与检查状态已保存",
+      "data": {
+        "result_id": "7b9c98b1-37b5-4802-9f3f-041ce39b546d",
+        "source": "search",
+        "attempt": 1,
+        "check_status": "dependency_unavailable",
+        "published": false
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 84,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_review",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "dependency_unavailable",
+      "timestamp": "2026-10-17T02:41:26.582172+00:00",
+      "message": "市场情报助手：结果检查：dependency_unavailable",
+      "data": {
+        "verdict": "dependency_unavailable",
+        "issues": [
+          "依赖不可用：TimeoutError"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": "[REDACTED]",
+        "attempt": 1
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 85,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "subagent_failed",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:41:26.582172+00:00",
+      "message": "市场情报助手：执行失败",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_0705688152c94dc29df8f7e2",
+        "check_status": "dependency_unavailable"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 86,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_subagent",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "call_0705688152c94dc29df8f7e2",
+      "actor": "search",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:41:26.582172+00:00",
+      "message": "after_subagent: search",
+      "data": {
+        "hook": "after_subagent",
+        "elapsed_ms": 225515.99999994505,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0,
+        "check_status": "dependency_unavailable",
+        "result_length": 254
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 87,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "after_tool",
+      "call_id": "call_0705688152c94dc29df8f7e2",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "main:task",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:41:26.583174+00:00",
+      "message": "after_tool: main:task",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 225515.99999994505,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]",
+          "prompt": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 249,
+        "result_type": "Command",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 88,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "tool_returned",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "task",
+      "status": "returned",
+      "timestamp": "2026-10-17T02:41:26.585173+00:00",
+      "message": "市场情报助手返回主助手",
+      "data": {
+        "tool_name": "task",
+        "result_length": 135,
+        "request_call_id": "call_0705688152c94dc29df8f7e2",
+        "assistant_name": "市场情报助手",
+        "target": "search"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 89,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "workflow_state",
+      "call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "blocked",
+      "timestamp": "2026-10-17T02:41:30.771639+00:00",
+      "message": "流程状态：blocked",
+      "data": {
+        "business_mode": "ordinary",
+        "code": "report_not_ready",
+        "missing_sources": [
+          "search"
+        ],
+        "unread_uploads": []
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 90,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "on_error",
+      "call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "parent_call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "actor": "main",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:41:30.771639+00:00",
+      "message": "on_error: main",
+      "data": {
+        "hook": "on_error",
+        "elapsed_ms": 0,
+        "args": {},
+        "attempt": 0,
+        "error": "{\"error\": \"workflow_precondition\", \"code\": \"report_not_ready\", \"next_step\": \"先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。\", \"missing_sources\": [\"search\"], \"unread_uploads\": []}",
+        "error_category": "rejected"
+      }
+    },
+    {
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "event_seq": 91,
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "event": "error",
+      "call_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:41:31.100902+00:00",
+      "message": "任务执行结束",
+      "data": {
+        "error": "{\"error\": \"workflow_precondition\", \"code\": \"report_not_ready\", \"next_step\": \"先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。\", \"missing_sources\": [\"search\"], \"unread_uploads\": []}",
+        "call_counts": {
+          "main_model": 3,
+          "sub_model": 15,
+          "review": 2,
+          "tool": 23,
+          "retry": 1
+        }
+      }
+    }
+  ],
+  "subtasks": [
+    {
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "request_call_id": "call_a846b567a0c74b6a93623c5d",
+      "target": "search",
+      "display_name": "市场情报助手",
+      "description": "[REDACTED]",
+      "description_length": 14,
+      "description_sha256": "c0335937b575b1f06c0e6da87dfd2815185642c164fa0cd6c966a08c37cbb7bd",
+      "status": "failed",
+      "deadline": "2026-10-17T02:41:51.015853+00:00",
+      "created_at": "2026-10-17T02:36:55.562116+00:00",
+      "ended_at": "2026-10-17T02:37:35.072838+00:00",
+      "result": "{\"review\": {\"verdict\": \"check_incomplete\", \"issues\": [\"检查未完成：模型调用或检查结构失败\"], \"missing_evidence\": [], \"revision_instruction\": \"\"}}",
+      "error": "检查未完成：模型调用或检查结构失败",
+      "check_status": "check_incomplete"
+    },
+    {
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "request_call_id": "call_0705688152c94dc29df8f7e2",
+      "target": "search",
+      "display_name": "市场情报助手",
+      "description": "[REDACTED]",
+      "description_length": 18,
+      "description_sha256": "6267d427329e09ea6ef93ad6f7a9623e95bf8e11144431ccda2388047a0f939a",
+      "status": "failed",
+      "deadline": "2026-10-17T02:41:51.015853+00:00",
+      "created_at": "2026-10-17T02:37:41.070634+00:00",
+      "ended_at": "2026-10-17T02:41:26.582172+00:00",
+      "result": "{\"review\": {\"verdict\": \"dependency_unavailable\", \"issues\": [\"依赖不可用：TimeoutError\"], \"missing_evidence\": [], \"revision_instruction\": \"\"}}",
+      "error": "依赖不可用：TimeoutError",
+      "check_status": "dependency_unavailable"
+    }
+  ],
+  "results": [
+    {
+      "result_id": "829b9913-9b64-4919-be8c-d95a3325716f",
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "call_id": "062fa18f-ebc3-4968-b990-37015e5b31f7",
+      "attempt": 0,
+      "source": "search",
+      "created_at": "2026-10-17T02:37:34.969139+00:00",
+      "query_object": "Tavily 官方文档（docs.tavily.com API 参考、官方 GitHub 组织说明）",
+      "time_range": "未提供（检索执行时间未标注具体日期；引用内容中唯一明确时间为视频发布日 2025-02-26）",
+      "statistical_scope": {
+        "reported": "单次网络检索返回的相关性排序结果（本次 top 5 条），非全量文档抓取，不含内部数据",
+        "executed_sql": []
+      },
+      "raw_text": "[OMITTED: raw evidence retained in isolated runtime storage; see raw_sha256/raw_path]",
+      "raw_path": null,
+      "raw_sha256": "3ec91ca27f1ebf047d5dfcae74a4786abe5889131cd36bf0f56f0f5f148d1389",
+      "summary": null,
+      "check_status": "check_incomplete",
+      "review": {
+        "verdict": "check_incomplete",
+        "issues": [
+          "检查未完成：模型调用或检查结构失败"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": ""
+      },
+      "published": false
+    },
+    {
+      "result_id": "c0540965-335a-4e6d-b448-22532af785b4",
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "attempt": 0,
+      "source": "search",
+      "created_at": "2026-10-17T02:38:43.940176+00:00",
+      "query_object": "Tavily 官方文档（docs.tavily.com API reference、tavily.com 端点说明及官方 GitHub）",
+      "time_range": "2026-06-10（本次单次检索执行日期；被检索页面的发布/更新时间未提供）",
+      "statistical_scope": {
+        "reported": "单次关键词检索返回的相关度排序结果（max_results=5），仅计 URL、标题与摘要文本，未做二次验证或全站抓取",
+        "executed_sql": []
+      },
+      "raw_text": "[OMITTED: raw evidence retained in isolated runtime storage; see raw_sha256/raw_path]",
+      "raw_path": null,
+      "raw_sha256": "d09a152e565bb4ce0f6f0c494e3294232bffab959eb98d326615ad8c60859494",
+      "summary": null,
+      "check_status": "insufficient",
+      "review": {
+        "verdict": "insufficient",
+        "issues": [
+          "仅一次关键词检索，命中官方来源中 docs.tavily.com 只返回 introduction 页片段，未覆盖 Search/Extract/Research/Crawl/Map 等各端点的详细参数与响应结构",
+          "所有结果的 raw_content 均为 null，即仅有搜索摘要片段，未抓取任何官方页面正文，无法核验厂商自述的安全/合规声明",
+          "官方页面均无发布/更新日期，时间一栏只能以检索日期代替，无法确定文档时效",
+          "结果中混入 apis.io、Scalekit 等第三方来源，且第三方口径（端点清单、基址）未经官方文档二次确认"
+        ],
+        "missing_evidence": [
+          "docs.tavily.com 各端点（/search、/extract、/crawl、/map、/research）的官方参数与鉴权说明正文",
+          "官方文档页面的发布/最后更新时间",
+          "tavily.com 上 SOC 2 / ZDR / GDPR / ISO 27001 合规声明的官方页面原文",
+          "第三方来源所述端点清单与官方 API reference 的一致性核验"
+        ],
+        "revision_instruction": "对具体官方页面执行定向抓取（或补充多条精确检索），至少覆盖：https://docs.tavily.com/documentation/api-reference 下 Search、Extract、Crawl、Map、Research 各端点页面的完整参数表与示例，以及 https://tavily.com/security 的合规声明原文；同时记录页面标注的最后更新时间（若存在）。返回时需给出每页正文关键片段（非仅摘要），并将第三方来源与官方口径分列对照，标注不一致处。"
+      },
+      "published": false
+    },
+    {
+      "result_id": "7b9c98b1-37b5-4802-9f3f-041ce39b546d",
+      "run_id": "0453cca1-2a10-4de7-a1ab-3a0935eb2d6f",
+      "thread_id": "584fc338-a1f9-421b-b816-909e1e096533",
+      "call_id": "8fb4e489-deca-465f-ace7-b436c9d9e6a4",
+      "attempt": 1,
+      "source": "search",
+      "created_at": "2026-10-17T02:41:26.440806+00:00",
+      "query_object": "未提供",
+      "time_range": "未提供",
+      "statistical_scope": {
+        "reported": "未提供",
+        "executed_sql": []
+      },
+      "raw_text": "[OMITTED: raw evidence retained in isolated runtime storage; see raw_sha256/raw_path]",
+      "raw_path": "results/7b9c98b1-37b5-4802-9f3f-041ce39b546d.json",
+      "raw_sha256": "1fa15bcc4ec4f666bca6abe52852d3575f99af10b4c2f04d19d0296d21492bf1",
+      "summary": null,
+      "check_status": "dependency_unavailable",
+      "review": {
+        "verdict": "dependency_unavailable",
+        "issues": [
+          "依赖不可用：TimeoutError"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": ""
+      },
+      "published": false
+    }
+  ]
+}
+ASSERTIONS real_search: {"completed": false, "search_tool_executed": true, "search_review_passed": false}
+
+CASE internal_external: POST /api/task HTTP 200
+{"status": "started", "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7", "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a"}
+{
+  "run": {
+    "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+    "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+    "question": "最小内外对照验收：通过db助手查询orders表的订单数量，若数据库依赖不可用则明确降级。之后分派search助手，说明：仅调用一次internet_search，query为电商公开行业资料，max_results=1，include_raw_content=false，仅返回一个来源URL及一句摘要，专家最终结果限150字。不能编造内部指标，不生成文件。",
+    "status": "failed",
+    "answer": null,
+    "error": "{\"error\": \"workflow_precondition\", \"code\": \"report_not_ready\", \"next_step\": \"先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。\", \"missing_sources\": [\"search\"], \"unread_uploads\": []}",
+    "created_at": "2026-10-17T02:41:32.138339+00:00",
+    "ended_at": "2026-10-17T02:42:56.171692+00:00"
+  },
+  "events": [
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 1,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "run_queued",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:41:32.138339+00:00",
+      "message": "任务已接收",
+      "data": {}
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 2,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "run_started",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "running",
+      "timestamp": "2026-10-17T02:41:32.326706+00:00",
+      "message": "任务开始执行",
+      "data": {}
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 3,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "workflow_state",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "initialized",
+      "timestamp": "2026-10-17T02:41:32.536496+00:00",
+      "message": "流程状态：initialized",
+      "data": {
+        "business_mode": "internal_external",
+        "required_sources": [
+          "db",
+          "search"
+        ],
+        "required_uploads": []
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 4,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "session_created",
+      "call_id": "d7ec2fd8-42c0-49bd-985e-076af3d12324",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "workspace",
+      "status": "ready",
+      "timestamp": "2026-10-17T02:41:32.545489+00:00",
+      "message": "本轮工作目录已创建",
+      "data": {
+        "path": "D:\\My_workspace\\Multi-agent\\Multi-agent\\output\\step14-live\\files\\session_4d9ade3f-67e7-4896-a4fa-22710ca454d7\\run_4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 5,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "skill_state",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "selected",
+      "timestamp": "2026-10-17T02:41:32.556494+00:00",
+      "message": "Skill ecommerce-analysis: selected",
+      "data": {
+        "skill_id": "ecommerce-analysis",
+        "resource": null,
+        "reason": "explicit",
+        "sha256": null
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 6,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "skill_state",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "loaded",
+      "timestamp": "2026-10-17T02:41:32.567430+00:00",
+      "message": "Skill ecommerce-analysis: loaded",
+      "data": {
+        "skill_id": "ecommerce-analysis",
+        "resource": "SKILL.md",
+        "reason": "explicit",
+        "sha256": "af61898b59cd367bc6480ccc8e7985376b4355de0591d43c1ee36adfb3bfdbd6"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 7,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "assistant_call",
+      "call_id": "call_d229d62bd72d467787b6041c",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "db",
+      "status": "requested",
+      "timestamp": "2026-10-17T02:41:37.167916+00:00",
+      "message": "模型请求助手: 数据分析助手",
+      "data": {
+        "assistant_name": "数据分析助手",
+        "target": "db",
+        "args": {
+          "description": "[REDACTED]"
+        }
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 8,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "before_tool",
+      "call_id": "call_d229d62bd72d467787b6041c",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "main:task",
+      "status": "running",
+      "timestamp": "2026-10-17T02:41:37.170014+00:00",
+      "message": "before_tool: main:task",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 9,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_queued",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:41:37.171013+00:00",
+      "message": "数据分析助手：任务已接收",
+      "data": {
+        "assistant_name": "数据分析助手",
+        "target": "db",
+        "request_call_id": "call_d229d62bd72d467787b6041c",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 10,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "before_delegate",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "running",
+      "timestamp": "2026-10-17T02:41:37.171013+00:00",
+      "message": "before_delegate: db",
+      "data": {
+        "hook": "before_delegate",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 11,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_running",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "running",
+      "timestamp": "2026-10-17T02:41:37.171013+00:00",
+      "message": "数据分析助手：开始执行",
+      "data": {
+        "assistant_name": "数据分析助手",
+        "target": "db",
+        "request_call_id": "call_d229d62bd72d467787b6041c",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 12,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "skill_state",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "selected",
+      "timestamp": "2026-10-17T02:41:37.286535+00:00",
+      "message": "Skill ecommerce-analysis: selected",
+      "data": {
+        "skill_id": "ecommerce-analysis",
+        "resource": null,
+        "reason": "explicit",
+        "sha256": null
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 13,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "skill_state",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "loaded",
+      "timestamp": "2026-10-17T02:41:37.289536+00:00",
+      "message": "Skill ecommerce-analysis: loaded",
+      "data": {
+        "skill_id": "ecommerce-analysis",
+        "resource": "SKILL.md",
+        "reason": "explicit",
+        "sha256": "af61898b59cd367bc6480ccc8e7985376b4355de0591d43c1ee36adfb3bfdbd6"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 14,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "on_error",
+      "call_id": "call_490ba2b6a6a24485b47c7c71",
+      "parent_call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "actor": "db:list_sql_tables",
+      "status": "rejected",
+      "timestamp": "2026-10-17T02:41:41.254213+00:00",
+      "message": "on_error: db:list_sql_tables",
+      "data": {
+        "hook": "on_error",
+        "elapsed_ms": 0,
+        "args": {},
+        "attempt": 0,
+        "error": "Read-only database credentials are missing; administrative credentials are not used",
+        "error_category": "configuration"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 15,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_tool",
+      "call_id": "call_490ba2b6a6a24485b47c7c71",
+      "parent_call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "actor": "db:list_sql_tables",
+      "status": "rejected",
+      "timestamp": "2026-10-17T02:41:41.254213+00:00",
+      "message": "after_tool: db:list_sql_tables",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 0.0,
+        "args": {},
+        "attempt": 0,
+        "result_length": 0,
+        "result_type": "NoneType",
+        "executed": false,
+        "error": "Read-only database credentials are missing; administrative credentials are not used",
+        "error_category": "configuration"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 16,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "on_error",
+      "call_id": "call_6f3d1e5bfba74a169c6187a2",
+      "parent_call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "actor": "db:get_table_data",
+      "status": "rejected",
+      "timestamp": "2026-10-17T02:41:47.797290+00:00",
+      "message": "on_error: db:get_table_data",
+      "data": {
+        "hook": "on_error",
+        "elapsed_ms": 0,
+        "args": {
+          "table_name": "[REDACTED]"
+        },
+        "attempt": 0,
+        "error": "Read-only database credentials are missing; administrative credentials are not used",
+        "error_category": "configuration"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 17,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_tool",
+      "call_id": "call_6f3d1e5bfba74a169c6187a2",
+      "parent_call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "actor": "db:get_table_data",
+      "status": "rejected",
+      "timestamp": "2026-10-17T02:41:47.797290+00:00",
+      "message": "after_tool: db:get_table_data",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 0.0,
+        "args": {
+          "table_name": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 0,
+        "result_type": "NoneType",
+        "executed": false,
+        "error": "Read-only database credentials are missing; administrative credentials are not used",
+        "error_category": "configuration"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 18,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "result_saved",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "dependency_unavailable",
+      "timestamp": "2026-10-17T02:41:58.770391+00:00",
+      "message": "查询结果与检查状态已保存",
+      "data": {
+        "result_id": "f13e8597-3686-4824-b0a4-f6cc3ee1faa3",
+        "source": "db",
+        "attempt": 0,
+        "check_status": "dependency_unavailable",
+        "published": false
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 19,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_review",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "dependency_unavailable",
+      "timestamp": "2026-10-17T02:41:58.958715+00:00",
+      "message": "数据分析助手：结果检查：dependency_unavailable",
+      "data": {
+        "verdict": "dependency_unavailable",
+        "issues": [
+          "实际工具执行失败：list_sql_tables, get_table_data"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": "[REDACTED]",
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 20,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_failed",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:41:58.958715+00:00",
+      "message": "数据分析助手：执行失败",
+      "data": {
+        "assistant_name": "数据分析助手",
+        "target": "db",
+        "request_call_id": "call_d229d62bd72d467787b6041c",
+        "check_status": "dependency_unavailable"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 21,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_subagent",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "call_d229d62bd72d467787b6041c",
+      "actor": "db",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:41:58.958715+00:00",
+      "message": "after_subagent: db",
+      "data": {
+        "hook": "after_subagent",
+        "elapsed_ms": 21782.00000000652,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0,
+        "check_status": "dependency_unavailable",
+        "result_length": 276
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 22,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_tool",
+      "call_id": "call_d229d62bd72d467787b6041c",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "main:task",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:41:58.960194+00:00",
+      "message": "after_tool: main:task",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 21782.00000000652,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 271,
+        "result_type": "Command",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 23,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "tool_returned",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "task",
+      "status": "returned",
+      "timestamp": "2026-10-17T02:41:58.963714+00:00",
+      "message": "数据分析助手返回主助手",
+      "data": {
+        "tool_name": "task",
+        "result_length": 157,
+        "request_call_id": "call_d229d62bd72d467787b6041c",
+        "assistant_name": "数据分析助手",
+        "target": "db"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 24,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "assistant_call",
+      "call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "search",
+      "status": "requested",
+      "timestamp": "2026-10-17T02:42:01.690854+00:00",
+      "message": "模型请求助手: 市场情报助手",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "args": {
+          "description": "[REDACTED]"
+        }
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 25,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "before_tool",
+      "call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "main:task",
+      "status": "running",
+      "timestamp": "2026-10-17T02:42:01.697822+00:00",
+      "message": "before_tool: main:task",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 26,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_queued",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "queued",
+      "timestamp": "2026-10-17T02:42:01.699699+00:00",
+      "message": "市场情报助手：任务已接收",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_1a05f9e6639b47f3a139ceb8",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 27,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "workflow_state",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "degraded",
+      "timestamp": "2026-10-17T02:42:02.367831+00:00",
+      "message": "流程状态：degraded",
+      "data": {
+        "business_mode": "internal_external",
+        "db_result_ids": [],
+        "db_failure_ids": [
+          "f13e8597-3686-4824-b0a4-f6cc3ee1faa3"
+        ]
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 28,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "before_delegate",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:42:02.367831+00:00",
+      "message": "before_delegate: search",
+      "data": {
+        "hook": "before_delegate",
+        "elapsed_ms": 0,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 29,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_running",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:42:02.367831+00:00",
+      "message": "市场情报助手：开始执行",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_1a05f9e6639b47f3a139ceb8",
+        "check_status": "not_checked"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 30,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "result_handoff",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:42:02.744582+00:00",
+      "message": "搜索任务已接收数据库不可用状态",
+      "data": {
+        "result_ids": [],
+        "source_run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+        "degraded": true,
+        "db_failure_ids": [
+          "f13e8597-3686-4824-b0a4-f6cc3ee1faa3"
+        ]
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 31,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "skill_state",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "selected",
+      "timestamp": "2026-10-17T02:42:02.841844+00:00",
+      "message": "Skill ecommerce-analysis: selected",
+      "data": {
+        "skill_id": "ecommerce-analysis",
+        "resource": null,
+        "reason": "explicit",
+        "sha256": null
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 32,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "skill_state",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "loaded",
+      "timestamp": "2026-10-17T02:42:02.845201+00:00",
+      "message": "Skill ecommerce-analysis: loaded",
+      "data": {
+        "skill_id": "ecommerce-analysis",
+        "resource": "SKILL.md",
+        "reason": "explicit",
+        "sha256": "af61898b59cd367bc6480ccc8e7985376b4355de0591d43c1ee36adfb3bfdbd6"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 33,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "before_tool",
+      "call_id": "call_267eb08d14d740fba3b08092",
+      "parent_call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "actor": "search:internet_search",
+      "status": "running",
+      "timestamp": "2026-10-17T02:42:13.282833+00:00",
+      "message": "before_tool: search:internet_search",
+      "data": {
+        "hook": "before_tool",
+        "elapsed_ms": 0,
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 6
+        },
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 34,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "tool_progress",
+      "call_id": "call_267eb08d14d740fba3b08092",
+      "parent_call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "actor": "网络搜索工具",
+      "status": "running",
+      "timestamp": "2026-10-17T02:42:13.300459+00:00",
+      "message": "工具执行中: 网络搜索工具",
+      "data": {
+        "tool_name": "网络搜索工具",
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 6
+        }
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 35,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_tool",
+      "call_id": "call_267eb08d14d740fba3b08092",
+      "parent_call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "actor": "search:internet_search",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:42:16.363260+00:00",
+      "message": "after_tool: search:internet_search",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 3094.000000040978,
+        "args": {
+          "query": "[REDACTED]",
+          "topic": "[REDACTED]",
+          "max_results": 6
+        },
+        "attempt": 0,
+        "result_length": 6607,
+        "result_type": "ToolMessage",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 36,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "result_saved",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "dependency_unavailable",
+      "timestamp": "2026-10-17T02:42:46.697370+00:00",
+      "message": "查询结果与检查状态已保存",
+      "data": {
+        "result_id": "59d50814-dd5a-47c7-a222-6893dbf38634",
+        "source": "search",
+        "attempt": 0,
+        "check_status": "dependency_unavailable",
+        "published": false
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 37,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_review",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "dependency_unavailable",
+      "timestamp": "2026-10-17T02:42:46.936789+00:00",
+      "message": "市场情报助手：结果检查：dependency_unavailable",
+      "data": {
+        "verdict": "dependency_unavailable",
+        "issues": [
+          "依赖不可用：TimeoutError"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": "[REDACTED]",
+        "attempt": 0
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 38,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "subagent_failed",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:42:46.937783+00:00",
+      "message": "市场情报助手：执行失败",
+      "data": {
+        "assistant_name": "市场情报助手",
+        "target": "search",
+        "request_call_id": "call_1a05f9e6639b47f3a139ceb8",
+        "check_status": "dependency_unavailable"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 39,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_subagent",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "actor": "search",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:42:46.939786+00:00",
+      "message": "after_subagent: search",
+      "data": {
+        "hook": "after_subagent",
+        "elapsed_ms": 45250.0,
+        "args": {
+          "description": "[REDACTED]"
+        },
+        "attempt": 0,
+        "check_status": "dependency_unavailable",
+        "result_length": 254
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 40,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "after_tool",
+      "call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "main:task",
+      "status": "completed",
+      "timestamp": "2026-10-17T02:42:46.941783+00:00",
+      "message": "after_tool: main:task",
+      "data": {
+        "hook": "after_tool",
+        "elapsed_ms": 45250.0,
+        "args": {
+          "description": "[REDACTED]",
+          "subagent_type": "[REDACTED]"
+        },
+        "attempt": 0,
+        "result_length": 249,
+        "result_type": "Command",
+        "executed": true
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 41,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "tool_returned",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "task",
+      "status": "returned",
+      "timestamp": "2026-10-17T02:42:46.957781+00:00",
+      "message": "市场情报助手返回主助手",
+      "data": {
+        "tool_name": "task",
+        "result_length": 135,
+        "request_call_id": "call_1a05f9e6639b47f3a139ceb8",
+        "assistant_name": "市场情报助手",
+        "target": "search"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 42,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "workflow_state",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "blocked",
+      "timestamp": "2026-10-17T02:42:55.848805+00:00",
+      "message": "流程状态：blocked",
+      "data": {
+        "business_mode": "internal_external",
+        "code": "report_not_ready",
+        "missing_sources": [
+          "search"
+        ],
+        "unread_uploads": []
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 43,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "on_error",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "actor": "main",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:42:55.849809+00:00",
+      "message": "on_error: main",
+      "data": {
+        "hook": "on_error",
+        "elapsed_ms": 0,
+        "args": {},
+        "attempt": 0,
+        "error": "{\"error\": \"workflow_precondition\", \"code\": \"report_not_ready\", \"next_step\": \"先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。\", \"missing_sources\": [\"search\"], \"unread_uploads\": []}",
+        "error_category": "rejected"
+      }
+    },
+    {
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "event_seq": 44,
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "event": "error",
+      "call_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "parent_call_id": null,
+      "actor": "main",
+      "status": "failed",
+      "timestamp": "2026-10-17T02:42:56.171692+00:00",
+      "message": "任务执行结束",
+      "data": {
+        "error": "{\"error\": \"workflow_precondition\", \"code\": \"report_not_ready\", \"next_step\": \"先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。\", \"missing_sources\": [\"search\"], \"unread_uploads\": []}",
+        "call_counts": {
+          "main_model": 3,
+          "sub_model": 5,
+          "review": 0,
+          "tool": 3,
+          "retry": 0
+        }
+      }
+    }
+  ],
+  "subtasks": [
+    {
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "request_call_id": "call_d229d62bd72d467787b6041c",
+      "target": "db",
+      "display_name": "数据分析助手",
+      "description": "[REDACTED]",
+      "description_length": 12,
+      "description_sha256": "6385e141631d5dbc1925db5da69ad6fea77326d4349d4e2fd36a03c3353f1e02",
+      "status": "failed",
+      "deadline": "2026-10-17T02:46:32.326706+00:00",
+      "created_at": "2026-10-17T02:41:37.171013+00:00",
+      "ended_at": "2026-10-17T02:41:58.958715+00:00",
+      "result": "{\"review\": {\"verdict\": \"dependency_unavailable\", \"issues\": [\"实际工具执行失败：list_sql_tables, get_table_data\"], \"missing_evidence\": [], \"revision_instruction\": \"\"}}",
+      "error": "实际工具执行失败：list_sql_tables, get_table_data",
+      "check_status": "dependency_unavailable"
+    },
+    {
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "request_call_id": "call_1a05f9e6639b47f3a139ceb8",
+      "target": "search",
+      "display_name": "市场情报助手",
+      "description": "[REDACTED]",
+      "description_length": 8,
+      "description_sha256": "5bcebcaf80a42d1c74c7b740566289f8baad234c8db6375f8140a3ea541b9ea7",
+      "status": "failed",
+      "deadline": "2026-10-17T02:46:32.326706+00:00",
+      "created_at": "2026-10-17T02:42:01.698823+00:00",
+      "ended_at": "2026-10-17T02:42:46.937783+00:00",
+      "result": "{\"review\": {\"verdict\": \"dependency_unavailable\", \"issues\": [\"依赖不可用：TimeoutError\"], \"missing_evidence\": [], \"revision_instruction\": \"\"}}",
+      "error": "依赖不可用：TimeoutError",
+      "check_status": "dependency_unavailable"
+    }
+  ],
+  "results": [
+    {
+      "result_id": "f13e8597-3686-4824-b0a4-f6cc3ee1faa3",
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "call_id": "08514177-1ee9-4c16-bf5a-fef55ab068d9",
+      "attempt": 0,
+      "source": "db",
+      "created_at": "2026-10-17T02:41:58.769396+00:00",
+      "query_object": "orders（订单数量），未成功读取",
+      "time_range": "未提供",
+      "statistical_scope": {
+        "reported": "未提供（凭据缺失，查询未执行）",
+        "executed_sql": []
+      },
+      "raw_text": "[OMITTED: raw evidence retained in isolated runtime storage; see raw_sha256/raw_path]",
+      "raw_path": null,
+      "raw_sha256": "4904b8aec5c6288d88ce1ffc84dd0eb85e8ce5512ca55d169ba9f63332eee29f",
+      "summary": null,
+      "check_status": "dependency_unavailable",
+      "review": {
+        "verdict": "dependency_unavailable",
+        "issues": [
+          "实际工具执行失败：list_sql_tables, get_table_data"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": ""
+      },
+      "published": false
+    },
+    {
+      "result_id": "59d50814-dd5a-47c7-a222-6893dbf38634",
+      "run_id": "4fe9efc1-a1c1-4f99-ba73-83ae7e90be6a",
+      "thread_id": "4d9ade3f-67e7-4896-a4fa-22710ca454d7",
+      "call_id": "936cf6c7-e8b7-43d0-b658-f014b96bb27d",
+      "attempt": 0,
+      "source": "search",
+      "created_at": "2026-10-17T02:42:46.697370+00:00",
+      "query_object": "未提供",
+      "time_range": "未提供",
+      "statistical_scope": {
+        "reported": "未提供",
+        "executed_sql": []
+      },
+      "raw_text": "[OMITTED: raw evidence retained in isolated runtime storage; see raw_sha256/raw_path]",
+      "raw_path": null,
+      "raw_sha256": "a06b9166bb2177d78308144ccacc60a5055551290f0bfb7469532e83c4600a75",
+      "summary": null,
+      "check_status": "dependency_unavailable",
+      "review": {
+        "verdict": "dependency_unavailable",
+        "issues": [
+          "依赖不可用：TimeoutError"
+        ],
+        "missing_evidence": [],
+        "revision_instruction": ""
+      },
+      "published": false
+    }
+  ]
+}
+ASSERTIONS internal_external: {"completed": false, "search_tool_executed": true, "search_review_passed": false, "handoff_recorded": true, "explicit_degradation": false}
+GET /: HTTP 200, bytes=10815
+GET /static/app.js: HTTP 200, bytes=18379
+GET /static/run-events.js: HTTP 200, bytes=2031

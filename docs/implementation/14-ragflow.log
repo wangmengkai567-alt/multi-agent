@@ -1,0 +1,1 @@
+RAGFlow actual read-only list_chats: unavailable; HTTPError: 502 Server Error: Bad Gateway for url: http://your-ragflow-server-ip/api/v1/chats?page=1&page_size=30&orderby=create_time&desc=True

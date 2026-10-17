@@ -1,0 +1,19 @@
+$ D:\My_workspace\Multi-agent\Multi-agent\.venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider --basetemp=output/pytest-step14-final
+........................................................................ [ 19%]
+........................................................................ [ 39%]
+.....F.................................................................. [ 59%]
+........................................................................ [ 79%]
+........................................................................ [ 99%]
+..                                                                       [100%]
+================================== FAILURES ===================================
+_______________ test_next_round_keeps_previous_answer_and_files _______________
+D:\My_workspace\Multi-agent\Multi-agent\tests\test_run_concurrency.py:185: in test_next_round_keeps_previous_answer_and_files
+    assert f"run_{record['run_id']}" in prompt and "uploaded.txt" in prompt
+E   AssertionError: assert ('run_e41daf36-b873-4784-b424-b7f01c127218' in 'first question\n        【工作环境指令】\n        本轮虚拟文件系统根目录为 /，工具已自动绑定本轮工作目录。\n        \n[已上传文件] 本轮工作目录中的只读文件：\nuploads/upl...。\n        /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。\n        禁止访问本机真实绝对路径或其他轮次目录。\n        ')
+---------------------------- Captured stdout setup ----------------------------
+[Monitor] ConnectionManager manually bound to loop: 2492271564880
+=========================== short test summary info ===========================
+FAILED tests/test_run_concurrency.py::test_next_round_keeps_previous_answer_and_files
+1 failed, 361 passed in 517.89s (0:08:37)
+
+EXIT_CODE=1

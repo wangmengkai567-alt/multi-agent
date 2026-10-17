@@ -111,7 +111,6 @@ async def run_deep_agent(task_query, session_id):
             pipeline.emit("before_run", HookCall("main", context.run_id))
         confined_path(".", session_dir)
         session_dir.mkdir(parents=True, exist_ok=True)
-        relative_dir = session_dir.relative_to(project_root_path).as_posix()
         upload_dir = project_root_path / "updated" / f"session_{session_id}"
         upload_prompt = ""
         if upload_dir.exists():
@@ -128,9 +127,10 @@ async def run_deep_agent(task_query, session_id):
                 )
         path_instruction = f"""
         【工作环境指令】
-        工作目录: {relative_dir}
+        本轮虚拟文件系统根目录为 /，工具已自动绑定本轮工作目录。
         {upload_prompt}
-        新生成文件必须保存到本轮工作目录 '{relative_dir}/filename'。
+        生成 Markdown 时 filename 只传文件名（如 report.md），path 留空或传相对子目录（如 reports）。
+        不要重复拼接 output/、session_ 或 run_ 目录，也不要传本机绝对路径。
         读取上传文件时传 uploads/文件名；存在上传文件时请先读取并分析内容。
         业务文件工具使用相对路径。框架文件工具使用本轮虚拟路径，如 /report.md、/uploads/文件名。
         /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。

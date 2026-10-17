@@ -1,0 +1,27 @@
+[Monitor] ConnectionManager manually bound to loop: 2066465322640
+Agent execution/recording raised for run 38b4a99c-ba80-4cd7-9e06-faf222dde221
+Traceback (most recent call last):
+  File "D:\My_workspace\Multi-agent\Multi-agent\api\server.py", line 98, in _execute_run
+    answer = worker.result()
+             ^^^^^^^^^^^^^^^
+  File "D:\My_workspace\Multi-agent\Multi-agent\api\server.py", line 69, in _run_body
+    answer = await finalize_answer(context, answer)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\My_workspace\Multi-agent\Multi-agent\agent\runtime\workflows.py", line 305, in finalize_answer
+    report_check(context, data)
+  File "D:\My_workspace\Multi-agent\Multi-agent\agent\runtime\workflows.py", line 215, in report_check
+    raise refusal(
+agent.runtime.hooks.HookRejected: {"error": "workflow_precondition", "code": "report_not_ready", "next_step": "先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。", "missing_sources": ["search"], "unread_uploads": []}
+Agent execution/recording raised for run 9818a2d5-4ac4-475f-afac-7cd8def3f75c
+Traceback (most recent call last):
+  File "D:\My_workspace\Multi-agent\Multi-agent\api\server.py", line 97, in _execute_run
+    raise RunStopped("Total run deadline exceeded")
+agent.runtime.context.RunStopped: Total run deadline exceeded
+Agent execution/recording raised for run 336a0458-437f-481f-b830-32cc2acb0062
+Traceback (most recent call last):
+  File "D:\My_workspace\Multi-agent\Multi-agent\api\server.py", line 97, in _execute_run
+    raise RunStopped("Total run deadline exceeded")
+agent.runtime.context.RunStopped: Total run deadline exceeded
+ACCEPTANCE_SERVER_STOPPED: graceful lifespan cleanup completed
+
+EXIT_CODE=0

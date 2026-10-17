@@ -1,0 +1,62 @@
+$ git status --short --untracked-files=all
+ M README.md
+ M agent/main_agent.py
+ M agent/reflection.py
+ M agent/runtime/delegation.py
+ M agent/runtime/policies.py
+ M api/static/index.html
+ M config/runtime.yml
+ M "docs/\345\244\232Agent\351\241\271\347\233\256\345\210\206\346\255\245\351\252\244\345\256\236\346\226\275\350\256\241\345\210\222.md"
+ M prompt/prompts.yml
+ M tests/test_delegation.py
+ M tests/test_run_concurrency.py
+ M tests/test_subagent_review.py
+ M tools/markdown_tools.py
+?? api/static/app.js
+?? docs/implementation/14-acceptance.md
+?? docs/implementation/14-browser-cancel.png
+?? docs/implementation/14-browser-restored.png
+?? docs/implementation/14-browser.log
+?? docs/implementation/14-cleanup.log
+?? docs/implementation/14-dependencies.log
+?? docs/implementation/14-environment.log
+?? docs/implementation/14-expert-live.log
+?? docs/implementation/14-focused.log
+?? docs/implementation/14-format.log
+?? docs/implementation/14-frontend-app.log
+?? docs/implementation/14-frontend-events.log
+?? docs/implementation/14-js-syntax.log
+?? docs/implementation/14-lint.log
+?? docs/implementation/14-live-before-review-fix.log
+?? docs/implementation/14-live-busy.log
+?? docs/implementation/14-live-command.log
+?? docs/implementation/14-live-frontend.log
+?? docs/implementation/14-live-initial.log
+?? docs/implementation/14-live-internal-external-before-task-fix.log
+?? docs/implementation/14-live-internal-external-timed-out.log
+?? docs/implementation/14-live-internal-external.log
+?? docs/implementation/14-live-real-search-before-evidence-fix.log
+?? docs/implementation/14-live-real-search-before-scope-fix.log
+?? docs/implementation/14-live-real-search.log
+?? docs/implementation/14-live-request30.log
+?? docs/implementation/14-live.log
+?? docs/implementation/14-ragflow.log
+?? docs/implementation/14-reliability-final.log
+?? docs/implementation/14-review-diagnostic.log
+?? docs/implementation/14-routing-diagnostic.log
+?? docs/implementation/14-search-evidence-live.log
+?? docs/implementation/14-search-evidence.log
+?? docs/implementation/14-server-before-evidence-fix.log
+?? docs/implementation/14-server-before-task-fix.log
+?? docs/implementation/14-server-final.log
+?? docs/implementation/14-server-request30.log
+?? docs/implementation/14-server.log
+?? docs/implementation/14-task-arguments.log
+?? docs/implementation/14-task-contract-live.log
+?? docs/implementation/14-tests-before-assertion-update.log
+?? docs/implementation/14-tests-before-task-fix.log
+?? docs/implementation/14-tests-final.log
+?? docs/implementation/14-tests-initial.log
+?? tests/frontend/app.test.cjs
+?? tests/manual/acceptance14.py
+?? tests/test_acceptance14.py

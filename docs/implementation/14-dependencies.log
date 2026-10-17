@@ -1,0 +1,4 @@
+$ .venv/Scripts/python.exe -m pip check
+No broken requirements found.
+
+EXIT_CODE=0

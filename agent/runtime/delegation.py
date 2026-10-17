@@ -189,12 +189,15 @@ class DelegationRunnable(Runnable):
         return dict(input, messages=[*input["messages"], HumanMessage(content=review.revision_instruction)])
 
     def _dependency(self, error):
-        category = classify_tool_error(error.__cause__ or error)
+        category = classify_tool_error(error)
+        if category == "execution" and error.__cause__ is not None:
+            category = classify_tool_error(error.__cause__)
+        reason = redact_text(str(error) or type(error).__name__)
         if isinstance(error, BudgetExceeded) or category == "budget":
             return ReviewResult(verdict="budget_exhausted", issues=["调用预算耗尽"])
         if category in ("configuration", "permission", "transient"):
-            return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + redact_text(str(error))])
-        return ReviewResult(verdict="tool_failed", issues=["子任务执行失败：" + redact_text(str(error))])
+            return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + reason])
+        return ReviewResult(verdict="tool_failed", issues=["子任务执行失败：" + reason])
 
     def invoke(self, input, config=None, **kwargs):
         return self._invoke(input, config, **kwargs)

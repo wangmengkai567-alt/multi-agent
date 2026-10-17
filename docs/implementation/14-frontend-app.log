@@ -1,0 +1,4 @@
+$ node tests/frontend/app.test.cjs
+PASS: persistence, refresh, full answers, ordered deduplication, Skill/review/refinement, redacted refinement reasons, partial and terminal states, stale HTTP, busy/validation, cancellation race, scoped downloads, escaping, view cleanup
+
+EXIT_CODE=0

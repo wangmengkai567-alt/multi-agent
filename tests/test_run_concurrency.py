@@ -182,7 +182,9 @@ async def test_next_round_keeps_previous_answer_and_files(service):
         assert (directory / "uploads" / "uploaded.txt").read_text(encoding="utf-8") == f"upload version {version}"
         assert record["run_id"] in (directory / "report.md").read_text(encoding="utf-8")
         prompt = agent.inputs[record["run_id"]]["messages"][0]["content"]
-        assert f"run_{record['run_id']}" in prompt and "uploaded.txt" in prompt
+        assert directory.name == f"run_{record['run_id']}"
+        assert "虚拟文件系统根目录为 /" in prompt and "uploads/uploaded.txt" in prompt
+        assert str(directory) not in prompt
 
 
 @pytest.mark.asyncio

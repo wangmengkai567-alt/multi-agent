@@ -170,6 +170,16 @@
   ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+  .options { display:flex; gap:16px; flex-wrap:wrap; padding:10px 20px; font-size:13px; border-bottom:1px solid var(--border); }
+  select { background:var(--panel); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:5px; }
+  .notice { padding:8px 20px; color:var(--orange); min-height:34px; font-size:13px; }
+  .run-summary { padding:12px 20px; border-bottom:1px solid var(--border); font-size:13px; }
+  .answer { white-space:pre-wrap; overflow-wrap:anywhere; padding:16px 20px; line-height:1.7; border-bottom:1px solid var(--border); max-height:32vh; overflow:auto; }
+  details { color:var(--text-dim); margin-top:6px; font-size:12px; }
+  details pre { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .tab .tab-status.partial, .tab .tab-status.timed_out, .tab .tab-status.cancelled { color:var(--orange); }
+  @media(max-width:760px) { .file-panel { width:210px; } .input-bar { flex-wrap:wrap; } .input-bar input { min-width:100%; } }
 </style>
 </head>
 <body>
@@ -183,20 +193,30 @@
 </header>
 
 <div class="input-bar">
-  <input id="queryInput" type="text" placeholder="输入分析问题，例如：帮我分析最近电商行业的热门品类趋势" />
+  <input id="queryInput" aria-label="分析问题" type="text" placeholder="输入分析问题，例如：帮我分析最近电商行业的热门品类趋势" />
   <button class="btn btn-primary" id="sendBtn" onclick="sendTask()">▶ 发送新任务</button>
-  <button class="btn btn-ghost" onclick="closeAllSessions()">清除全部</button>
+  <button class="btn btn-ghost" onclick="closeAllSessions()">移除全部视图</button>
 </div>
+
+<div class="options">
+  <label>发送到 <select id="threadSelect" aria-label="发送到"><option value="">新会话</option></select></label>
+  <label>业务模式 <select id="modeSelect" aria-label="业务模式"><option value="ordinary">普通任务</option><option value="internal_external">内部数据与市场对照</option></select></label>
+  <label><input type="checkbox" id="ecommerceSkill"> 运营分析 Skill</label>
+  <label><input type="checkbox" id="reportSkill"> 报告写作 Skill</label>
+</div>
+<div class="notice" id="notice" role="status" aria-live="polite"></div>
 
 <div class="tab-bar" id="tabBar"></div>
 
 <div class="main-area">
   <div class="log-panel">
+    <div class="run-summary" id="runSummary">选择任务可查看进度和结果</div>
+    <div class="answer" id="answer" hidden></div>
     <div class="log-scroll" id="logArea"></div>
   </div>
   <div class="file-panel">
     <div class="file-panel-header">
-      <span>生成的报告</span>
+      <span>本轮文件</span>
       <button class="btn btn-ghost" onclick="refreshFiles()" style="padding:3px 9px;font-size:10px;">刷新</button>
     </div>
     <div class="file-list" id="fileList"></div>
@@ -204,263 +224,6 @@
 </div>
 
 <script src="/static/run-events.js"></script>
-<script>
-// ── 会话管理 ──
-const sessions = {};    // { threadId: { id, query, logs[], ws, dir, status, element } }
-let activeSessionId = null;
-let fileRefreshTimer = null;
-
-const $ = s => document.querySelector(s);
-const $$ = s => document.querySelectorAll(s);
-
-const tagMap = {
-  session_created: { dot:'s', tag:'s', text:'会话' },
-  assistant_call:  { dot:'a', tag:'a', text:'调度' },
-  subagent_queued: { dot:'a', tag:'a', text:'助手接收' },
-  subagent_running:{ dot:'a', tag:'a', text:'助手执行' },
-  subagent_completed:{ dot:'a', tag:'a', text:'助手返回' },
-  subagent_failed: { dot:'e', tag:'e', text:'助手失败' },
-  subagent_rejected:{ dot:'e', tag:'e', text:'助手拒绝' },
-  subagent_cancelled:{ dot:'e', tag:'e', text:'助手取消' },
-  tool_start:      { dot:'t', tag:'t', text:'工具' },
-  task_result:     { dot:'r', tag:'r', text:'完成' },
-  error:           { dot:'e', tag:'e', text:'错误' },
-};
-
-function createSession(threadId, query, runId) {
-  const session = {
-    id: threadId,
-    query,
-    runId,
-    stream: null,
-    logs: [],
-    ws: null,
-    dir: null,
-    status: 'running', // running | done | error
-    el: null,
-  };
-  sessions[threadId] = session;
-
-  session.stream = new RunEventStream(threadId, runId, (d) => {
-    session.logs.push({ ...d });
-    if (d.event === 'session_created' && d.data?.path) {
-      session.dir = d.data.path;
-      scheduleFileRefresh();
-    }
-    if (d.event === 'task_result') { session.status = 'done'; scheduleFileRefresh(); }
-    if (['error', 'run_cancelled', 'run_timed_out', 'run_interrupted'].includes(d.event)) session.status = 'error';
-    renderTabs();
-    if (activeSessionId === threadId) renderLog(session);
-  }, (socket) => {
-    session.ws = socket;
-    updateWSStatus();
-  });
-  session.stream.connect();
-
-  // 切换到此会话
-  switchSession(threadId);
-  renderTabs();
-  scheduleFileRefresh();
-}
-
-function switchSession(threadId) {
-  if (activeSessionId && sessions[activeSessionId]) {
-    // 保存滚动位置
-    const area = $('#logArea');
-    sessions[activeSessionId]._scrollTop = area.scrollTop;
-  }
-  activeSessionId = threadId;
-  const s = sessions[threadId];
-  if (!s) { renderLog(null); return; }
-  renderLog(s);
-  // 恢复滚动位置
-  $('#logArea').scrollTop = s._scrollTop || 0;
-  renderTabs();
-  refreshFiles();
-}
-
-function closeSession(threadId) {
-  const s = sessions[threadId];
-  if (!s) return;
-  if (s.stream) s.stream.close();
-  s.ws = null;
-  delete sessions[threadId];
-
-  if (activeSessionId === threadId) {
-    const ids = Object.keys(sessions);
-    if (ids.length > 0) {
-      switchSession(ids[ids.length - 1]); // 切到最新的
-    } else {
-      activeSessionId = null;
-      renderLog(null);
-    }
-  }
-  renderTabs();
-  updateWSStatus();
-}
-
-function closeAllSessions() {
-  Object.keys(sessions).forEach(id => {
-    if (sessions[id].stream) sessions[id].stream.close();
-  });
-  Object.keys(sessions).forEach(id => delete sessions[id]);
-  activeSessionId = null;
-  renderLog(null);
-  renderTabs();
-  updateWSStatus();
-}
-
-// ── 标签栏渲染 ──
-function renderTabs() {
-  const bar = $('#tabBar');
-  const ids = Object.keys(sessions);
-  if (ids.length === 0) { bar.innerHTML = ''; return; }
-
-  bar.innerHTML = ids.map(id => {
-    const s = sessions[id];
-    const active = id === activeSessionId ? ' active' : '';
-    const statusIcon = s.status === 'running' ? '⏳' : s.status === 'error' ? '❌' : '✅';
-    return `<div class="tab${active}" onclick="switchSession('${id}')">
-      <span class="tab-status ${s.status}">${statusIcon}</span>
-      <span class="tab-query" title="${escapeAttr(s.query)}">${escapeHtml(s.query.substring(0, 20))}${s.query.length > 20 ? '...' : ''}</span>
-      <span class="tab-close" onclick="event.stopPropagation();closeSession('${id}')">×</span>
-    </div>`;
-  }).join('');
-}
-
-// ── 日志渲染 ──
-function renderLog(session) {
-  const area = $('#logArea');
-  if (!session || session.logs.length === 0) {
-    area.innerHTML = `<div class="empty-state"><div class="icon">📋</div><div>${session ? '等待 Agent 响应...' : '发送一个任务开始调试'}</div></div>`;
-    return;
-  }
-  area.innerHTML = session.logs.map(l => {
-    const t = tagMap[l.event] || tagMap.tool_start;
-    const resultBlock = l.data?.result
-      ? `<div class="log-result-block">${escapeHtml(l.data.result.substring(0, 800))}${l.data.result.length > 800 ? '…' : ''}</div>`
-      : '';
-    return `<div class="log-entry">
-      <div class="log-dot ${t.dot}"></div>
-      <div class="log-body">
-        <span class="log-tag ${t.tag}">${t.text}</span>
-        <span class="log-msg">${escapeHtml(l.message)}</span>
-        ${resultBlock}
-        <div class="log-time">${fmtTime(l.timestamp)}</div>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-// ── 发送任务 ──
-async function sendTask() {
-  const input = $('#queryInput');
-  const query = input.value.trim();
-  if (!query) return;
-
-  const btn = $('#sendBtn');
-  btn.disabled = true; btn.textContent = '发送中...';
-
-  try {
-    const res = await fetch('/api/task', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || data.status || "提交失败");
-    createSession(data.thread_id, query, data.run_id);
-  } catch (err) {
-    alert('请求失败: ' + err.message);
-  } finally {
-    btn.disabled = false; btn.textContent = '▶ 发送新任务';
-    input.value = '';
-    input.focus();
-  }
-}
-
-// ── WS 状态 ──
-function updateWSStatus() {
-  const ids = Object.keys(sessions);
-  const hasActive = ids.some(id => sessions[id].ws && sessions[id].ws.readyState === WebSocket.OPEN);
-  const dot = $('#wsDot');
-  const txt = $('#wsStatus');
-  dot.className = 'ws-dot' + (hasActive ? '' : ' off');
-  txt.textContent = ids.length === 0 ? '就绪' : `${ids.length} 个会话${hasActive ? ' · 已连接' : ''}`;
-}
-
-// ── 文件浏览 ──
-function scheduleFileRefresh() {
-  if (fileRefreshTimer) clearTimeout(fileRefreshTimer);
-  fileRefreshTimer = setTimeout(refreshFiles, 3000);
-}
-
-async function refreshFiles() {
-  const list = $('#fileList');
-  try {
-    const res = await fetch('/api/files');
-    const d = await res.json();
-    if (d.error || !d.files || d.files.length === 0) {
-      list.innerHTML = `<div class="empty-state"><div class="icon">📂</div><div>还未生成文件</div></div>`;
-      return;
-    }
-    // 优先显示当前活跃会话的文件
-    const currentDir = activeSessionId ? `session_${activeSessionId}` : null;
-    let files = d.files;
-    // 按文件夹分组
-    const groups = {};
-    files.forEach(f => {
-      const parts = f.path.replace(/\\/g, '/').split('/');
-      const idx = parts.findIndex(p => p.startsWith('session_'));
-      const grp = idx >= 0 ? parts[idx] : '其他';
-      if (!groups[grp]) groups[grp] = [];
-      groups[grp].push(f);
-    });
-    // 当前会话排前面
-    const sorted = Object.entries(groups).sort((a,b) => {
-      if (a[0] === currentDir) return -1;
-      if (b[0] === currentDir) return 1;
-      return b[0].localeCompare(a[0]);
-    });
-
-    let html = '';
-    sorted.forEach(([grp, fs]) => {
-      const isActive = grp === currentDir;
-      html += `<div style="font-size:10px;color:var(--text-dim);padding:6px 10px 2px;letter-spacing:.5px;${isActive ? 'color:var(--accent);' : ''}">${isActive ? '▸ ' : ''}${grp}</div>`;
-      fs.forEach(f => html += `
-        <div class="file-item">
-          <div class="file-icon">${iconFor(f.name)}</div>
-          <div class="file-info">
-            <div class="file-name" title="${escapeAttr(f.name)}">${escapeHtml(f.name)}</div>
-            <div class="file-meta">${fmtSize(f.size)} · ${new Date(f.mtime*1000).toLocaleString('zh-CN')}</div>
-          </div>
-          <button class="btn btn-primary" onclick="event.stopPropagation();downloadFile('${encodeURIComponent(f.path)}')">下载</button>
-        </div>`);
-    });
-    list.innerHTML = html;
-  } catch (_) {}
-}
-
-// ── 工具函数 ──
-function escapeHtml(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function escapeAttr(s) { if (!s) return ''; return s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function fmtTime(iso) { try { return new Date(iso).toLocaleTimeString('zh-CN',{hour12:false}); } catch(_) { return ''; } }
-function fmtSize(b) {
-  if (!b) return '0 B';
-  const u = ['B','KB','MB','GB']; let i = 0;
-  while (b >= 1024 && i < 3) { b /= 1024; i++; }
-  return b.toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
-}
-function iconFor(n) { if (n.endsWith('.md')) return '📝'; if (n.endsWith('.pdf')) return '📄'; return '📎'; }
-function downloadFile(p) { window.open(`/api/download?path=${encodeURIComponent(p)}`,'_blank'); }
-
-// ── 键盘 ──
-$('#queryInput').addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); }
-});
-
-// ── 初始 ──
-updateWSStatus();
-refreshFiles();
-</script>
+<script src="/static/app.js"></script>
 </body>
 </html>

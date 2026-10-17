@@ -339,6 +339,11 @@ def validate_tool_call(call):
     args = call.args
     if name == "execute":
         raise PolicyError("Script execution is disabled")
+    if name == "task" and set(args) - {"description", "subagent_type"}:
+        raise PolicyError(
+            "task 仅接受 description 和 subagent_type；完整任务说明和约束必须写入 description，"
+            "不能放在 prompt 等额外字段，否则框架会丢弃这些说明。"
+        )
     if name == "internet_search":
         if not isinstance(args.get("query"), str) or not args["query"].strip():
             raise PolicyError("Search query must not be empty")

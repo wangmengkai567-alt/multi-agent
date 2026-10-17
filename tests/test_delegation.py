@@ -127,6 +127,40 @@ async def test_three_real_task_routes_and_durable_server_ids(runtime, asynchrono
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_extra_task_prompt_cannot_silently_drop_constraints_and_corrected_description_reaches_child(
+    runtime, asynchronous
+):
+    context, store, sink, _ = runtime
+    description = "只查询Shopify官方订单状态，max_results=1；不得扩展到行业趋势。"
+    parent = ScriptedModel(
+        responses=[
+            call("task", {"subagent_type": "search", "description": "订单状态", "prompt": description}, "bad-args"),
+            call("task", {"subagent_type": "search", "description": description}, "corrected-args"),
+            AIMessage(content="done"),
+        ]
+    )
+    child = ScriptedModel(responses=[AIMessage(content="official documentation result")])
+    agent = build(SubagentRegistry([spec("search")]), parent, {"search": child})
+    state = (
+        await agent.ainvoke({"messages": [("user", description)]})
+        if asynchronous
+        else await asyncio.to_thread(agent.invoke, {"messages": [("user", description)]})
+    )
+    refused = next(m for m in state["messages"] if isinstance(m, ToolMessage) and m.tool_call_id == "bad-args")
+    assert refused.status == "error" and "description" in refused.text and "prompt" in refused.text
+    # The first proposal never entered the executor; the corrected task is received intact.
+    assert len(child.seen_messages) == 1
+    assert any(m.content == description for m in child.seen_messages[0])
+    assert any(isinstance(m, ToolMessage) and m.status == "error" for m in parent.seen_messages[1])
+    await sink.flush(context.run_id)
+    tasks = await store.list_subtasks(context.run_id)
+    assert len(tasks) == 1 and tasks[0]["request_call_id"] == "corrected-args"
+    assert tasks[0]["description_length"] == len(description)
+    assert context.call_counts["tool"] == 1 and context.call_counts["main_model"] == 3
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("target", ["missing", "general-purpose", "市场情报助手"])
 async def test_unknown_and_default_targets_rejected_before_routing(runtime, target):
     context, store, sink, _ = runtime

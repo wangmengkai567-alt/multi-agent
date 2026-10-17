@@ -1,0 +1,6 @@
+Checked listener 127.0.0.1:8765
+ListenerCount=0
+FinalServerPID=17720
+FinalServerProcessExists=False
+Graceful shutdown: ACCEPTANCE_SERVER_STOPPED, exit code 0
+Rebind 127.0.0.1:8765: PASS; probe socket closed

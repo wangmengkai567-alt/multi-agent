@@ -17,7 +17,7 @@ from utils.path_utils import resolve_path
 def generate_markdown(
     content: Annotated[str, "要写入Markdown文档的文本内容"],
     filename: Annotated[str, "Markdown文档的文件名（不包含扩展名或包含.md）"],
-    path: Annotated[str, "文件保存的绝对路径"] = "",
+    path: Annotated[str, "相对本轮工作目录的子目录；默认留空，禁止拼接本机绝对路径或output/session/run前缀"] = "",
 ):
     """根据提供的文本内容，生成对应的Markdown(.md)文件"""
     monitor.report_tool("Markdown文档生成工具", {"写入的文本内容": content})
@@ -45,7 +45,8 @@ def generate_markdown(
             parent_dir.mkdir(parents=True, exist_ok=True)
 
         # 使用 Path 直接写入文本
-        file_path.write_text(content, encoding="utf-8")
+        normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+        file_path.write_bytes(normalized.replace("\n", "\r\n").encode("utf-8"))
 
         return f"Markdown文件 '{file_path}' 已成功生成并保存。"
     except Exception as e:
