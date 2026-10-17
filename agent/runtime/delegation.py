@@ -215,6 +215,7 @@ class DelegationRunnable(Runnable):
                 input = sync_result(self.results.search_input(context, call, input), context.event_sink)
             current = input
             for attempt in range(self.spec.review_config.max_refinements + 1):
+                context.check_active()
                 evidence = []
                 evidence_token = tool_evidence.set(evidence)
                 dependency = None
@@ -228,6 +229,7 @@ class DelegationRunnable(Runnable):
                         result = {"messages": [AIMessage(content="")]}
                 finally:
                     tool_evidence.reset(evidence_token)
+                context.check_active()
                 self._returned(call, record, result)
                 if not self.spec.review_config.enabled:
                     if context.event_sink is not None:

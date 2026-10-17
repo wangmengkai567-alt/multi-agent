@@ -10,7 +10,14 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 from mysql.connector import connect
 
-from agent.runtime.policies import PolicyError, policy_for_run, require_db_credentials, validate_sql, validate_table
+from agent.runtime.policies import (
+    PolicyError,
+    policy_for_run,
+    request_timeout,
+    require_db_credentials,
+    validate_sql,
+    validate_table,
+)
 from api.monitor import monitor
 
 
@@ -18,6 +25,7 @@ def get_db_config():
     load_dotenv()
     require_db_credentials()
     limits = policy_for_run().sql
+    timeout = max(1, int(request_timeout(limits.timeout_seconds)))
     database = os.getenv("MYSQL_DATABASE")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", database):
         raise PolicyError("Database name must be a simple identifier")
@@ -29,9 +37,9 @@ def get_db_config():
         "database": database,
         "charset": "utf8mb4",
         "autocommit": False,
-        "connection_timeout": limits.timeout_seconds,
-        "read_timeout": limits.timeout_seconds,
-        "write_timeout": limits.timeout_seconds,
+        "connection_timeout": timeout,
+        "read_timeout": timeout,
+        "write_timeout": timeout,
         "allow_local_infile": False,
         "use_pure": True,
     }

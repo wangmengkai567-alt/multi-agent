@@ -238,7 +238,7 @@ async def test_shutdown_cancels_before_closing_database(isolated_runtime, monkey
     store = await RunStore.open(server.run_db_path)
     try:
         saved = await store.get(response["run_id"])
-        assert saved["status"] == "cancelled" and saved["ended_at"]
+        assert saved["status"] == "interrupted" and saved["ended_at"]
     finally:
         await store.close()
 

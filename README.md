@@ -6,6 +6,8 @@
 
 第 07 步的运行配置集中在 `config/runtime.yml`：工具执行前检查 SQL、文件路径和调用预算；用户源文件位于本轮 `uploads/` 并保持只读。数据库查询需要独立的 `MYSQL_READONLY_USER`、`MYSQL_READONLY_PASSWORD`，旧管理员字段不再用于查询；账号会在实际查询前接受权限核验。人工配置示例见 `sql/read_only_user.example.sql`，验证范围和限制见 `docs/implementation/07-policies.md`。
 
+第 13 步已接入总超时、按运行取消、持久事件分页读取及 WebSocket 游标重连。配置见 `config/runtime.yml` 的 `timeouts`；取消用 `POST /api/runs/{run_id}/cancel`，补读用 `GET /api/runs/{run_id}/events?after_seq=...`。退出与重启会将未完成运行标为 `interrupted`，不会自动恢复执行。接口、测试与边界见 `docs/implementation/13-reliability.md`。
+
 第 12 步新增显式业务模式：`/api/task` 的 `business_mode` 默认 `ordinary`，可自由选择助手；`internal_external` 必须同时显式选择 `skill_ids: ["ecommerce-analysis"]`，由服务端检查本轮数据库结果、搜索关联和报告前置条件。可选 `required_sources`、`required_uploads` 指定本轮必须完成的查询和读取文件；数据库依赖不可用时只交付明确标注的外部资料降级结果。请求示例、验证与边界见 `docs/implementation/12-workflows.md`。
 
 ## 🏗️ 架构

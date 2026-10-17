@@ -97,7 +97,14 @@ class ReviewLimits(StrictConfig):
     on_check_failure: str = Field(default="reject", pattern="^(reject|return_unchecked)$")
 
 
+class TimeoutLimits(StrictConfig):
+    total_seconds: float = Field(default=300.0, gt=0, le=86400)
+    request_seconds: float = Field(default=30.0, gt=0, le=300)
+    shutdown_seconds: float = Field(default=5.0, gt=0, le=30)
+
+
 class RuntimePolicy(StrictConfig):
+    timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)
     budgets: Budgets
     sql: SQLLimits
     files: FileLimits
@@ -128,9 +135,11 @@ def reserve_calls(*kinds):
     if not kinds or set(kinds) - set(KINDS):
         raise ValueError("Unknown or empty call category")
     context = get_run_context()
+    context.check_active()
     limits = policy_for_run().budgets
     requested = {kind: kinds.count(kind) for kind in set(kinds)}
     with context.budget_lock:
+        context.check_active()
         if sum(context.call_counts.values()) + len(kinds) > limits.total:
             raise BudgetExceeded("Total run call budget exhausted")
         for kind, count in requested.items():
@@ -138,6 +147,14 @@ def reserve_calls(*kinds):
                 raise BudgetExceeded(f"{kind} call budget exhausted")
         for kind, count in requested.items():
             context.call_counts[kind] += count
+
+
+def request_timeout(maximum=None):
+    context = get_run_context()
+    limits = policy_for_run().timeouts
+    context.check_active()
+    remaining = context.remaining()
+    return min(value for value in (limits.request_seconds, maximum, remaining) if value is not None)
 
 
 SAFE_FUNCTIONS = frozenset(

@@ -4,11 +4,13 @@ import sys
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from typing import Literal
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
@@ -21,7 +23,7 @@ sys.path.insert(0, str(project_root))
 
 # Import agent runner and monitor
 from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
-from agent.runtime.context import RunContext, reset_run_context, set_run_context  # noqa: E402
+from agent.runtime.context import RunContext, RunStopped, reset_run_context, set_run_context  # noqa: E402
 from agent.runtime.events import EventSink  # noqa: E402
 from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
 from agent.runtime.policies import load_runtime_policy  # noqa: E402
@@ -40,6 +42,7 @@ def _task_finished(task, run_id):
     app.state.agent_tasks.discard(task)
     if app.state.run_tasks.get(run_id) is task:
         del app.state.run_tasks[run_id]
+        app.state.run_contexts.pop(run_id, None)
     if not task.cancelled():
         error = task.exception()
         if error is not None:
@@ -50,32 +53,70 @@ def _task_finished(task, run_id):
             )
 
 
+def _execution_finished(task, executions):
+    executions.discard(task)
+    if not task.cancelled():
+        task.exception()  # Detached late errors cannot change the saved outcome.
+
+
+async def _run_body(record, context):
+    token = set_run_context(context)
+    try:
+        context.check_active()
+        pipeline.emit("before_run", HookCall("main", context.run_id))
+        answer = await run_deep_agent(record["question"], context.thread_id)
+        context.check_active()
+        answer = await finalize_answer(context, answer)
+        context.check_active()
+        return answer
+    finally:
+        reset_run_context(token)
+
+
 async def _execute_run(record, context):
     token = set_run_context(context)
     outcome = HookCall("main", context.run_id)
     answer = None
     error = None
+    worker = None
     try:
+        if context.remaining() is None:
+            context.policy = context.policy or load_runtime_policy()
+            duration = context.policy.timeouts.total_seconds
+            context.deadline = datetime.now(UTC) + timedelta(seconds=duration)
+            context.deadline_clock = monotonic() + duration
         if not await context.event_sink.start(context):
             return
-        pipeline.emit("before_run", outcome)
-        answer = await run_deep_agent(record["question"], context.thread_id)
-        answer = await finalize_answer(context, answer)
+        worker = asyncio.create_task(_run_body(record, context), name=f"execution:{context.run_id}")
+        executions = getattr(app.state, "execution_tasks", set())
+        executions.add(worker)
+        worker.add_done_callback(lambda task: _execution_finished(task, executions))
+        done, _ = await asyncio.wait({worker}, timeout=max(0, context.remaining()))
+        if not done:
+            context.stop("timed_out")
+            raise RunStopped("Total run deadline exceeded")
+        answer = worker.result()
+        context.check_active()
         outcome.status, outcome.result = "completed", answer
     except asyncio.CancelledError:
-        outcome.status = "cancelled"
+        outcome.status = context.stop_status or context.stop("cancelled")
         error = "Service execution cancelled"
         pipeline.emit("on_error", HookCall("main", context.run_id, status="cancelled", error=asyncio.CancelledError()))
         raise
     except Exception as exc:
-        outcome.status, outcome.error = "failed", exc
-        error = str(exc)
+        outcome.status, outcome.error = context.stop_status or "failed", exc
+        error = str(exc) or type(exc).__name__
         pipeline.emit("on_error", outcome)
         raise
     finally:
         try:
             if outcome.status != "running":
+                if outcome.status != "completed":
+                    context.stop(outcome.status)
+                if worker is not None and not worker.done():
+                    worker.cancel()
                 await finish_run(context, outcome, answer=answer, error=error)
+                context.stop(outcome.status)
         finally:
             reset_run_context(token)
 
@@ -84,6 +125,8 @@ async def _execute_run(record, context):
 async def lifespan(app):
     app.state.agent_tasks = set()
     app.state.run_tasks = {}
+    app.state.run_contexts = {}
+    app.state.execution_tasks = set()
     app.state.submission_lock = asyncio.Lock()
     app.state.stopping = False
     store = None
@@ -95,18 +138,28 @@ async def lifespan(app):
         app.state.run_store = store
         sink = EventSink(store, manager.schedule_delivery)
         app.state.event_sink = sink
+        await sink.interrupt_active("Service restarted; previous execution was interrupted")
         output_dir.mkdir(exist_ok=True)
         updated_dir.mkdir(exist_ok=True)
         manager.set_loop(asyncio.get_running_loop())
+        manager.store = store
         yield
     finally:
         app.state.stopping = True
         # Wait for an admission already in progress before snapshotting tasks.
         async with app.state.submission_lock:
             tasks = list(app.state.agent_tasks)
+        for context in list(app.state.run_contexts.values()):
+            context.stop("interrupted")
+            await sink.finish(context, "interrupted", error="Service shut down before execution completed")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        executions = set(app.state.execution_tasks)
+        for task in executions:
+            task.cancel()
+        if executions:
+            await asyncio.wait(executions, timeout=app.state.runtime_policy.timeouts.shutdown_seconds)
         try:
             if sink is not None:
                 try:
@@ -227,6 +280,8 @@ async def run_task(request: TaskRequest):
             run_id,
             thread_id,
             output_dir / f"session_{thread_id}" / f"run_{run_id}",
+            deadline=datetime.now(UTC) + timedelta(seconds=app.state.runtime_policy.timeouts.total_seconds),
+            deadline_clock=monotonic() + app.state.runtime_policy.timeouts.total_seconds,
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
             skill_ids=tuple(request.skill_ids or ()),
@@ -234,6 +289,7 @@ async def run_task(request: TaskRequest):
             required_sources=tuple(request.required_sources),
             required_uploads=tuple(request.required_uploads),
         )
+        app.state.run_contexts[run_id] = context
         record = dict(record, question=request.query)
         task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}")
         app.state.agent_tasks.add(task)
@@ -248,6 +304,41 @@ async def get_run(run_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return record
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    async with app.state.submission_lock:
+        record = await app.state.run_store.get(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        context = app.state.run_contexts.get(run_id)
+        if record["status"] in ("queued", "running"):
+            context = context or RunContext(run_id, record["thread_id"], output_dir)
+            status = context.stop("cancelled")
+            if status in ("cancelled", "timed_out", "interrupted"):
+                await app.state.event_sink.finish(context, status, error="Cancelled by user")
+            task = app.state.run_tasks.get(run_id)
+            if status in ("cancelled", "timed_out", "interrupted") and task is not None and not task.done():
+                task.cancel()
+        return await app.state.run_store.get(run_id)
+
+
+@app.get("/api/runs/{run_id}/events")
+async def get_run_events(
+    run_id: str, after_seq: int = Query(0, ge=0, le=9007199254740991), limit: int = Query(200, ge=1, le=1000)
+):
+    record = await app.state.run_store.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    events = await app.state.run_store.list_events(run_id, after_seq=after_seq, limit=limit + 1)
+    return {
+        "run_id": run_id,
+        "thread_id": record["thread_id"],
+        "events": events[:limit],
+        "next_seq": events[min(len(events), limit) - 1]["event_seq"] if events else after_seq,
+        "has_more": len(events) > limit,
+    }
 
 
 @app.get("/api/runs/{run_id}/history")
@@ -329,52 +420,31 @@ async def list_files(path: str | None = None):
     return {"files": files}
 
 
-# 当浏览器请求 ws://localhost:8000/ws/thread_123 时：
-# 1. 路由匹配 ：FastAPI 发现这个 URL 匹配了你写的 @app.websocket("/ws/{thread_id}") 。
-# 2. 创建对象 ：FastAPI (基于 Starlette) 会立刻在 主事件循环 中实例化一个 WebSocket 对象。
-#    - 这个对象封装了底层的 TCP 连接、HTTP 握手信息、以及后续的消息收发方法 ( send_text , receive_text 等)。
-# 3. 注入参数 ：FastAPI 自动把这个刚创建好的 WebSocket 对象，作为参数传给你的 websocket_endpoint(websocket, ...) 函数。
 @app.websocket("/ws/{thread_id}")
-async def websocket_endpoint(websocket: WebSocket, thread_id: str):
-    print(f"会话向我们发起了请求，要求简历连接：{thread_id} 对应：{websocket}")
-    """
-    WebSocket 实时通讯核心接口 (Real-time Communication)。
-
-    目标：
-    1. 建立长连接，实现服务端与前端的双向通信。
-    2. 绑定 `thread_id`，实现会话级消息隔离。
-    3. 维持心跳 (Keep-Alive)，防止连接超时。
-
-    执行步骤：
-    1. 握手：接受 WebSocket 连接请求。
-    2. 注册：将连接实例绑定到 `monitor.manager`，关联 `thread_id`。
-    3. 循环：进入消息监听循环，处理前端发送的心跳或指令。
-    4. 异常：捕获断开连接异常，清理资源。
-
-    Args:
-        websocket (WebSocket): WebSocket 连接实例。
-        thread_id (str): 当前会话的唯一标识。
-    """
-    # 1. [注册] 建立连接并绑定到管理器
-    await manager.connect(websocket, thread_id)
-
+async def websocket_endpoint(
+    websocket: WebSocket, thread_id: str, run_id: str | None = None, after_seq: int = Query(0, ge=0)
+):
     try:
-        # 2. [循环] 保持连接活跃
+        validate_identifier(thread_id)
+    except PathDenied:
+        await websocket.close(code=1008)
+        return
+    if after_seq and run_id is None:
+        await websocket.close(code=1008)
+        return
+    if run_id is not None:
+        record = await app.state.run_store.get(run_id)
+        if record is None or record["thread_id"] != thread_id:
+            await websocket.close(code=1008)
+            return
+    await manager.connect(websocket, thread_id, run_id=run_id, after_seq=after_seq)
+    try:
         while True:
-            # 3. [监听] 接收前端消息 (通常是 ping 心跳)
             data = await websocket.receive_text()
-
-            # 4. [响应] 回复 pong 消息
-            await websocket.send_json({"type": "pong", "message": f"服务端已收到: {data}"})
-
+            await manager.pong(websocket, {"type": "pong", "message": f"服务端已收到: {data}"})
     except WebSocketDisconnect:
-        # 5. [清理] 客户端主动断开
-        manager.disconnect(websocket, thread_id)
-        print(f"[WebSocket] 客户端已断开: {thread_id}")
-
-    except Exception as e:
-        # 6. [异常] 发生错误时断开
-        print(f"[WebSocket] 连接异常: {e}")
+        pass
+    finally:
         manager.disconnect(websocket, thread_id)
 
 

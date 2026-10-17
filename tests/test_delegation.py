@@ -13,7 +13,7 @@ from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import tool
 from test_framework_contract import ScriptedModel, call
 
-from agent.runtime.context import RunContext, get_run_context, reset_run_context, set_run_context
+from agent.runtime.context import RunContext, RunStopped, get_run_context, reset_run_context, set_run_context
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.events import EventPersistenceError, EventSink
 from agent.runtime.hooks import HookPipeline, HookRejected, HookToolMiddleware, active_call, default_pipeline
@@ -218,10 +218,10 @@ async def test_expired_deadline_stops_executor(runtime):
     context.deadline = datetime.now(UTC) - timedelta(seconds=1)
     calls = []
     wrapper = DelegationRunnable(spec("knowledge"), RunnableLambda(lambda state: calls.append(1)))
-    with pytest.raises(HookRejected, match="deadline"):
+    with pytest.raises(RunStopped, match="timed_out"):
         await wrapper.ainvoke({"messages": [HumanMessage(content="query")]})
     await sink.flush(context.run_id)
-    assert calls == [] and (await store.list_subtasks(context.run_id))[0]["status"] == "rejected"
+    assert calls == [] and (await store.list_subtasks(context.run_id))[0]["status"] == "failed"
 
 
 @pytest.mark.asyncio

@@ -422,6 +422,7 @@ async def test_run_boundary_hooks_and_context_cleanup(sandbox_dir, monkeypatch, 
             "after_run",
         ]
         assert (await store.get(context.run_id))["status"] == outcome
+        assert context.deadline is not None
         assert get_run_context() is None
     finally:
         await sink.close()

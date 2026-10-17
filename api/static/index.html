@@ -203,6 +203,7 @@
   </div>
 </div>
 
+<script src="/static/run-events.js"></script>
 <script>
 // ── 会话管理 ──
 const sessions = {};    // { threadId: { id, query, logs[], ws, dir, status, element } }
@@ -226,10 +227,12 @@ const tagMap = {
   error:           { dot:'e', tag:'e', text:'错误' },
 };
 
-function createSession(threadId, query) {
+function createSession(threadId, query, runId) {
   const session = {
     id: threadId,
     query,
+    runId,
+    stream: null,
     logs: [],
     ws: null,
     dir: null,
@@ -238,36 +241,21 @@ function createSession(threadId, query) {
   };
   sessions[threadId] = session;
 
-  // 连 WebSocket
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = `${proto}//${location.host}/ws/${threadId}`;
-  const ws = new WebSocket(url);
-  ws.onopen = () => { updateWSStatus(); };
-  ws.onmessage = (e) => {
-    try {
-      const d = JSON.parse(e.data);
-      if (d.type === 'pong') return;
-      if (d.type !== 'monitor_event') return;
-
-      session.logs.push({ event: d.event, message: d.message, data: d.data, timestamp: d.timestamp });
-      if (d.event === 'session_created' && d.data?.path) {
-        session.dir = d.data.path;
-        scheduleFileRefresh();
-      }
-      if (d.event === 'task_result') { session.status = 'done'; scheduleFileRefresh(); }
-      if (d.event === 'error') { session.status = 'error'; }
-
-      renderTabs();
-      if (activeSessionId === threadId) renderLog(session);
-    } catch (_) {}
-  };
-  ws.onclose = () => {
-    if (session.status === 'running') session.status = 'done';
-    updateWSStatus();
+  session.stream = new RunEventStream(threadId, runId, (d) => {
+    session.logs.push({ ...d });
+    if (d.event === 'session_created' && d.data?.path) {
+      session.dir = d.data.path;
+      scheduleFileRefresh();
+    }
+    if (d.event === 'task_result') { session.status = 'done'; scheduleFileRefresh(); }
+    if (['error', 'run_cancelled', 'run_timed_out', 'run_interrupted'].includes(d.event)) session.status = 'error';
     renderTabs();
-  };
-  ws.onerror = () => { session.status = 'error'; updateWSStatus(); renderTabs(); };
-  session.ws = ws;
+    if (activeSessionId === threadId) renderLog(session);
+  }, (socket) => {
+    session.ws = socket;
+    updateWSStatus();
+  });
+  session.stream.connect();
 
   // 切换到此会话
   switchSession(threadId);
@@ -294,7 +282,8 @@ function switchSession(threadId) {
 function closeSession(threadId) {
   const s = sessions[threadId];
   if (!s) return;
-  if (s.ws) { s.ws.close(); s.ws = null; }
+  if (s.stream) s.stream.close();
+  s.ws = null;
   delete sessions[threadId];
 
   if (activeSessionId === threadId) {
@@ -312,7 +301,7 @@ function closeSession(threadId) {
 
 function closeAllSessions() {
   Object.keys(sessions).forEach(id => {
-    if (sessions[id].ws) sessions[id].ws.close();
+    if (sessions[id].stream) sessions[id].stream.close();
   });
   Object.keys(sessions).forEach(id => delete sessions[id]);
   activeSessionId = null;
@@ -378,7 +367,8 @@ async function sendTask() {
       body: JSON.stringify({ query }),
     });
     const data = await res.json();
-    createSession(data.thread_id, query);
+    if (!res.ok) throw new Error(data.detail || data.status || "提交失败");
+    createSession(data.thread_id, query, data.run_id);
   } catch (err) {
     alert('请求失败: ' + err.message);
   } finally {

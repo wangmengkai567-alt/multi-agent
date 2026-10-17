@@ -1,3 +1,7 @@
+timeouts:
+  total_seconds: 300.0
+  request_seconds: 30.0
+  shutdown_seconds: 5.0
 review:
   on_check_failure: reject
 budgets:

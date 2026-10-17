@@ -430,7 +430,7 @@ async def test_v3_migration_preserves_existing_runs_events_and_subtasks(runtime,
         assert all(history[key] == before[key] for key in ("run", "events", "subtasks"))
         assert history["results"] == []
         async with upgraded.connection.execute("PRAGMA user_version") as cursor:
-            assert (await cursor.fetchone())[0] == 4
+            assert (await cursor.fetchone())[0] == 5
     finally:
         await upgraded.close()
 
@@ -449,3 +449,22 @@ async def test_http_history_keeps_internal_and_external_results_separate(runtime
     assert response.status_code == 200
     rows = response.json()["results"]
     assert [(r["source"], r["summary"]) for r in rows] == [("db", "internal total=20"), ("search", "external total=30")]
+
+
+@pytest.mark.asyncio
+async def test_v4_migration_preserves_checked_result_foreign_keys(runtime, sandbox_dir):
+    context, store, sink, _ = runtime
+    await delegate()
+    await sink.flush()
+    before = await store.history(context.run_id)
+    legacy = sandbox_dir / "v4.db"
+    with sqlite3.connect(sandbox_dir / "results.db") as current, sqlite3.connect(legacy) as old:
+        current.backup(old)
+        old.execute("PRAGMA user_version=4")
+    migrated = await RunStore.open(legacy)
+    try:
+        assert await migrated.history(context.run_id) == before
+        async with migrated.connection.execute("PRAGMA foreign_key_check") as cursor:
+            assert await cursor.fetchall() == []
+    finally:
+        await migrated.close()

@@ -4,7 +4,7 @@ import requests
 from langchain_core.tools import tool
 from ragflow_sdk import RAGFlow
 
-from agent.runtime.policies import MissingConfiguration, policy_for_run
+from agent.runtime.policies import MissingConfiguration, policy_for_run, request_timeout
 from api.monitor import monitor
 from rawflow.rag_config import _load_ragflow_env
 
@@ -15,7 +15,7 @@ class BoundedRAGFlow(RAGFlow):
             method,
             self.api_url + path,
             headers=self.authorization_header,
-            timeout=policy_for_run().sql.timeout_seconds,
+            timeout=request_timeout(policy_for_run().sql.timeout_seconds),
             **kwargs,
         )
         response.raise_for_status()

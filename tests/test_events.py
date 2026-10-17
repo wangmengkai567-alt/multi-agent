@@ -163,7 +163,7 @@ async def test_version_one_migrates_without_losing_runs(sandbox_dir):
         assert await store.get(record["run_id"]) == before
         assert await store.list_events(record["run_id"]) == []
         async with store.connection.execute("PRAGMA user_version") as cursor:
-            assert (await cursor.fetchone())[0] == 4
+            assert (await cursor.fetchone())[0] == 5
     finally:
         await store.close()
 

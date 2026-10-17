@@ -163,6 +163,8 @@ class ConnectionManager:
         self.loop = None
         self.delivery_tasks = set()
         self._closing = False
+        self.store = None
+        self.connections = {}
 
     def set_loop(self, loop):
         """显式设置事件循环"""
@@ -215,27 +217,72 @@ class ConnectionManager:
             except Exception:
                 logging.getLogger(__name__).exception("WebSocket close failed")
         self.active_connections.clear()
+        self.connections.clear()
+        self.store = None
         self.loop = None
         monitor.set_websocket_manager(None)
 
-    async def connect(self, websocket: WebSocket, thread_id: str):
+    async def _catch_up(self, websocket, state, run_id):
+        if self.store is None:
+            return
+        while True:
+            events = await self.store.list_events(run_id, after_seq=state["cursors"].get(run_id, 0), limit=1000)
+            if not events:
+                return
+            for event in events:
+                await asyncio.wait_for(websocket.send_json(dict(event, type="monitor_event")), timeout=5)
+                state["cursors"][run_id] = event["event_seq"]
+
+    async def connect(self, websocket: WebSocket, thread_id: str, *, run_id=None, after_seq=0):
         await websocket.accept()
-        print(f"存储当前会话id:{thread_id}对应的:{websocket}")
-        self.active_connections[thread_id] = websocket
-        print(f"Client connected: {thread_id}")
+        state = {"lock": asyncio.Lock(), "run_id": run_id, "cursors": {run_id: after_seq} if run_id else {}}
+        self.connections[websocket] = state
+        async with state["lock"]:
+            previous = self.active_connections.get(thread_id)
+            self.active_connections[thread_id] = websocket
+            if previous is not None and previous is not websocket:
+                self.connections.pop(previous, None)
+                await asyncio.wait_for(previous.close(code=1000), timeout=5)
+            try:
+                runs = [run_id] if run_id else await self.store.thread_runs(thread_id) if self.store else []
+                for current in runs:
+                    await self._catch_up(websocket, state, current)
+            except BaseException:
+                self.disconnect(websocket, thread_id)
+                raise
 
     def disconnect(self, websocket: WebSocket, thread_id: str):
-        if thread_id in self.active_connections:
+        if self.active_connections.get(thread_id) is websocket:
             del self.active_connections[thread_id]
-        print(f"Client disconnected: {thread_id}")
+        self.connections.pop(websocket, None)
+
+    async def pong(self, websocket, payload):
+        state = self.connections.get(websocket)
+        if state is not None:
+            async with state["lock"]:
+                await asyncio.wait_for(websocket.send_json(payload), timeout=5)
 
     async def send_personal_message(self, message: str, websocket: WebSocket):
         await websocket.send_text(message)
 
     async def send_to_thread(self, message: dict, thread_id: str):
-        if thread_id in self.active_connections:
-            websocket = self.active_connections[thread_id]
+        websocket = self.active_connections.get(thread_id)
+        if websocket is None:
+            return
+        state = self.connections.get(websocket)
+        if state is None:
             await websocket.send_json(message)
+            return
+        run_id = message.get("run_id")
+        if state["run_id"] is not None and state["run_id"] != run_id:
+            return
+        async with state["lock"]:
+            if self.active_connections.get(thread_id) is not websocket:
+                return
+            if run_id and "event_seq" in message and self.store is not None:
+                await self._catch_up(websocket, state, run_id)
+            else:
+                await websocket.send_json(message)
 
 
 manager = ConnectionManager()

@@ -2,9 +2,14 @@
 
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
+from time import monotonic
+
+
+class RunStopped(RuntimeError):
+    """Execution ended; neither new actions nor late results are allowed."""
 
 
 @dataclass
@@ -13,6 +18,8 @@ class RunContext:
     thread_id: str
     work_dir: Path
     deadline: datetime | None = None
+    deadline_clock: float | None = None
+    stop_status: str | None = None
     event_sink: object | None = field(default=None, repr=False)
     hook_failures: list[str] = field(default_factory=list, repr=False)
     policy: object | None = field(default=None, repr=False)
@@ -32,6 +39,27 @@ class RunContext:
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
     )
+
+    def stop(self, status):
+        with self.budget_lock:
+            if self.stop_status is None:
+                self.stop_status = status
+            return self.stop_status
+
+    def remaining(self):
+        if self.deadline_clock is not None:
+            return self.deadline_clock - monotonic()
+        if self.deadline is not None:
+            return (self.deadline - datetime.now(UTC)).total_seconds()
+        return None
+
+    def check_active(self):
+        with self.budget_lock:
+            remaining = self.remaining()
+            if self.stop_status is None and remaining is not None and remaining <= 0:
+                self.stop_status = "timed_out"
+            if self.stop_status is not None:
+                raise RunStopped(f"Run has ended: {self.stop_status}")
 
 
 _current_run: ContextVar[RunContext | None] = ContextVar("current_run", default=None)

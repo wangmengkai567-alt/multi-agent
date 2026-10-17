@@ -9,7 +9,7 @@ from uuid import uuid4
 import aiosqlite
 
 ACTIVE = ("queued", "running")
-TERMINAL = ("completed", "failed", "cancelled", "interrupted")
+TERMINAL = ("completed", "failed", "cancelled", "interrupted", "timed_out")
 
 
 def _now():
@@ -44,7 +44,7 @@ class RunStore:
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise RuntimeError(f"Unsupported run database schema version: {version}")
             if version == 0:
                 try:
@@ -158,6 +158,35 @@ class RunStore:
                         );
                         CREATE INDEX results_by_run ON results(run_id,source,created_at);
                         PRAGMA user_version = 4;
+                        COMMIT;
+                    """)
+                except BaseException:
+                    await self.connection.rollback()
+                    raise
+
+            if version < 5:
+                try:
+                    await self.connection.executescript("""
+                        BEGIN IMMEDIATE;
+                        CREATE TABLE runs_v5 (
+                            run_id TEXT PRIMARY KEY,
+                            thread_id TEXT NOT NULL,
+                            question TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK(status IN
+                                ('queued','running','completed','failed','cancelled','interrupted','timed_out')),
+                            answer TEXT,
+                            error TEXT,
+                            created_at TEXT NOT NULL,
+                            ended_at TEXT,
+                            CHECK((status IN ('queued','running') AND ended_at IS NULL)
+                                OR (status NOT IN ('queued','running') AND ended_at IS NOT NULL))
+                        );
+                        INSERT INTO runs_v5 SELECT * FROM runs;
+                        DROP TABLE runs;
+                        ALTER TABLE runs_v5 RENAME TO runs;
+                        CREATE UNIQUE INDEX one_active_run_per_thread
+                            ON runs(thread_id) WHERE status IN ('queued','running');
+                        PRAGMA user_version = 5;
                         COMMIT;
                     """)
                 except BaseException:
@@ -374,9 +403,20 @@ class RunStore:
             rows = await cursor.fetchall()
         return [dict(row, data=json.loads(row["data"])) for row in rows]
 
-    async def list_events(self, run_id: str):
+    async def list_events(self, run_id: str, *, after_seq=0, limit=None):
         async with self._lock:
-            return await self._list_events(run_id)
+            async with self.connection.execute(
+                "SELECT * FROM events WHERE run_id=? AND event_seq>? ORDER BY event_seq LIMIT ?",
+                (run_id, after_seq, -1 if limit is None else limit),
+            ) as cursor:
+                return [dict(row, data=json.loads(row["data"])) for row in await cursor.fetchall()]
+
+    async def thread_runs(self, thread_id):
+        async with self._lock:
+            async with self.connection.execute(
+                "SELECT run_id FROM runs WHERE thread_id=? ORDER BY created_at,run_id", (thread_id,)
+            ) as cursor:
+                return [row["run_id"] for row in await cursor.fetchall()]
 
     async def history(self, run_id: str):
         async with self._lock:
@@ -470,6 +510,17 @@ class RunStore:
                 )
                 changed = cursor.rowcount == 1
                 await cursor.close()
+                if changed:
+                    await self.connection.execute(
+                        """UPDATE subtasks SET status=?,result=NULL,error=?,ended_at=?
+                           WHERE run_id=? AND status IN ('queued','running')""",
+                        (
+                            "cancelled" if status == "cancelled" else "interrupted",
+                            error or "Parent run ended",
+                            _now(),
+                            run_id,
+                        ),
+                    )
                 saved = await self._append_event(event) if changed and event is not None else None
                 await self.connection.commit()
                 return saved if event is not None else changed
@@ -478,18 +529,9 @@ class RunStore:
                 raise
 
     async def interrupt_active(self, reason: str):
-        """Settle shutdown leftovers, including tasks cancelled before first execution."""
-        async with self._lock:
-            try:
-                await self.connection.execute(
-                    """UPDATE runs SET status='interrupted',error=?,ended_at=?
-                       WHERE status IN ('queued','running')""",
-                    (reason, _now()),
-                )
-                await self.connection.commit()
-            except BaseException:
-                await self.connection.rollback()
-                raise
+        """Settle active runs and children without replacing prior terminal output."""
+        for record in await self.list_active():
+            await self.finish(record["run_id"], "interrupted", error=reason)
 
     async def close(self):
         async with self._lock:

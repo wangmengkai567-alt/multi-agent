@@ -141,7 +141,7 @@ async def test_two_sessions_run_concurrently_without_mixed_outputs(service):
     assert len(server.app.state.run_tasks) == 2
     for record in records:
         context = agent.contexts[record["run_id"]]
-        assert context.call_counts["tool"] == 0 and context.deadline is None
+        assert context.call_counts["tool"] == 0 and context.deadline is not None
         assert context.work_dir == server.output_dir / f"session_{record['thread_id']}" / f"run_{record['run_id']}"
         assert (await client.get(f"/api/runs/{record['run_id']}")).json()["status"] == "running"
     await asyncio.gather(*(complete(agent, record["run_id"]) for record in records))

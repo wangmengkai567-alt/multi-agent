@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
-from agent.runtime.policies import MissingConfiguration, policy_for_run
+from agent.runtime.policies import MissingConfiguration, policy_for_run, request_timeout
 from api.monitor import monitor
 
 
@@ -32,5 +32,5 @@ def internet_search(
             topic=topic,
             max_results=max_results,
             include_raw_content=include_raw_content,
-            timeout=policy_for_run().sql.timeout_seconds,
+            timeout=request_timeout(policy_for_run().sql.timeout_seconds),
         )

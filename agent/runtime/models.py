@@ -1,12 +1,14 @@
 """Count every model invocation, including framework summarization and review."""
 
+import asyncio
 from typing import Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 
-from agent.runtime.policies import reserve_calls
+from agent.runtime.context import get_run_context
+from agent.runtime.policies import request_timeout, reserve_calls
 
 
 class BudgetChatModel(BaseChatModel):
@@ -28,13 +30,18 @@ class BudgetChatModel(BaseChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         reserve_calls(self.category)
         config = {"callbacks": run_manager.handlers} if run_manager else None
+        kwargs["timeout"] = request_timeout()
         message = self.delegate.invoke(messages, config=config, stop=stop, **kwargs)
+        get_run_context().check_active()
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         reserve_calls(self.category)
         config = {"callbacks": run_manager.handlers} if run_manager else None
-        message = await self.delegate.ainvoke(messages, config=config, stop=stop, **kwargs)
+        kwargs["timeout"] = request_timeout()
+        async with asyncio.timeout(kwargs["timeout"]):
+            message = await self.delegate.ainvoke(messages, config=config, stop=stop, **kwargs)
+        get_run_context().check_active()
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 

@@ -1,0 +1,335 @@
+"""Step 13: real HTTP cancellation/deadlines, late work and restart settlement."""
+
+import asyncio
+import threading
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.runnables import RunnableLambda
+from test_run_concurrency import complete, server, service_runtime, wait_started
+
+from agent.runtime.context import RunContext, RunStopped, get_run_context, reset_run_context, set_run_context
+from agent.runtime.events import EventSink
+from agent.runtime.hooks import HookToolMiddleware
+from agent.runtime.models import budget_model
+from agent.runtime.policies import load_runtime_policy, request_timeout, reserve_calls
+from api.run_store import RunStore
+
+
+async def settled(client, run_id):
+    async with asyncio.timeout(5):
+        while True:
+            record = (await client.get(f"/api/runs/{run_id}")).json()
+            if record["status"] not in ("queued", "running"):
+                return record
+            await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_cancel_running_idempotent_and_retry_isolated(sandbox_dir, monkeypatch):
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
+        record = (await client.post("/api/task", json={"query": "wait", "thread_id": "same"})).json()
+        run_id = await wait_started(agent)
+        task = server.app.state.run_tasks[run_id]
+        response = await client.post(f"/api/runs/{run_id}/cancel")
+        saved = response.json()
+        assert response.status_code == 200 and saved["status"] == "cancelled"
+        assert saved["answer"] is None and saved["ended_at"]
+        await asyncio.gather(task, return_exceptions=True)
+        assert (await client.post(f"/api/runs/{run_id}/cancel")).json() == saved
+        assert (await client.post("/api/runs/missing/cancel")).status_code == 404
+        other = (await client.post("/api/task", json={"query": "retry", "thread_id": "same"})).json()
+        assert other["run_id"] != record["run_id"]
+        await wait_started(agent)
+        await complete(agent, other["run_id"])
+        assert (await client.get(f"/api/runs/{run_id}")).json() == saved
+        events = (await client.get(f"/api/runs/{run_id}/events")).json()["events"]
+        assert sum(event["event"] == "run_cancelled" for event in events) == 1
+        assert not any(event["event"] == "task_result" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_cancel_completed_does_not_replace_answer(sandbox_dir, monkeypatch):
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
+        record = (await client.post("/api/task", json={"query": "finish"})).json()
+        await wait_started(agent)
+        await complete(agent, record["run_id"])
+        before = (await client.get(f"/api/runs/{record['run_id']}")).json()
+        assert (await client.post(f"/api/runs/{record['run_id']}/cancel")).json() == before
+        assert before["answer"] and before["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_cancel_queued_before_executor_starts(sandbox_dir, monkeypatch):
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
+        await server.app.state.event_sink.create("queued", "q", "queued-id")
+        result = await client.post("/api/runs/queued-id/cancel")
+        assert result.json()["status"] == "cancelled" and not agent.contexts
+        assert not await server.app.state.run_store.start("queued-id")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["model", "review", "retry"])
+async def test_total_deadline_covers_all_execution_stages(sandbox_dir, monkeypatch, stage):
+    reached = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def body(question, session):
+        reserve_calls({"model": "main_model", "review": "review", "retry": "retry"}[stage])
+        reached.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    monkeypatch.setattr(server, "run_deep_agent", body)
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, _, _):
+        policy = server.app.state.runtime_policy
+        server.app.state.runtime_policy = policy.model_copy(
+            update={"timeouts": policy.timeouts.model_copy(update={"total_seconds": 1.5})}
+        )
+        record = (await client.post("/api/task", json={"query": stage})).json()
+        await asyncio.wait_for(reached.wait(), 3)
+        saved = await settled(client, record["run_id"])
+        await asyncio.wait_for(cancelled.wait(), 3)
+        assert saved["status"] == "timed_out" and saved["answer"] is None and saved["ended_at"]
+        events = (await client.get(f"/api/runs/{record['run_id']}/events")).json()["events"]
+        assert events[-1]["event"] == "run_timed_out"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("termination", ["cancelled", "timed_out"])
+async def test_swallowed_cancellation_cannot_complete_or_start_another_action(sandbox_dir, monkeypatch, termination):
+    entered, cancelled, release, returned = (asyncio.Event() for _ in range(4))
+    attempts = []
+
+    async def stubborn(question, session):
+        context = get_run_context()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+        try:
+            with pytest.raises(RunStopped):
+                reserve_calls("main_model")
+            attempts.append(context.stop_status)
+            return "LATE INVENTED ANSWER"
+        finally:
+            returned.set()
+
+    monkeypatch.setattr(server, "run_deep_agent", stubborn)
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, _, _):
+        policy = server.app.state.runtime_policy
+        server.app.state.runtime_policy = policy.model_copy(
+            update={
+                "timeouts": policy.timeouts.model_copy(
+                    update={"total_seconds": 1.5 if termination == "timed_out" else 30.0}
+                )
+            }
+        )
+        record = (await client.post("/api/task", json={"query": "stubborn"})).json()
+        await asyncio.wait_for(entered.wait(), 3)
+        if termination == "cancelled":
+            await client.post(f"/api/runs/{record['run_id']}/cancel")
+        saved = await settled(client, record["run_id"])
+        await asyncio.wait_for(cancelled.wait(), 3)
+        assert saved["status"] == termination and not returned.is_set()
+        release.set()
+        await asyncio.wait_for(returned.wait(), 3)
+        await asyncio.sleep(0)
+        assert attempts == [termination]
+        assert (await client.get(f"/api/runs/{record['run_id']}")).json() == saved
+        assert not await server.app.state.run_store.finish(record["run_id"], "completed", answer="late")
+
+
+@pytest.mark.asyncio
+async def test_sync_tool_late_return_is_rejected(sandbox_dir):
+    context = RunContext("r", "t", sandbox_dir)
+    entered, release = threading.Event(), threading.Event()
+    request = SimpleNamespace(tool_call={"name": "probe", "id": "probe", "args": {}})
+    calls = []
+
+    def blocking(request):
+        entered.set()
+        release.wait(5)
+        calls.append(1)
+        return ToolMessage(content="late", tool_call_id="probe")
+
+    token = set_run_context(context)
+    task = asyncio.create_task(asyncio.to_thread(HookToolMiddleware().wrap_tool_call, request, blocking))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        context.stop("cancelled")
+        release.set()
+        with pytest.raises(RunStopped):
+            await task
+        with pytest.raises(RunStopped):
+            await asyncio.to_thread(HookToolMiddleware().wrap_tool_call, request, blocking)
+        assert calls == [1]
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        reset_run_context(token)
+
+
+@pytest.mark.asyncio
+async def test_model_request_timeout_and_review_use_same_remaining_deadline(sandbox_dir):
+    captured = []
+
+    async def invoke(messages, **kwargs):
+        captured.append(kwargs["timeout"])
+        await asyncio.Event().wait()
+
+    context = RunContext("r", "t", sandbox_dir, policy=load_runtime_policy())
+    context.policy = context.policy.model_copy(
+        update={"timeouts": context.policy.timeouts.model_copy(update={"request_seconds": 0.05})}
+    )
+    token = set_run_context(context)
+    try:
+        model = budget_model(RunnableLambda(lambda messages, **kwargs: AIMessage(content="ok"), afunc=invoke), "review")
+        with pytest.raises(TimeoutError):
+            await model.ainvoke("review")
+        assert captured == [0.05] and context.call_counts["review"] == 1
+        context.deadline = datetime.now(UTC) + timedelta(seconds=0.02)
+        assert 0 < request_timeout() <= 0.02
+        context.deadline = datetime.now(UTC) - timedelta(seconds=1)
+        with pytest.raises(RunStopped):
+            reserve_calls("retry")
+    finally:
+        reset_run_context(token)
+
+
+@pytest.mark.asyncio
+async def test_restart_interrupts_previous_active_records_and_allows_retry(sandbox_dir, monkeypatch):
+    path = sandbox_dir / "runs.db"
+    old = await RunStore.open(path)
+    try:
+        active = await old.create("same", "old")
+        await old.start(active["run_id"])
+        finished = await old.create("done", "finished")
+        await old.finish(finished["run_id"], "completed", answer="keep")
+    finally:
+        await old.close()
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
+        saved = (await client.get(f"/api/runs/{active['run_id']}")).json()
+        assert saved["status"] == "interrupted" and "restarted" in saved["error"]
+        assert (await client.get(f"/api/runs/{finished['run_id']}")).json()["answer"] == "keep"
+        events = (await client.get(f"/api/runs/{active['run_id']}/events")).json()["events"]
+        assert events[-1]["event"] == "run_interrupted"
+        retry = (await client.post("/api/task", json={"query": "retry", "thread_id": "same"})).json()
+        await wait_started(agent)
+        await complete(agent, retry["run_id"])
+
+
+@pytest.mark.asyncio
+async def test_shutdown_marks_running_interrupted_and_drains_executions(sandbox_dir, monkeypatch):
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
+        record = (await client.post("/api/task", json={"query": "wait"})).json()
+        await wait_started(agent)
+    assert not server.app.state.agent_tasks and not server.app.state.execution_tasks
+    assert not server.manager.delivery_tasks and server.manager.loop is None
+    store = await RunStore.open(sandbox_dir / "runs.db")
+    try:
+        assert (await store.get(record["run_id"]))["status"] == "interrupted"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_timeout_store_migration_preserves_history_and_terminal_guards(sandbox_dir):
+    path = sandbox_dir / "runs.db"
+    store = await RunStore.open(path)
+    sink = EventSink(store, lambda *args: None)
+    try:
+        await sink.create("t", "q", "r")
+        context = RunContext("r", "t", sandbox_dir)
+        await sink.finish(context, "timed_out", error="deadline")
+        before = await store.history("r")
+        assert not await store.finish("r", "completed", answer="late")
+        assert not await store.finish("r", "cancelled")
+    finally:
+        await sink.close()
+        await store.close()
+    store = await RunStore.open(path)
+    try:
+        assert await store.history("r") == before
+        assert (await store.create("t", "retry"))["status"] == "queued"
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_total_deadline_interrupts_real_retry_backoff(sandbox_dir, monkeypatch):
+    import requests
+
+    calls = []
+    reached = asyncio.Event()
+
+    async def body(question, session):
+        request = SimpleNamespace(tool_call={"name": "internet_search", "id": "search", "args": {"query": "q"}})
+
+        async def transient(request):
+            calls.append(1)
+            reached.set()
+            raise requests.ConnectionError("controlled transient outage")
+
+        await HookToolMiddleware().awrap_tool_call(request, transient)
+
+    monkeypatch.setattr(server, "run_deep_agent", body)
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, _, _):
+        policy = server.app.state.runtime_policy
+        server.app.state.runtime_policy = policy.model_copy(
+            update={
+                "timeouts": policy.timeouts.model_copy(update={"total_seconds": 1.5}),
+                "retry": policy.retry.model_copy(update={"delay_seconds": 4.0}),
+            }
+        )
+        record = (await client.post("/api/task", json={"query": "retry"})).json()
+        await asyncio.wait_for(reached.wait(), 3)
+        assert (await settled(client, record["run_id"]))["status"] == "timed_out"
+        assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_total_deadline_interrupts_real_result_reviewer(sandbox_dir, monkeypatch):
+    from agent.reflection import ResultReviewer
+    from agent.subagent_registry import ReviewConfig
+
+    reached, stopped = asyncio.Event(), asyncio.Event()
+
+    async def reviewing(messages):
+        reached.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    async def body(question, session):
+        reviewer = ResultReviewer(ReviewConfig(enabled=True, model_check=True), RunnableLambda(reviewing))
+        await reviewer.review("task", "evidence", [])
+        return "late"
+
+    monkeypatch.setattr(server, "run_deep_agent", body)
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, _, _):
+        policy = server.app.state.runtime_policy
+        server.app.state.runtime_policy = policy.model_copy(
+            update={"timeouts": policy.timeouts.model_copy(update={"total_seconds": 1.5})}
+        )
+        record = (await client.post("/api/task", json={"query": "review"})).json()
+        await asyncio.wait_for(reached.wait(), 3)
+        assert (await settled(client, record["run_id"]))["status"] == "timed_out"
+        await asyncio.wait_for(stopped.wait(), 3)
+
+
+@pytest.mark.parametrize("field,value", [("total_seconds", 0.0), ("request_seconds", -1.0), ("shutdown_seconds", 40.0)])
+def test_timeout_settings_reject_invalid_values(field, value):
+    from pydantic import ValidationError
+
+    from agent.runtime.policies import TimeoutLimits
+
+    with pytest.raises(ValidationError):
+        TimeoutLimits.model_validate({field: value})

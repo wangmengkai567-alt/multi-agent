@@ -115,6 +115,7 @@ class HookPipeline:
 def prepare_run(call):
     if get_run_context() is None:
         raise HookRejected("Run context is required")
+    get_run_context().check_active()
 
 
 def default_pipeline():
@@ -133,7 +134,7 @@ def default_pipeline():
         {
             "before_run": (prepare_run, before_run_policy, before_run_workflow),
             **recorders,
-            "before_delegate": (before_delegate_workflow, *recorders["before_delegate"]),
+            "before_delegate": (prepare_run, before_delegate_workflow, *recorders["before_delegate"]),
             "after_tool": (after_tool_workflow, *recorders["after_tool"]),
             "before_tool": (before_tool_policy, *recorders["before_tool"]),
         }
@@ -173,6 +174,8 @@ class HookToolMiddleware(AgentMiddleware):
         )
 
     def _before(self, request, call):
+        if context := get_run_context():
+            context.check_active()
         tool = getattr(request, "tool", None)
         if tool is not None:
             try:
@@ -189,6 +192,8 @@ class HookToolMiddleware(AgentMiddleware):
         self.hooks.emit("before_tool", call)
 
     def _retry_delay(self, request, call, exc):
+        if context := get_run_context():
+            context.check_active()
         from agent.runtime.policies import classify_tool_error, policy_for_run
 
         if get_run_context() is None:
@@ -214,6 +219,8 @@ class HookToolMiddleware(AgentMiddleware):
         self.hooks.emit("on_error", call)
 
     def _returned(self, call):
+        if context := get_run_context():
+            context.check_active()
         result = call.result
         messages = [result] if isinstance(result, ToolMessage) else []
         if isinstance(result, Command) and isinstance(result.update, dict):
