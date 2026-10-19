@@ -31,8 +31,14 @@ from utils.path_utils import PathDenied, confined_path, resolve_path, resolve_ru
 
 @pytest.fixture
 def context(sandbox_dir):
+    policy = load_runtime_policy().model_dump()
+    policy["sql"]["allowed_tables"] = ["orders"]
     context = RunContext(
-        "run", "session", sandbox_dir / "work", skill_dir=sandbox_dir / "instructions", policy=load_runtime_policy()
+        "run",
+        "session",
+        sandbox_dir / "work",
+        skill_dir=sandbox_dir / "instructions",
+        policy=RuntimePolicy.model_validate(policy),
     )
     context.work_dir.mkdir()
     context.skill_dir.mkdir()
@@ -380,7 +386,7 @@ async def test_static_download_listing_and_upload_junction_bypasses_blocked(file
         ("budgets", "total", 0),
         ("budgets", "tool", True),
         ("budgets", "review", -1),
-        ("sql", "allowed_tables", []),
+        ("sql", "allowed_tables", ["orders", "orders"]),
         ("sql", "allowed_tables", ["orders;DROP"]),
         ("sql", "timeout_seconds", 0),
         ("files", "skill_directory", "../private"),
@@ -499,7 +505,7 @@ def test_tavily_client_single_attempt_timeout_and_close(context, monkeypatch):
             lambda req: tavily_tool.internet_search.invoke(req.tool_call["args"]),
         )
     assert len(calls) == len(closed) == 2
-    assert all(call["timeout"] == 10 for call in calls)
+    assert all(call["timeout"] == context.policy.search.timeout_seconds == 20 for call in calls)
     assert context.call_counts["tool"] == 2 and context.call_counts["retry"] == 1
 
 
@@ -599,3 +605,39 @@ def test_pdf_resource_loading_bypass_disabled(html):
 
     with pytest.raises(PathDenied):
         ReportHTMLGuard().feed(html)
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("list_sql_tables", {}),
+        ("get_table_data", {"table_name": "orders"}),
+        ("execute_sql_query", {"query": "SELECT * FROM orders"}),
+    ],
+)
+def test_unconfigured_tables_block_tools_and_hooks_before_connection(context, monkeypatch, name, args):
+    from tools import db_tools
+
+    context.policy = load_runtime_policy()
+    assert context.policy.sql.allowed_tables == []
+    for key, value in dict(
+        MYSQL_READONLY_USER="reader", MYSQL_READONLY_PASSWORD="fake", MYSQL_DATABASE="business"
+    ).items():
+        monkeypatch.setenv(key, value)
+    calls = []
+    monkeypatch.setattr(db_tools, "connect", lambda **kwargs: calls.append("connect"))
+    with pytest.raises(MissingConfiguration, match="sql.allowed_tables"):
+        getattr(db_tools, name).invoke(args)
+    request = SimpleNamespace(tool_call={"name": name, "args": args, "id": "unconfigured"})
+    result = HookToolMiddleware().wrap_tool_call(request, lambda req: calls.append("execute"))
+    assert result.status == "error" and "sql.allowed_tables" in result.content
+    assert calls == [] and context.call_counts["tool"] == 0
+
+
+def test_explicit_business_table_configuration_does_not_require_orders(context):
+    data = load_runtime_policy().model_dump()
+    data["sql"]["allowed_tables"] = ["inventory"]
+    context.policy = RuntimePolicy.model_validate(data)
+    assert "LIMIT 100" in validate_sql("SELECT * FROM inventory")
+    with pytest.raises(PolicyError, match="allowed table"):
+        validate_sql("SELECT * FROM orders")

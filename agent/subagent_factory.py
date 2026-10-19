@@ -12,6 +12,7 @@ from agent.runtime.backend import run_backend
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.models import budget_model
+from agent.runtime.search import SearchExecutionMiddleware
 from agent.runtime.skills import ProjectSkillsMiddleware
 
 
@@ -32,6 +33,11 @@ def build_subagents(registry, model, *, models=None, hooks=None):
             tools=list(spec.tools),
             system_prompt=spec.system_prompt + "\n" + RESULT_PROMPT,
             middleware=[
+                *(
+                    [SearchExecutionMiddleware(spec.system_prompt + "\n" + RESULT_PROMPT)]
+                    if spec.agent_id == "search"
+                    else []
+                ),
                 TodoListMiddleware(),
                 *([ProjectSkillsMiddleware(spec.allowed_skill_ids)] if spec.allowed_skill_ids else []),
                 FilesystemMiddleware(backend=run_backend),

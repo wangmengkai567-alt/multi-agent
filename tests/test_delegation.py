@@ -58,7 +58,7 @@ async def runtime(sandbox_dir):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_three_real_task_routes_and_durable_server_ids(runtime, asynchronous):
+async def test_two_real_task_routes_and_durable_server_ids(runtime, asynchronous):
     context, store, sink, deliveries = runtime
     actual = []
 
@@ -93,8 +93,8 @@ async def test_three_real_task_routes_and_durable_server_ids(runtime, asynchrono
     await sink.flush(context.run_id)
     tasks = await store.list_subtasks(context.run_id)
     events = await store.list_events(context.run_id)
-    assert state["messages"][-1].content == "done" and len(actual) == len(tasks) == 3
-    assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 0, "tool": 6, "retry": 0}
+    assert state["messages"][-1].content == "done" and len(actual) == len(tasks) == 2
+    assert context.call_counts == {"main_model": 3, "sub_model": 4, "review": 0, "tool": 4, "retry": 0}
     for task in tasks:
         target = task["target"]
         assert str(UUID(task["call_id"])) == task["call_id"] and task["call_id"] != task["request_call_id"]
@@ -123,7 +123,7 @@ async def test_three_real_task_routes_and_durable_server_ids(runtime, asynchrono
     returned = [event for event in await store.list_events(context.run_id) if event["event"] == "tool_returned"]
     assert {event["call_id"] for event in returned} == {task["call_id"] for task in tasks}
     assert "private task" not in str(events)
-    assert len((await store.history(context.run_id))["subtasks"]) == 3
+    assert len((await store.history(context.run_id))["subtasks"]) == 2
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_extra_task_prompt_cannot_silently_drop_constraints_and_corrected_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target", ["missing", "general-purpose", "市场情报助手"])
+@pytest.mark.parametrize("target", ["missing", "general-purpose", "联网搜索助手", "knowledge"])
 async def test_unknown_and_default_targets_rejected_before_routing(runtime, target):
     context, store, sink, _ = runtime
     parent = ScriptedModel(
@@ -251,7 +251,7 @@ async def test_expired_deadline_stops_executor(runtime):
     context, store, sink, _ = runtime
     context.deadline = datetime.now(UTC) - timedelta(seconds=1)
     calls = []
-    wrapper = DelegationRunnable(spec("knowledge"), RunnableLambda(lambda state: calls.append(1)))
+    wrapper = DelegationRunnable(spec("search"), RunnableLambda(lambda state: calls.append(1)))
     with pytest.raises(RunStopped, match="timed_out"):
         await wrapper.ainvoke({"messages": [HumanMessage(content="query")]})
     await sink.flush(context.run_id)
@@ -333,7 +333,7 @@ def test_registry_validation_and_import_contract():
     with pytest.raises(ValueError):
         SubagentRegistry([spec("db"), spec("db")])
     with pytest.raises(ValueError):
-        registry.get("数据分析助手")
+        registry.get("数据库查询助手")
     with pytest.raises(TypeError):
         registry.specs["search"] = spec("search")
 
@@ -359,11 +359,11 @@ async def test_parallel_task_calls_are_linked_without_duplicate_hooks(runtime):
     )
     await sink.flush(context.run_id)
     tasks = await store.list_subtasks(context.run_id)
-    assert len(tasks) == 3 and {task["request_call_id"] for task in tasks} == set(DISPLAY_NAMES)
-    assert context.call_counts["tool"] == 3 and context.call_counts["sub_model"] == 3
+    assert len(tasks) == len(DISPLAY_NAMES) and {task["request_call_id"] for task in tasks} == set(DISPLAY_NAMES)
+    assert context.call_counts["tool"] == len(DISPLAY_NAMES) and context.call_counts["sub_model"] == len(DISPLAY_NAMES)
     events = await store.list_events(context.run_id)
-    assert len([event for event in events if event["event"] == "before_delegate"]) == 3
-    assert len([event for event in events if event["event"] == "after_subagent"]) == 3
+    assert len([event for event in events if event["event"] == "before_delegate"]) == len(DISPLAY_NAMES)
+    assert len([event for event in events if event["event"] == "after_subagent"]) == len(DISPLAY_NAMES)
 
 
 @pytest.mark.asyncio
@@ -443,14 +443,14 @@ async def test_http_history_contains_subtasks_and_chinese_display_names(runtime,
     context, store, sink, _ = runtime
     monkeypatch.setattr(server.app.state, "run_store", store, raising=False)
     await DelegationRunnable(
-        spec("knowledge"), RunnableLambda(lambda state: {"messages": [AIMessage(content="answer")]})
+        spec("search"), RunnableLambda(lambda state: {"messages": [AIMessage(content="answer")]})
     ).ainvoke({"messages": [HumanMessage(content="query")]})
     await sink.flush(context.run_id)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
         response = await client.get(f"/api/runs/{context.run_id}/history")
     assert response.status_code == 200
-    assert response.json()["subtasks"][0]["display_name"] == DISPLAY_NAMES["knowledge"]
-    assert any(DISPLAY_NAMES["knowledge"] in event["message"] for event in response.json()["events"])
+    assert response.json()["subtasks"][0]["display_name"] == DISPLAY_NAMES["search"]
+    assert any(DISPLAY_NAMES["search"] in event["message"] for event in response.json()["events"])
 
 
 @pytest.mark.asyncio

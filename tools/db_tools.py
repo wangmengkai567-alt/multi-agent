@@ -15,6 +15,7 @@ from agent.runtime.policies import (
     policy_for_run,
     request_timeout,
     require_db_credentials,
+    require_sql_tables,
     validate_sql,
     validate_table,
 )
@@ -22,9 +23,9 @@ from api.monitor import monitor
 
 
 def get_db_config():
+    limits = require_sql_tables()
     load_dotenv()
     require_db_credentials()
-    limits = policy_for_run().sql
     timeout = max(1, int(request_timeout(limits.timeout_seconds)))
     database = os.getenv("MYSQL_DATABASE")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", database):

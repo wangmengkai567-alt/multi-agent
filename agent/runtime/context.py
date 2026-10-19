@@ -18,6 +18,8 @@ class RunContext:
     thread_id: str
     work_dir: Path
     deadline: datetime | None = None
+    reference_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
+    unavailable_agents: dict[str, str] = field(default_factory=dict, repr=False)
     deadline_clock: float | None = None
     stop_status: str | None = None
     event_sink: object | None = field(default=None, repr=False)
@@ -34,6 +36,13 @@ class RunContext:
     skill_states: set = field(default_factory=set, repr=False)
     skill_reads: dict = field(default_factory=dict, repr=False)
     skill_bodies: dict = field(default_factory=dict, repr=False)
+    search_calls: set[tuple[str, str]] = field(default_factory=set, repr=False)
+    search_tasks: dict = field(default_factory=dict, repr=False)
+    search_finalization_announced: bool = False
+    answer_repair_attempted: bool = False
+    approved_internal: dict = field(default_factory=dict, repr=False)
+    internal_result_version: int = 0
+    user_query: str = field(default="", repr=False)
     budget_lock: object = field(default_factory=RLock, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(

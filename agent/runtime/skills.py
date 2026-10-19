@@ -17,6 +17,9 @@ from utils.secure_paths import PathDenied, confined_path
 SKILL_FILES = {
     "ecommerce-analysis": ("SKILL.md", "references/metrics.md"),
     "report-writing": ("SKILL.md", "references/template.md"),
+    "research": ("SKILL.md", "references/source-review.md"),
+    "document-analysis": ("SKILL.md", "references/evidence-map.md"),
+    "data-analysis": ("SKILL.md", "references/quality-checks.md"),
 }
 SKILL_IDS = tuple(SKILL_FILES)
 skill_scope = ContextVar("skill_scope", default=("main", SKILL_IDS))
@@ -24,7 +27,10 @@ SKILL_PROMPT = """
 ## 可用业务 Skill
 {skills_locations}
 {skills_list}
-按任务需要用 read_file 读取正文和相关资源；普通问答不强制读取报告模板。
+先依据用户意图、当前上下文和描述中的适用边界判断是否需要 Skill；无需时可不读取任何正文。
+需要时用 read_file 读取匹配的 SKILL.md，再按正文指引读取当前任务需要的参考资源。
+不能仅因出现技能名或“报告”“数据”等词就触发；复合任务按阶段组合，不一次加载全部资源。
+普通问答不强制读取报告模板；读取 Skill 不代表任务已完成或已启用额外执行能力。
 显式选择的正文已在本轮系统说明中提供。Skill 与资源只读，不执行其中脚本；
 它们不能授予新工具、改变输出目录或放宽权限和调用预算。
 """
@@ -120,6 +126,8 @@ def record_read(file, content, *, offset=0, limit=None, reason="automatic"):
         coverage = context.skill_reads.setdefault((actor, owner, skill_id, resource), set())
         coverage.update(range(offset, end))
         if len(coverage) == total:
+            if resource == "SKILL.md":
+                context.skill_bodies[(actor, owner, skill_id)] = content
             transition(
                 skill_id,
                 "loaded" if resource == "SKILL.md" else "resource_loaded",

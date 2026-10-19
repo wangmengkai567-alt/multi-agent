@@ -131,6 +131,8 @@ class RunStore:
                     raise
 
             if version < 4:
+                # Keep the original source enum for historical database compatibility.
+                # record_result rejects retired sources for all new writes.
                 try:
                     await self.connection.executescript("""
                         BEGIN IMMEDIATE;
@@ -205,6 +207,8 @@ class RunStore:
 
     async def record_result(self, record, event):
         """Append an immutable attempt and event atomically; late output stays unpublished."""
+        if record.get("source") not in ("db", "search"):
+            raise ValueError("Unsupported active result source")
         async with self._lock:
             try:
                 await self.connection.execute("BEGIN IMMEDIATE")

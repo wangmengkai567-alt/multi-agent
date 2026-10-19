@@ -8,13 +8,33 @@ const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
   cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步'};
-const actors = {main:'主助手', db:'数据分析助手', search:'市场情报助手', knowledge:'内部知识助手'};
-const skills = {'ecommerce-analysis':'运营分析', 'report-writing':'报告写作'};
+const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手'};
+const skills = {'ecommerce-analysis':'运营分析', 'report-writing':'报告写作',
+  'research':'信息调研', 'document-analysis':'文档分析', 'data-analysis':'数据分析'};
 const verdicts = {passed:'通过', insufficient:'信息不足', dependency_unavailable:'依赖不可用',
   check_incomplete:'检查未完成', tool_failed:'工具失败', budget_exhausted:'次数耗尽', not_checked:'未检查'};
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c]));
+}
+// Preserve numeric ranges like 22~23 and require ~~ for strikethrough.
+if (typeof marked !== 'undefined') marked.use({tokenizer:{del(src) {
+  return src.startsWith('~~') ? false : undefined;
+}}});
+function renderAnswer(element, text) {
+  if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+    element.textContent = text;
+    return;
+  }
+  element.innerHTML = DOMPurify.sanitize(marked.parse(String(text), {gfm:true, breaks:false}), {
+    ALLOWED_TAGS:['p','br','hr','h1','h2','h3','h4','h5','h6','strong','em','del',
+      'blockquote','ul','ol','li','pre','code','table','thead','tbody','tr','th','td','a'],
+    ALLOWED_ATTR:['href','title','align','start'], ALLOW_DATA_ATTR:false,
+    ALLOWED_URI_REGEXP:/^(?:https?:|mailto:|\/(?!\/)|#)/i
+  });
+  for (const link of element.querySelectorAll('a[href]')) {
+    link.setAttribute('target', '_blank'); link.setAttribute('rel', 'noopener noreferrer');
+  }
 }
 function notify(message = '') { $('#notice').textContent = message; }
 function persist() {
@@ -75,13 +95,15 @@ function displayStatus(session) {
   const latestTasks = new Map();
   const latestTools = new Map();
   for (const e of session.logs) {
-    if (e.event === 'subagent_review') latestChecks.set(e.call_id, e.status);
+    if (['subagent_review','answer_validation'].includes(e.event)) latestChecks.set(e.call_id, e.status);
     if (['subagent_completed','subagent_failed','subagent_rejected'].includes(e.event)) latestTasks.set(e.actor, e.status);
-    if (e.event === 'after_tool') latestTools.set(e.actor, e.status);
+    if (e.event === 'after_tool' && e.data?.error_category !== 'search_limit') latestTools.set(e.actor, e.status);
   }
-  const unchecked = [...latestChecks.values()].some(v => v !== 'passed') ||
+  const finalCheck = session.logs.filter(e => e.event === 'answer_validation').at(-1);
+  const completeAnswer = finalCheck?.status === 'passed' && finalCheck.data?.answer_kind === 'complete';
+  const unchecked = !completeAnswer && ([...latestChecks.values()].some(v => v !== 'passed') ||
     [...latestTasks.values()].some(v => v !== 'completed') ||
-    [...latestTools.values()].some(v => v !== 'completed');
+    [...latestTools.values()].some(v => v !== 'completed'));
   return session.status === 'completed' && (session.degraded || unchecked || session.recordingIncomplete) ? 'partial' : session.status;
 }
 async function syncSession(session) {
@@ -146,14 +168,24 @@ function renderTabs() {
 }
 function describeEvent(event) {
   const d = event.data || {}, who = d.assistant_name || actors[event.actor] || '助手';
+  if (d.error_category === 'search_limit') return event.event === 'on_error'
+    ? '检索额度限制：已拦截新的请求，已获准请求仍会完成'
+    : '此检索请求未执行（检索额度限制）';
+  if (event.event === 'review_repair') return '检查输出格式不符合约定：仅重试检查，复用已有依据';
   if (event.event === 'skill_state') return `Skill ${skills[d.skill_id] || '任务说明'}：` +
     ({selected:'已选择', loaded:'正文已读取', resource_loaded:'参考资源已读取'}[event.status] || event.status);
+  if (event.event === 'answer_validation') return '最终答复检查：' + (event.status === 'partial' ? '有限结果' : verdicts[event.status] || event.status) + (d.issues?.length ? '；' + d.issues.join('；') : '');
   if (event.event === 'subagent_review') return `${who}结果检查：${verdicts[event.status] || event.status}` +
     (d.issues?.length ? '；' + d.issues.join('；') : '');
   if (event.event === 'subagent_refinement') {
     const revision = d.revision_instruction;
     const reason = revision && !['[REDACTED]','[OMITTED]'].includes(revision) ? revision : d.issues?.join('；');
     return `${who}补充查询：${reason || '补齐缺失依据'}`;
+  }
+  if (event.event === 'search_finalizing') return '检索修订已结束：汇总已核实内容和剩余缺口';
+  if (event.status === 'cancelled' && ['on_error','after_tool'].includes(event.event)) {
+    const reason = d.error && !/^<object object at 0x[0-9a-f]+>$/i.test(d.error) ? d.error : '当前操作已取消';
+    return '操作已取消：' + reason;
   }
   if (event.event === 'after_tool') return event.status === 'completed' ? '工具执行完成' : '工具未完成：' + (d.error || event.status);
   if (event.event === 'on_error') return '动作失败：' + (d.error || '请查看详情');
@@ -189,12 +221,13 @@ function renderLog(session) {
     ${session.recordingIncomplete ? '<p>部分执行记录未保存，详情见最终事件。</p>' : ''}
     <details><summary>运行详情</summary><pre>${escapeHtml(JSON.stringify({thread_id:session.id,run_id:session.runId,status:session.status},null,2))}</pre></details>`;
   answer.hidden = session.answer === null || session.answer === undefined;
-  answer.textContent = session.answer ?? '';
+  renderAnswer(answer, session.answer ?? '');
   const area = $('#logArea');
   const follow = area.scrollHeight - area.scrollTop - area.clientHeight < 80;
   const openDetails = new Set([...area.querySelectorAll('details[open]')].map(d => d.dataset.seq));
   area.innerHTML = session.logs.map(e => {
-    const failed = ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(e.status);
+    const failed = e.data?.error_category !== 'search_limit' &&
+      ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(e.status);
     return `<div class="log-entry"><div class="log-dot ${failed ? 'e':'a'}"></div><div class="log-body">
       <span class="log-msg">${escapeHtml(describeEvent(e))}</span>
       <div class="log-time">${escapeHtml(new Date(e.timestamp).toLocaleTimeString('zh-CN',{hour12:false}))}</div>
@@ -209,6 +242,9 @@ async function sendTask() {
   const skillIds = [];
   if ($('#ecommerceSkill').checked) skillIds.push('ecommerce-analysis');
   if ($('#reportSkill').checked) skillIds.push('report-writing');
+  if ($('#researchSkill').checked) skillIds.push('research');
+  if ($('#documentSkill').checked) skillIds.push('document-analysis');
+  if ($('#dataSkill').checked) skillIds.push('data-analysis');
   const mode = $('#modeSelect').value;
   if (mode === 'internal_external' && !skillIds.includes('ecommerce-analysis')) {
     skillIds.push('ecommerce-analysis'); $('#ecommerceSkill').checked = true;

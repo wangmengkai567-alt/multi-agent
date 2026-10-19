@@ -220,7 +220,7 @@ class TaskRequest(BaseModel):
     query: str = Field(min_length=1)
     skill_ids: list[StrictStr] | None = Field(default=None, max_length=2)
     business_mode: Literal["ordinary", "internal_external"] = "ordinary"
-    required_sources: list[Literal["db", "search", "knowledge"]] = Field(default_factory=list, max_length=3)
+    required_sources: list[Literal["db", "search"]] = Field(default_factory=list, max_length=2)
     required_uploads: list[StrictStr] = Field(default_factory=list, max_length=20)
     thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
 
@@ -284,6 +284,7 @@ async def run_task(request: TaskRequest):
             deadline_clock=monotonic() + app.state.runtime_policy.timeouts.total_seconds,
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
+            user_query=request.query,
             skill_ids=tuple(request.skill_ids or ()),
             business_mode=request.business_mode,
             required_sources=tuple(request.required_sources),

@@ -1,0 +1,26 @@
+Scope: all 19 created/modified delivery text files, plus this audit log (20 total).
+Existing BOM preserved (all targets originally had no BOM); all new files UTF-8 without BOM.
+Git limited to status by project rule; direct byte/whitespace audit replaces git diff --check.
+
+PASS agent/runtime/skills.py: UTF-8; CRLF=236; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=7b6a93f74d1524c36f21f8aa40782398aa3e40215c4ff6deaa20c67228804455
+PASS agent/subagent_registry.py: UTF-8; CRLF=106; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=87f18eabf7132f1b3ee1f21ff10e5bb87d60453ffd7b8b4c59159c8a54bd8bb7
+PASS prompt/prompts.yml: UTF-8; CRLF=39; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=169a988e3031a46d36d48ddbb43aa0b196dba91fa9b03c7d4fa1da1cda295922
+PASS api/static/app.js: UTF-8; CRLF=292; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=c55c02198d93b5bcea21b4f5d1b958bcad1d189d80877513ca65e835c85d3461
+PASS api/static/index.html: UTF-8; CRLF=232; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=13e98363ffbb8ec9677dbddc039be303483e31174cc4b573054ca005e3b0e1a7
+PASS tests/test_skill_loading.py: UTF-8; CRLF=436; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=a8deac9f2a54b80cc216c012805a48df56dd89ed43832776a5505e199f41cc49
+PASS tests/frontend/app.test.cjs: UTF-8; CRLF=117; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=cd1757d3f20c5107f735ecc568791aa36b3f5b5d6dd97c90b56ced25dce3eb67
+PASS README.md: UTF-8; CRLF=131; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=2be23fabf249d3ce96fb49ff334f5eae977ce37fd13613c2d25e50534e605359
+PASS skills/ecommerce-analysis/SKILL.md: UTF-8; CRLF=22; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=bd8335addd9104136d63d8f8e8145b38fedbe15f95f2d6a6ea1d378a533d3be5
+PASS docs/implementation/15-skills.md: UTF-8; CRLF=59; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=b74b997f88b6928a0eadfecde8ff4a0be99cd2cb8536d532b472ae631156ea07
+PASS docs/implementation/15-tests.log: UTF-8; CRLF=6; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=ad87c77880b3bb7a5f3c741d68c3aabdce9c1d061496e87257ecec5ca8709305
+PASS docs/implementation/15-validation.log: UTF-8; CRLF=19; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=646ac4bd3d6392f294b4f69f5f610efcd068e167ff21d9ca1a4f21503b70dcc8
+PASS docs/implementation/15-checks.log: UTF-8; CRLF=17; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=e2b1f458fa25db150bac082327542e1555714f1039f848d957901f11fe8b2cd4
+PASS skills/research/references/source-review.md: UTF-8; CRLF=16; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=69252366d9f4a51c6198d9d491d5d045aea6b11d04d25032a7e8c378ddb6a92d
+PASS skills/research/SKILL.md: UTF-8; CRLF=16; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=64a2c2740737530df49d4f023cbedb78fe8e279df251e5e1a435c1e0445e627b
+PASS skills/document-analysis/references/evidence-map.md: UTF-8; CRLF=13; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=9e03306cb3cd9528d895c5176f49243ac57029f33666f8a58cae3a1ff5c2174c
+PASS skills/document-analysis/SKILL.md: UTF-8; CRLF=18; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=1c87875314cdd8bfabd19ed176e89606f2de6c183fa21d6226ea3ff34ab62f7e
+PASS skills/data-analysis/references/quality-checks.md: UTF-8; CRLF=23; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=10a273cfa1eed6ec68ad6dfe04cfd39d4d77a51d086e63e96540d9d97ad9f8eb
+PASS skills/data-analysis/SKILL.md: UTF-8; CRLF=18; bare_LF=0; bare_CR=0; BOM=no; trailing_whitespace=0; sha256=f8d34e1fcfc729f570cbbe9b4e66c1dfb0c5a61ca60290347f06e7e0c67c84bf
+
+PASS docs/implementation/15-text-audit.log: UTF-8, CRLF, no BOM, no trailing whitespace (checked after writing).
+RESULT: 20/20 delivery text files passed.

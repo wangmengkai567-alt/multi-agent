@@ -69,7 +69,7 @@ import api.server
 assert runtime.main_agent is None and runtime.checkpointer is None
 assert 'agent.llm' not in sys.modules
 assert 'tools.db_tools' not in sys.modules
-assert 'tools.ragflow_tools' not in sys.modules
+assert 'tools.tavily_tool' not in sys.modules
 """
     result = subprocess.run(
         [sys.executable, "-c", code],

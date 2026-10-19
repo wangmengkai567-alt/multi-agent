@@ -79,7 +79,7 @@ async def smoke(case=None):
         (
             "real_search",
             {
-                "query": "最小普通搜索验收：调用search助手，将以下范围原样写入description：用internet_search检索site:docs.tavily.com search，max_results=2，include_raw_content=false；只说明Tavily文档的一个检索功能，引用工具真实返回的Tavily官方URL，摘要一句话即可。另按系统约定保留查询对象、时间范围、统计口径三行，不将这些字段或URL计入摘要字数。若首批无官方来源，允许最多一次补充查询。不要查数据库或知识库，不生成文件。",
+                "query": "最小普通搜索验收：调用search助手，将以下范围原样写入description：用internet_search检索site:docs.tavily.com search，max_results=2，include_raw_content=false；只说明Tavily文档的一个检索功能，引用工具真实返回的Tavily官方URL，摘要一句话即可。另按系统约定保留查询对象、时间范围、统计口径三行，不将这些字段或URL计入摘要字数。若首批无官方来源，允许最多一次补充查询。不要查数据库，不生成文件。",
                 "required_sources": ["search"],
             },
         ),

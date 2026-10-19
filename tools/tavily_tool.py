@@ -1,36 +1,165 @@
-"""Single-attempt Tavily tool; transient retries belong to the runtime Hook."""
+"""Bounded search output for models; original provider evidence stays in the artifact."""
 
+import ipaddress
+import json
 import os
-from typing import Literal
+import re
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
+from pydantic import BeforeValidator, Field
 from tavily import TavilyClient
 
-from agent.runtime.policies import MissingConfiguration, policy_for_run, request_timeout
+from agent.runtime.evidence import relevant_excerpt
+from agent.runtime.policies import MissingConfiguration, PolicyError, policy_for_run, request_timeout
+from agent.runtime.search import search_allowance
 from api.monitor import monitor
 
 
-@tool
+def compact_search_response(payload, limits, query=None):
+    """Keep actual URLs and explicit excerpts without loading full pages into the model context."""
+    remaining = limits.content_chars
+    rows = []
+    for result in payload.get("results", []):
+        text = str(result.get("raw_content") or result.get("content") or "")
+        excerpt = relevant_excerpt(text, min(limits.result_chars, remaining), query or str(payload.get("query") or ""))
+        remaining -= len(excerpt)
+        rows.append(
+            dict(
+                title=result.get("title", ""),
+                url=result.get("url", ""),
+                content=excerpt,
+                excerpt_truncated=len(excerpt) < len(text),
+            )
+        )
+    return json.dumps(
+        dict(
+            query=payload.get("query"),
+            results=rows,
+            evidence_note="完整检索响应已保存为原始证据；content 为可能截断的片段。",
+        ),
+        ensure_ascii=False,
+    )
+
+
+def domain_array(value):
+    """Accept a JSON-encoded array used by some compatible tool-call transports."""
+    if isinstance(value, str):
+        value = json.loads(value)
+    if isinstance(value, list) and (
+        not 1 <= len(value) <= 20
+        or any(
+            not isinstance(domain, str)
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain)
+            or "." not in domain
+            for domain in value
+        )
+    ):
+        raise ValueError("include_domains must contain domain names without URL paths")
+    return value
+
+
+DomainList = Annotated[
+    list[str],
+    BeforeValidator(domain_array),
+    Field(description="Bare domain names only, e.g. docs.python.org. Never include https:// or a URL path."),
+]
+
+
+@tool(response_format="content_and_artifact")
 def internet_search(
     query: str,
     topic: Literal["news", "finance", "general"] = "general",
-    max_results: int = 5,
+    max_results: int = 3,
     include_raw_content: bool = False,
+    include_domains: DomainList | None = None,
 ):
-    """Search public web information using a bounded, single-attempt request."""
+    """Search public web sources. Return concise excerpts and exact citation URLs; start with one query. For official sources, set include_domains to the actual official domains; use site: with a version path when needed."""
+    if include_domains is not None and (
+        not 1 <= len(include_domains) <= 20
+        or any(
+            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain) or "." not in domain
+            for domain in include_domains
+        )
+    ):
+        raise ValueError("include_domains must contain domain names without URL paths")
     if not query.strip() or not 1 <= max_results <= 20:
         raise ValueError("Invalid search arguments")
     load_dotenv()
     key = os.getenv("TAVILY_API_KEY")
     if not key:
         raise MissingConfiguration("Tavily API key is missing")
+    limits = policy_for_run().search
     monitor.report_tool("网络搜索工具", {"query": query, "topic": topic, "max_results": max_results})
+    allowance = search_allowance.get()
+    depth = "advanced" if allowance and allowance.task.refinement_open else "basic"
     with TavilyClient(api_key=key) as client:
-        return client.search(
+        payload = client.search(
             query=query,
+            **({"include_domains": include_domains} if include_domains else {}),
             topic=topic,
             max_results=max_results,
             include_raw_content=include_raw_content,
-            timeout=request_timeout(policy_for_run().sql.timeout_seconds),
+            search_depth=depth,
+            timeout=request_timeout(limits.timeout_seconds),
         )
+    return compact_search_response(payload, limits, query), payload
+
+
+def validate_page_request(url, query):
+    """Only this delegation's observed public origins (or user-provided URLs)."""
+    from agent.reflection import source_urls, tool_evidence
+    from agent.runtime.context import get_run_context
+    from agent.runtime.output import cited_urls
+
+    if not isinstance(url, str) or not isinstance(query, str) or not query.strip() or len(query) > 2000:
+        raise PolicyError("网页读取必须提供 URL 和简短的当前问题")
+    parsed = urlsplit(url)
+    host = parsed.hostname or ""
+    if (
+        parsed.scheme not in ("https", "http")
+        or parsed.username
+        or parsed.password
+        or parsed.port not in (None, 80, 443)
+    ):
+        raise PolicyError("只允许读取公开 HTTP(S) 网页")
+    try:
+        ipaddress.ip_address(host)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+    if is_ip or "." not in host or host.endswith((".local", ".localhost", ".internal")):
+        raise PolicyError("只允许读取公开域名")
+    context = get_run_context()
+    allowed = source_urls(tool_evidence.get() or [])
+    allowed += list(cited_urls(context.user_query)) if context else []
+    if host not in {urlsplit(value).hostname for value in allowed}:
+        raise PolicyError("只能读取当前子任务实际搜索取得的域名或用户提供的 URL；不能借用其他子任务来源")
+
+
+@tool(response_format="content_and_artifact")
+def read_web_page(url: str, query: str):
+    """Read real webpage sections relevant to query, after search. Use the observed public origin; an exact version path on that same origin may be opened and verified. This is a page read, not another search. Returns actual source text and URL; unavailable pages are explicitly reported."""
+    validate_page_request(url, query)
+    load_dotenv()
+    key = os.getenv("TAVILY_API_KEY")
+    if not key:
+        raise MissingConfiguration("Tavily API key is missing")
+    limits = policy_for_run().search
+    monitor.report_tool("网页正文读取工具", {"url": url, "query": query})
+    with TavilyClient(api_key=key) as client:
+        payload = client.extract(
+            urls=[url],
+            query=query,
+            chunks_per_source=5,
+            extract_depth="advanced",
+            format="text",
+            timeout=request_timeout(limits.timeout_seconds),
+        )
+    # Keep failures and the exact provider response, including returned version paths.
+    payload = {**payload, "query": query}
+    compact = json.loads(compact_search_response(payload, limits.model_copy(update={"result_chars": 5000}), query))
+    compact["failed_results"] = payload.get("failed_results", [])
+    return json.dumps(compact, ensure_ascii=False), payload

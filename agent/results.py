@@ -16,7 +16,8 @@ from utils.secure_paths import confined_path
 INLINE_BYTES = 16_384
 SUMMARY_CHARS = 2_000
 RESULT_PROMPT = """
-返回查询结果时附上单独的三行：查询对象：…；时间范围：…；统计口径：…。
+按任务需要返回简明结果和实际来源 URL。普通事实查询不强制套用统计或报告结构。
+涉及数据库、统计分析或内外对照时，另附三行：查询对象：…；时间范围：…；统计口径：…。
 每行一个字段，依据实际查询填写，无法确定时写“未提供”，不得猜测。
 内部查询与外部检索须分别列明来源、时间和口径；存在差异时分别展示。
 关键词方向一致不能证明内部指标或外部事实，也不能证明因果关系。
@@ -159,7 +160,7 @@ class ResultService:
             return inputs
         await sink.flush(context.run_id)
         records = await sink.store.list_results(context.run_id, thread_id=context.thread_id, usable_only=True)
-        internal = [r for r in records if r["source"] in ("db", "knowledge")]
+        internal = [r for r in records if r["source"] == "db"]
         workflow = context.business_mode == "internal_external"
         data = call.workflow_data if workflow else {}
         if workflow:

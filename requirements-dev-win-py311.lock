@@ -104,7 +104,6 @@ python-frontmatter==1.1.0
 python-multipart==0.0.22
 pywin32==311
 PyYAML==6.0.3
-ragflow-sdk==0.22.1
 regex==2026.2.19
 reportlab==4.4.10
 requests==2.32.5

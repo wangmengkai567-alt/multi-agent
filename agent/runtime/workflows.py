@@ -11,7 +11,7 @@ from agent.runtime.context import get_run_context
 from agent.runtime.events import EventPersistenceError, make_event
 from utils.secure_paths import confined_path, resolve_run_path, validate_filename
 
-SOURCES = ("db", "search", "knowledge")
+SOURCES = ("db", "search")
 OUTPUT_TOOLS = ("generate_markdown", "convert_md_to_pdf", "write_file", "edit_file")
 DEGRADED_NOTICE = (
     "【降级分析】数据库依赖不可用，本轮没有可用内部经营指标。以下仅为外部检索材料，不构成内部数据与市场的有效对照。"

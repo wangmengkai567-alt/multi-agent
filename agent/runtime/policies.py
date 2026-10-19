@@ -25,6 +25,10 @@ class PolicyError(ValueError):
     pass
 
 
+class SearchLimitReached(PolicyError):
+    pass
+
+
 class BudgetExceeded(PolicyError):
     pass
 
@@ -47,7 +51,7 @@ class Budgets(StrictConfig):
 
 
 class SQLLimits(StrictConfig):
-    allowed_tables: list[str] = Field(min_length=1)
+    allowed_tables: list[str]
     max_rows: int = Field(ge=1, le=10000)
     timeout_seconds: int = Field(ge=1, le=120)
     max_query_chars: int = Field(ge=1, le=100000)
@@ -58,6 +62,30 @@ class SQLLimits(StrictConfig):
             not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in self.allowed_tables
         ):
             raise ValueError("allowed_tables must contain unique simple table identifiers")
+        return self
+
+
+class SearchLimits(StrictConfig):
+    calls_per_task: int = Field(default=2, ge=1, le=20)
+    refinement_calls_per_task: int = Field(default=2, ge=0, le=10)
+    research_calls_per_task: int = Field(default=6, ge=1, le=20)
+    max_tasks_per_run: int = Field(default=3, ge=1, le=10)
+    calls_per_run: int = Field(default=12, ge=1, le=100)
+    research_calls_per_run: int = Field(default=24, ge=1, le=100)
+    page_reads_per_task: int = Field(default=3, ge=1, le=10)
+    timeout_seconds: int = Field(default=20, ge=1, le=120)
+    result_chars: int = Field(default=1000, ge=100, le=8000)
+    content_chars: int = Field(default=6000, ge=1000, le=40000)
+    model_context_chars: int = Field(default=12000, ge=2000, le=80000)
+
+    @model_validator(mode="after")
+    def fair_capacity(self):
+        for task_limit, run_limit in (
+            (self.calls_per_task, self.calls_per_run),
+            (self.research_calls_per_task, self.research_calls_per_run),
+        ):
+            if run_limit < self.max_tasks_per_run * (task_limit + self.refinement_calls_per_task):
+                raise ValueError("Run search capacity must cover every task's initial and reserved refinement calls")
         return self
 
 
@@ -87,13 +115,15 @@ class RetryLimits(StrictConfig):
 
     @model_validator(mode="after")
     def safe_tools(self):
-        permitted = {"internet_search", "list_sql_tables", "get_table_data", "execute_sql_query", "get_assistant_list"}
+        permitted = {"read_web_page", "internet_search", "list_sql_tables", "get_table_data", "execute_sql_query"}
         if set(self.tools) - permitted:
             raise ValueError("Only idempotent query tools may be retried")
         return self
 
 
 class ReviewLimits(StrictConfig):
+    json_mode: bool = False
+    strict_schema: bool = False
     on_check_failure: str = Field(default="reject", pattern="^(reject|return_unchecked)$")
 
 
@@ -107,6 +137,7 @@ class RuntimePolicy(StrictConfig):
     timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)
     budgets: Budgets
     sql: SQLLimits
+    search: SearchLimits = Field(default_factory=SearchLimits)
     files: FileLimits
     retry: RetryLimits
     review: ReviewLimits = Field(default_factory=ReviewLimits)
@@ -209,8 +240,17 @@ SAFE_FUNCTIONS = frozenset(
 )
 
 
-def validate_table(table, limits=None):
+def require_sql_tables(limits=None):
     limits = limits or policy_for_run().sql
+    if not limits.allowed_tables:
+        raise MissingConfiguration(
+            "MySQL queries are disabled: configure sql.allowed_tables with actual business tables"
+        )
+    return limits
+
+
+def validate_table(table, limits=None):
+    limits = require_sql_tables(limits)
     if not isinstance(table, str) or table not in limits.allowed_tables:
         raise PolicyError("Table is not in the allowed table list")
     return table
@@ -222,7 +262,7 @@ def validate_sql(query, limits=None):
     Comments, variables, locks, recursive CTEs, external schemas and unapproved
     functions are deliberately outside the first version's SQL contract.
     """
-    limits = limits or policy_for_run().sql
+    limits = require_sql_tables(limits)
     if not isinstance(query, str) or not query.strip() or len(query) > limits.max_query_chars:
         raise PolicyError("Invalid SQL query length")
     try:
@@ -303,6 +343,8 @@ def classify_tool_error(error):
         return "configuration"
     if isinstance(error, MissingAPIKeyError):
         return "configuration"
+    if isinstance(error, SearchLimitReached):
+        return "search_limit"
     if isinstance(error, BudgetExceeded):
         return "budget"
     if isinstance(error, PermissionError):
@@ -344,6 +386,10 @@ def validate_tool_call(call):
             "task 仅接受 description 和 subagent_type；完整任务说明和约束必须写入 description，"
             "不能放在 prompt 等额外字段，否则框架会丢弃这些说明。"
         )
+    if name == "read_web_page":
+        from tools.tavily_tool import validate_page_request
+
+        validate_page_request(args.get("url", ""), args.get("query", ""))
     if name == "internet_search":
         if not isinstance(args.get("query"), str) or not args["query"].strip():
             raise PolicyError("Search query must not be empty")
@@ -361,6 +407,7 @@ def validate_tool_call(call):
         validate_table(args.get("table_name"))
         require_db_credentials()
     elif name == "list_sql_tables":
+        require_sql_tables()
         require_db_credentials()
     elif name == "generate_markdown":
         filename = args.get("filename", "")
@@ -398,6 +445,15 @@ def before_tool_policy(call):
     try:
         policy_for_run()
         validate_tool_call(call)
+        if call.actor.rsplit(":", 1)[-1] == "internet_search":
+            from agent.runtime.search import reserve_search
+
+            call.search_budget = reserve_search(call)
+        elif call.actor.rsplit(":", 1)[-1] == "read_web_page":
+            from agent.runtime.search import search_allowance
+
+            if allowance := search_allowance.get():
+                allowance.reserve_page(call.call_id, retry=call.attempt > 0)
         reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
         from agent.runtime.workflows import before_tool_workflow
 

@@ -1,6 +1,9 @@
--- Provisioning example for a DBA; never executed by the Agent or this step.
--- Replace the password placeholder before manually running on your MySQL 8 server.
+-- Optional provisioning template for a DBA; the application never executes it.
+-- Use an existing business database; this template does not create data or tables.
+-- Replace YOUR_DATABASE, YOUR_TABLE and the password before manually running it.
+-- Set sql.allowed_tables in config/runtime.yml to the same approved table names.
 CREATE USER 'multiagent_reader'@'%' IDENTIFIED BY 'REPLACE_WITH_A_STRONG_PASSWORD';
-GRANT SELECT ON deep_search.orders TO 'multiagent_reader'@'%';
+GRANT SELECT ON `YOUR_DATABASE`.`YOUR_TABLE` TO 'multiagent_reader'@'%';
+-- Repeat the table-level GRANT only for other explicitly approved business tables.
 -- Do not grant INSERT/UPDATE/DELETE/EXECUTE/FILE, roles, global SELECT or GRANT OPTION.
--- Configure MYSQL_READONLY_USER and MYSQL_READONLY_PASSWORD in your local environment.
+-- Configure MYSQL_READONLY_USER, MYSQL_READONLY_PASSWORD and MYSQL_DATABASE in .env.

@@ -52,6 +52,31 @@ async function main() {
     assert.equal(ui.displayStatus(s),state); assert.match(element('#runSummary').innerHTML,/原因/);
   }
   assert.equal(ui.escapeHtml('<script>"\''),'&lt;script&gt;&quot;&#39;');
+  assert.match(ui.describeEvent(ev(25,'on_error','rejected',{error_category:'search_limit'})),/已拦截新的请求/);
+  assert.match(ui.describeEvent(ev(26,'after_tool','rejected',{error_category:'search_limit'})),/未执行/);
+  assert.match(ui.describeEvent(ev(27,'review_repair','running')),/仅重试检查/);
+  assert.equal(ui.describeEvent(ev(28,'on_error','cancelled',{error:'<object object at 0x0000014A534411F0>'})), '操作已取消：当前操作已取消');
+  assert.match(ui.describeEvent(ev(29,'search_finalizing','partial')),/汇总已核实内容/);
+  const quotaHarness = harness();
+  const quota = quotaHarness.ui.createSession('thread','额度控制','quota');
+  quota.status = 'completed';
+  quota.logs = [{...ev(1,'after_tool','completed'),actor:'search:internet_search'},
+    {...ev(2,'after_tool','rejected',{error_category:'search_limit'}),actor:'search:internet_search'}];
+  assert.equal(quotaHarness.ui.displayStatus(quota),'completed');
+  const finalCheck = quotaHarness.ui.createSession('thread','最终检查','final-check');
+  finalCheck.status='completed';
+  finalCheck.logs=[{...ev(1,'answer_validation','insufficient'),call_id:'final-check'}];
+  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'partial');
+  finalCheck.logs.push({...ev(2,'answer_validation','passed'),call_id:'final-check'});
+  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'completed');
+
+  finalCheck.logs.push({...ev(3,'subagent_review','insufficient'),call_id:'earlier-attempt'});
+  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'partial');
+  finalCheck.logs.push({...ev(4,'answer_validation','passed',{answer_kind:'complete'}),call_id:'final-check'});
+  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'completed');
+  finalCheck.logs.push({...ev(5,'answer_validation','partial',{answer_kind:'partial'}),call_id:'final-check'});
+  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'partial');
+
   assert.match(ui.describeEvent(ev(30,'subagent_review','dependency_unavailable',{issues:['缺配置']})),/依赖不可用.*缺配置/);
   assert.match(ui.describeEvent(ev(31,'subagent_refinement','insufficient',{
     revision_instruction:'[REDACTED]',issues:['缺少检索日期']})),/补充查询：缺少检索日期/);
@@ -91,6 +116,27 @@ async function main() {
   assert.equal(ui.displayStatus(reordered),'partial');
   ui.applyEvent(reordered,{...ev(5,'after_tool','completed'),actor:'main:write_file'});
   assert.equal(ui.displayStatus(reordered),'completed');
+  // All new choices are present in the real page, submitted and rendered in the timeline.
+  const page = fs.readFileSync(path.join(__dirname, '../../api/static/index.html'), 'utf8');
+  const extra = harness(), session = extra.ui.createSession('thread','新增技能','run');
+  const choices = [['researchSkill','research','信息调研'],
+    ['documentSkill','document-analysis','文档分析'], ['dataSkill','data-analysis','数据分析']];
+  let seq = 0;
+  for (const [id,skillId,label] of choices) {
+    assert.ok(page.includes(`id="${id}"`));
+    extra.element('#'+id).checked = true;
+    for (const [state,caption] of [['selected','已选择'],['loaded','正文已读取'],['resource_loaded','参考资源已读取']]) {
+      extra.ui.applyEvent(session,ev(++seq,'skill_state',state,{skill_id:skillId}));
+      assert.ok(extra.element('#logArea').innerHTML.includes(`Skill ${label}：${caption}`));
+    }
+  }
+  extra.element('#queryInput').value='调研资料、解读文档并分析数据';
+  extra.context.reply=url=>response(url==='/api/task'?{thread_id:'thread',run_id:'run'}:
+    url.includes('/history')?history():{files:[]});
+  await extra.ui.sendTask();
+  const submitted = JSON.parse(extra.calls.find(c=>c.url==='/api/task').options.body);
+  assert.deepEqual(submitted.skill_ids,['research','document-analysis','data-analysis']);
+  assert.equal(submitted.business_mode,'ordinary');
   console.log('PASS: persistence, refresh, full answers, ordered deduplication, Skill/review/refinement, redacted refinement reasons, partial and terminal states, stale HTTP, busy/validation, cancellation race, scoped downloads, escaping, view cleanup');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

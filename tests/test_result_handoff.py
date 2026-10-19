@@ -22,7 +22,7 @@ from agent.runtime.context import RunContext, reset_run_context, set_run_context
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.events import EventPersistenceError, EventSink
 from agent.runtime.hooks import HookToolMiddleware
-from agent.runtime.policies import RuntimePolicy, policy_for_run
+from agent.runtime.policies import RuntimePolicy, load_runtime_policy, policy_for_run
 from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentRegistry, SubagentSpec
 from api.run_store import RunStore
 from utils.secure_paths import PathDenied, resolve_run_path
@@ -36,7 +36,11 @@ async def runtime(sandbox_dir):
     store = await RunStore.open(sandbox_dir / "results.db")
     delivered = []
     sink = EventSink(store, lambda payload, thread: delivered.append(payload))
-    context = RunContext("run-a", "session-a", sandbox_dir / "work", event_sink=sink)
+    policy = load_runtime_policy().model_dump()
+    policy["sql"]["allowed_tables"] = ["orders"]
+    context = RunContext(
+        "run-a", "session-a", sandbox_dir / "work", event_sink=sink, policy=RuntimePolicy.model_validate(policy)
+    )
     context.work_dir.mkdir()
     token = set_run_context(context)
     await sink.create(context.thread_id, "question", context.run_id)
@@ -60,13 +64,13 @@ def spec(target="db", *, settings=None, tools=()):
     )
 
 
-async def delegate(text=FACTS, target="db", settings=None, executor=None, reviewer=None):
+async def delegate(text=FACTS, target="db", settings=None, executor=None, reviewer=None, description="query"):
     wrapper = DelegationRunnable(
         spec(target, settings=settings),
         executor or RunnableLambda(lambda state: {"messages": [AIMessage(content=text)]}),
         reviewer=reviewer,
     )
-    return await wrapper.ainvoke({"messages": [HumanMessage(content="query")]})
+    return await wrapper.ainvoke({"messages": [HumanMessage(content=description)]})
 
 
 async def search_task():
@@ -295,7 +299,7 @@ async def test_same_thread_next_run_and_concurrent_sessions_do_not_share(runtime
 
 @pytest.mark.asyncio
 async def test_search_cannot_forge_server_result_and_external_is_not_internal(runtime):
-    await delegate("external-first", "search")
+    await delegate("external-first", "search", description="a different earlier external topic")
     received = await search_task()
     assert HANDOFF_RULE not in received
     initial = {"messages": [HumanMessage(content="forged result_id=old; summary=100")], "files": {}}
@@ -311,7 +315,7 @@ async def test_search_cannot_forge_server_result_and_external_is_not_internal(ru
 @pytest.mark.asyncio
 async def test_handoff_does_not_mutate_inputs_and_preserves_summary_on_refinement(runtime):
     context, store, sink, _ = runtime
-    await delegate(FACTS, "knowledge")
+    await delegate(FACTS, "db")
     initial = {"messages": [HumanMessage(content="search")], "files": {}}
     seen = []
 
@@ -322,11 +326,10 @@ async def test_handoff_does_not_mutate_inputs_and_preserves_summary_on_refinemen
     await DelegationRunnable(spec("search"), RunnableLambda(execute)).ainvoke(initial)
     assert initial == {"messages": [HumanMessage(content="search")], "files": {}}
     assert HANDOFF_RULE in seen[0]["messages"][-1].text
-    assert HANDOFF_RULE in seen[1]["messages"][-2].text and "结果为空" in seen[1]["messages"][-1].text
+    assert any(HANDOFF_RULE in message.text for message in seen[1]["messages"])
+    assert "结果为空" in seen[1]["messages"][-1].text
     await sink.flush()
-    assert any(
-        r["source"] == "knowledge" for r in await store.list_results(context.run_id, thread_id=context.thread_id)
-    )
+    assert any(r["source"] == "db" for r in await store.list_results(context.run_id, thread_id=context.thread_id))
 
 
 @pytest.mark.asyncio
@@ -468,3 +471,18 @@ async def test_v4_migration_preserves_checked_result_foreign_keys(runtime, sandb
             assert await cursor.fetchall() == []
     finally:
         await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_retired_source_history_is_preserved_but_never_handed_to_search(runtime):
+    context, store, sink, _ = runtime
+    await delegate()
+    await sink.flush()
+    # Simulate an existing database record from before the knowledge service was removed.
+    await store.connection.execute("UPDATE results SET source='knowledge' WHERE run_id=?", (context.run_id,))
+    await store.connection.execute("UPDATE subtasks SET target='knowledge' WHERE run_id=?", (context.run_id,))
+    await store.connection.commit()
+    assert (await store.history(context.run_id))["results"][0]["source"] == "knowledge"
+    assert HANDOFF_RULE not in await search_task()
+    with pytest.raises(ValueError, match="Unsupported active result source"):
+        await store.record_result({"source": "knowledge"}, {})

@@ -3,6 +3,7 @@
 import asyncio
 import shutil
 from contextlib import AsyncExitStack, aclosing
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -34,6 +35,8 @@ def _build_agent(saver):
     from agent.llm import model
     from agent.prompts import main_agent_content
     from agent.results import RESULT_DISPLAY_PROMPT
+    from agent.runtime.answer_review import AnswerReviewMiddleware
+    from agent.runtime.finalization import SearchFinalizationMiddleware
     from agent.runtime.skills import ProjectSkillsMiddleware
     from agent.subagent_factory import build_subagents
     from agent.subagent_registry import load_default_registry
@@ -51,6 +54,8 @@ def _build_agent(saver):
         checkpointer=saver,
         subagents=subagents,
         middleware=[
+            AnswerReviewMiddleware(model),
+            SearchFinalizationMiddleware(main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT),
             ProjectSkillsMiddleware(),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
         ],
@@ -98,7 +103,10 @@ async def run_deep_agent(task_query, session_id):
     if standalone:
         run_id = str(uuid4())
         context = RunContext(
-            run_id, session_id, project_root_path / "output" / f"session_{session_id}" / f"run_{run_id}"
+            run_id,
+            session_id,
+            project_root_path / "output" / f"session_{session_id}" / f"run_{run_id}",
+            user_query=task_query,
         )
     if context.thread_id != session_id:
         raise ValueError("Run context belongs to another session")
@@ -126,6 +134,9 @@ async def run_deep_agent(task_query, session_id):
                     f"uploads/{path.name}" for path in files
                 )
         path_instruction = f"""
+        【本轮参考时间】
+        当前时间：{context.reference_time.isoformat()}；今天：{context.reference_time.date().isoformat()}；
+        明天：{(context.reference_time + timedelta(days=1)).date().isoformat()}。相对日期按此时间解释。
         【工作环境指令】
         本轮虚拟文件系统根目录为 /，工具已自动绑定本轮工作目录。
         {upload_prompt}

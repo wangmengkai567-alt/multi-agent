@@ -3,23 +3,41 @@ timeouts:
   request_seconds: 60.0
   shutdown_seconds: 5.0
 review:
+  # Current provider supports strict JSON Schema; disable strict_schema for JSON-object-only providers.
+  json_mode: true
+  strict_schema: true
   on_check_failure: reject
 budgets:
   total: 80
   main_model: 20
   sub_model: 30
-  review: 5
+  review: 12
   tool: 40
-  retry: 6
+  retry: 12
 sql:
-  allowed_tables: [orders]
+  # Empty by default. Add only actual business tables approved for querying.
+  allowed_tables: []
   max_rows: 100
   timeout_seconds: 10
   max_query_chars: 12000
+search:
+  # Per-task initial searches; refinement slots open only after an insufficient review.
+  calls_per_task: 2
+  refinement_calls_per_task: 2
+  research_calls_per_task: 6
+  max_tasks_per_run: 3
+  # Whole-run hard caps cover all admitted tasks, including their reserved refinements.
+  calls_per_run: 12
+  research_calls_per_run: 24
+  timeout_seconds: 20
+  result_chars: 1000
+  content_chars: 6000
+  page_reads_per_task: 3
+  model_context_chars: 24000
 files:
   skill_directory: skills
   max_upload_bytes: 10485760
 retry:
   max_retries: 1
   delay_seconds: 0.25
-  tools: [internet_search, list_sql_tables, get_table_data, execute_sql_query, get_assistant_list]
+  tools: [read_web_page, internet_search, list_sql_tables, get_table_data, execute_sql_query]

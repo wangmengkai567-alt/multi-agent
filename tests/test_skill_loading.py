@@ -23,13 +23,14 @@ from agent.runtime.events import EventSink
 from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.policies import MissingConfiguration
 from agent.runtime.skills import (
+    SKILL_FILES,
     SKILL_IDS,
     ProjectSkillsMiddleware,
     skill_scope,
     validate_skill_ids,
 )
 from agent.subagent_factory import build_subagents
-from agent.subagent_registry import DISPLAY_NAMES, SubagentRegistry, SubagentSpec, load_default_registry
+from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentRegistry, SubagentSpec, load_default_registry
 from api.run_store import RunStore
 from utils.secure_paths import PathDenied, resolve_run_path
 
@@ -77,46 +78,55 @@ def graph(model, **kwargs):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sync", [False, True])
-async def test_automatic_discovery_then_real_framework_body_and_resource(runtime, sync):
+@pytest.mark.parametrize("skill_id", SKILL_IDS)
+async def test_automatic_discovery_then_real_framework_body_and_resource(runtime, sync, skill_id):
     context, _, _ = runtime
-    text = (context.skill_dir / "ecommerce-analysis" / "SKILL.md").read_text(encoding="utf-8")
+    body_path, resource_path = (f"/skills/{skill_id}/{name}" for name in SKILL_FILES[skill_id])
+    text = (context.skill_dir / skill_id / "SKILL.md").read_text(encoding="utf-8")
+    body_marker = text.split("---", 2)[-1].strip().splitlines()[0]
+    resource_marker = (
+        (context.skill_dir / skill_id / SKILL_FILES[skill_id][1]).read_text(encoding="utf-8").splitlines()[0]
+    )
     model = ScriptedModel(
         responses=[
-            call("read_file", {"file_path": BODY}, "body"),
-            call("read_file", {"file_path": RESOURCE}, "reference"),
+            call("read_file", {"file_path": body_path}, "body"),
+            call("read_file", {"file_path": resource_path}, "reference"),
             AIMessage(content="done"),
         ]
     )
     agent = graph(model)
     result = (
-        await asyncio.to_thread(agent.invoke, {"messages": [("user", "分析经营指标")]})
+        await asyncio.to_thread(agent.invoke, {"messages": [("user", "按当前任务读取说明")]})
         if sync
-        else await agent.ainvoke({"messages": [("user", "分析经营指标")]})
+        else await agent.ainvoke({"messages": [("user", "按当前任务读取说明")]})
     )
     first = str(model.seen_messages[0])
-    assert all(name in first for name in SKILL_IDS) and "不得从表名或样本猜测字段含义" not in first
-    assert "不得从表名或样本猜测字段含义" in str(model.seen_messages[1])
-    assert "零分母返回不可计算" in str(model.seen_messages[2])
+    assert all(name in first for name in SKILL_IDS) and body_marker not in first
+    assert body_marker in str(model.seen_messages[1]) and resource_marker not in str(model.seen_messages[1])
+    assert resource_marker in str(model.seen_messages[2])
     tools = [m for m in result["messages"] if isinstance(m, ToolMessage)]
-    assert len(tools) == 2 and "零分母返回不可计算" in tools[1].content
+    assert len(tools) == 2 and resource_marker in tools[1].content
     events = await skill_events(runtime)
     assert [e["status"] for e in events] == ["selected", "loaded", "resource_loaded"]
+    assert {e["data"]["skill_id"] for e in events} == {skill_id}
     assert events[1]["data"]["sha256"] == sha256(text.encode()).hexdigest()
     assert events[1]["call_id"] == "body" and events[2]["call_id"] == "reference"
-    assert "不得从表名" not in str(events)
+    assert body_marker not in str(events)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("selected", [("ecommerce-analysis",), ("report-writing",), SKILL_IDS])
+@pytest.mark.parametrize("selected", [*((name,) for name in SKILL_IDS), SKILL_IDS])
 async def test_explicit_selection_reaches_first_model_without_resource_eager_load(runtime, selected):
     context, _, _ = runtime
     context.skill_ids = selected
     model = ScriptedModel(responses=[AIMessage(content="done")])
     await graph(model).ainvoke({"messages": [("user", "task")]})
     first = str(model.seen_messages[0])
-    assert ("不得从表名或样本猜测字段含义" in first) == ("ecommerce-analysis" in selected)
-    assert ("不要求为凑字数扩写或捏造数据" in first) == ("report-writing" in selected)
-    assert "净销售额" not in first and "集中说明缺失依据" not in first
+    for skill_id, files in SKILL_FILES.items():
+        body = (context.skill_dir / skill_id / files[0]).read_text(encoding="utf-8")
+        assert (body.split("---", 2)[-1].strip().splitlines()[0] in first) == (skill_id in selected)
+        resource = (context.skill_dir / skill_id / files[1]).read_text(encoding="utf-8")
+        assert resource.splitlines()[0] not in first
     events = await skill_events(runtime)
     assert len(events) == 2 * len(selected)
     assert {e["data"]["skill_id"] for e in events} == set(selected)
@@ -135,15 +145,17 @@ async def test_ordinary_query_has_metadata_only_without_forced_report(runtime):
 
 
 @pytest.mark.asyncio
-async def test_partial_reads_do_not_claim_full_body_loaded(runtime):
+@pytest.mark.parametrize("skill_id", SKILL_IDS)
+async def test_partial_reads_do_not_claim_full_body_loaded(runtime, skill_id):
     context, _, _ = runtime
-    count = len((context.skill_dir / "ecommerce-analysis" / "SKILL.md").read_text(encoding="utf-8").splitlines())
+    body_path = f"/skills/{skill_id}/SKILL.md"
+    count = len((context.skill_dir / skill_id / "SKILL.md").read_text(encoding="utf-8").splitlines())
     backend = run_backend(None)
-    assert "1" in backend.read(BODY, offset=0, limit=1)
+    assert "1" in backend.read(body_path, offset=0, limit=1)
     assert [e["status"] for e in await skill_events(runtime)] == ["selected"]
-    assert backend.read(BODY, offset=count + 1).startswith("Error")
-    backend.read(BODY, offset=1, limit=count)
-    backend.read(BODY)
+    assert backend.read(body_path, offset=count + 1).startswith("Error")
+    backend.read(body_path, offset=1, limit=count)
+    backend.read(body_path)
     assert [e["status"] for e in await skill_events(runtime)] == ["selected", "loaded"]
 
 
@@ -174,7 +186,7 @@ async def test_bad_skill_resources_refused_before_handler(runtime, bad):
 async def test_resources_readonly_in_all_file_entrypoints(runtime):
     context, _, _ = runtime
     backend = run_backend(None)
-    for path in (BODY, RESOURCE, REPORT):
+    for path in (f"/skills/{name}/{file}" for name, files in SKILL_FILES.items() for file in files):
         assert backend.write(path, "attack").error
         assert backend.edit(path, "Skill", "attack").error
         assert backend.upload_files([(path, b"attack")])[0].error == "permission_denied"
@@ -237,9 +249,9 @@ async def test_unconfigured_child_cannot_read_parent_skill_and_scope_is_restored
         seen.append(skill_scope.get())
         return {"messages": [AIMessage(content="done")]}
 
-    spec = SubagentSpec("knowledge", DISPLAY_NAMES["knowledge"], "Query", "Return evidence", ())
+    spec = SubagentSpec("search", DISPLAY_NAMES["search"], "Query", "Return evidence", ())
     await DelegationRunnable(spec, RunnableLambda(execute)).ainvoke({"messages": [HumanMessage(content="query")]})
-    assert seen == [("knowledge", ())] and skill_scope.get() == ("main", SKILL_IDS)
+    assert seen == [("search", ())] and skill_scope.get() == ("main", SKILL_IDS)
     assert await skill_events(runtime) == []
 
 
@@ -308,12 +320,13 @@ async def test_http_invalid_selection_creates_no_run(sandbox_dir, monkeypatch, b
 
 
 @pytest.mark.asyncio
-async def test_http_explicit_selection_is_carried_into_run_context(sandbox_dir, monkeypatch):
+@pytest.mark.parametrize("skill_id", SKILL_IDS)
+async def test_http_explicit_selection_is_carried_into_run_context(sandbox_dir, monkeypatch, skill_id):
     async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
-        response = await client.post("/api/task", json={"query": "report", "skill_ids": ["report-writing"]})
+        response = await client.post("/api/task", json={"query": "task", "skill_ids": [skill_id]})
         assert response.status_code == 200
         run_id = await wait_started(agent)
-        assert agent.contexts[run_id].skill_ids == ("report-writing",)
+        assert agent.contexts[run_id].skill_ids == (skill_id,)
         await complete(agent, run_id)
 
 
@@ -346,8 +359,11 @@ async def test_two_sessions_keep_selected_bodies_and_events_separate(runtime, sa
 
 def test_registry_ids_and_production_expert_visibility():
     registry = load_default_registry()
-    assert registry.get("db").allowed_skill_ids == registry.get("search").allowed_skill_ids == ("ecommerce-analysis",)
-    assert registry.get("knowledge").allowed_skill_ids == ()
+    assert registry.get("db").allowed_skill_ids == ("ecommerce-analysis", "data-analysis")
+    assert registry.get("search").allowed_skill_ids == ("ecommerce-analysis", "research")
+    assert set(registry.specs) == {"db", "search"}
+    with pytest.raises(ValueError, match="Unknown expert"):
+        registry.get("knowledge")
     with pytest.raises(ValueError):
         validate_skill_ids(("bad",))
     with pytest.raises(ValueError):
@@ -377,3 +393,61 @@ async def test_template_cannot_override_output_or_execution_permissions(runtime)
     assert not (context.work_dir.parent / "outside.md").exists()
     assert "执行脚本" in str(model.seen_messages[1]) and "execute" not in model.tool_names
     assert (context.skill_dir / "report-writing" / "SKILL.md").read_text(encoding="utf-8").startswith("---")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target, skill_id", [("db", "data-analysis"), ("search", "research")])
+async def test_new_skills_reach_scoped_expert_and_record_resources(runtime, target, skill_id):
+    context, _, _ = runtime
+    context.skill_ids = (skill_id,)
+    spec = replace(load_default_registry().get(target), tools=(), review_config=ReviewConfig())
+    resource = f"/skills/{skill_id}/{SKILL_FILES[skill_id][1]}"
+    child = ScriptedModel(
+        responses=[
+            call("read_file", {"file_path": resource}, "reference"),
+            call("read_file", {"file_path": REPORT}, "denied"),
+            AIMessage(content="facts"),
+        ]
+    )
+    parent = ScriptedModel(
+        responses=[
+            call("task", {"subagent_type": target, "description": "完成分派的分析"}, "delegate"),
+            AIMessage(content="done"),
+        ]
+    )
+    agent = create_deep_agent(
+        model=parent,
+        backend=run_backend,
+        subagents=build_subagents(SubagentRegistry([spec]), parent, models={target: child}),
+        middleware=[ProjectSkillsMiddleware(), HookToolMiddleware(allowed_targets=(target,), managed_delegation=True)],
+    )
+    await agent.ainvoke({"messages": [("user", "分析材料")]})
+    first = str(child.seen_messages[0])
+    body = (context.skill_dir / skill_id / "SKILL.md").read_text(encoding="utf-8")
+    assert body.split("---", 2)[-1].strip().splitlines()[0] in first
+    for name in SKILL_IDS:
+        assert (f"/skills/{name}/SKILL.md" in first) == (name in spec.allowed_skill_ids)
+    denied = [m for m in child.seen_messages[-1] if isinstance(m, ToolMessage) and m.tool_call_id == "denied"]
+    assert len(denied) == 1 and denied[0].status == "error"
+    events = [e for e in await skill_events(runtime) if e["actor"] == target]
+    assert [e["status"] for e in events] == ["selected", "loaded", "resource_loaded"]
+    assert {e["data"]["skill_id"] for e in events} == {skill_id}
+    assert events[-1]["data"]["resource"] == SKILL_FILES[skill_id][1]
+    assert skill_scope.get() == ("main", SKILL_IDS)
+
+
+def test_registry_does_not_import_removed_service_sdk(monkeypatch):
+    import builtins
+
+    original = builtins.__import__
+
+    def checked_import(name, *args, **kwargs):
+        if name.startswith(("ragflow_sdk", "rawflow", "tools.ragflow_tools")):
+            raise AssertionError("Removed knowledge service was imported")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", checked_import)
+    registry = load_default_registry()
+    assert set(registry.specs) == {"db", "search"}
+    tools = {tool.name for spec in registry.specs.values() for tool in spec.tools}
+    assert not tools & {"get_assistant_list", "create_ask_delete"}

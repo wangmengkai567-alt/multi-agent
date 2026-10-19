@@ -256,7 +256,7 @@ def test_fixed_handler_order_and_child_configuration():
     hooks = HookPipeline({"before_run": [lambda item: order.append(1), lambda item: order.append(2)]})
     hooks.emit("before_run", HookCall("main", "run"))
     assert order == [1, 2]
-    specs = hook_subagents([{"name": name, "tools": []} for name in ("db", "search", "knowledge")])
+    specs = hook_subagents([{"name": name, "tools": []} for name in ("db", "search")])
     assert all(isinstance(spec["middleware"][-1], HookToolMiddleware) for spec in specs)
     assert get_run_context() is None
 
@@ -295,7 +295,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         return "private document must not be logged"
 
     responses = []
-    for target in ("db", "search", "knowledge"):
+    for target in ("db", "search"):
         responses.extend(
             [
                 call("task", {"subagent_type": target, "description": "query"}, f"delegate-{target}"),
@@ -304,7 +304,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
                 AIMessage(content=ReviewResult(verdict="passed").model_dump_json()),
             ]
         )
-    responses.append(AIMessage(content="done"))
+    responses.extend([AIMessage(content="done"), AIMessage(content=ReviewResult(verdict="passed").model_dump_json())])
     model = ScriptedModel(responses=responses)
     fake_modules = {
         "agent.llm": SimpleNamespace(model=model),
@@ -330,7 +330,6 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
     for module, target, variable in (
         ("database_query_agent", "db", "database_query_agent"),
         ("network_search_agent", "search", "network_search_agent"),
-        ("knowledge_base_agent", "knowledge", "knowledge_base_agent"),
     ):
         fake_modules[f"agent.subagents.{module}"] = SimpleNamespace(
             **{variable: {"name": target, "description": target, "system_prompt": "query", "tools": [probe]}}
@@ -348,8 +347,8 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         assert state["messages"][-1].content == "done"
         assert "关键词或趋势一致不能作为事实证明" in str(model.seen_messages[0])
         assert "不要求为凑字数扩写或捏造数据" in str(model.seen_messages[0])
-        assert executions == ["db", "search", "knowledge"]
-        assert context.call_counts == {"main_model": 4, "sub_model": 6, "review": 3, "tool": 6, "retry": 0}
+        assert executions == ["db", "search"]
+        assert context.call_counts == {"main_model": 3, "sub_model": 4, "review": 3, "tool": 4, "retry": 0}
         await sink.flush(context.run_id)
         events = (await store.history(context.run_id))["events"]
         for target in executions:
@@ -358,7 +357,7 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
             subtask = context.delegation_calls[f"delegate-{target}"][-1]
             assert all(event["parent_call_id"] == subtask["call_id"] for event in child)
             assert all(event["call_id"] == f"tool-{target}" for event in child)
-        assert len([event for event in events if event["event"] == "after_subagent"]) == 3
+        assert len([event for event in events if event["event"] == "after_subagent"]) == 2
         assert all(event["data"]["check_status"] == "passed" for event in events if event["event"] == "after_subagent")
         assert "private document" not in str(events)
     finally:

@@ -41,6 +41,8 @@ class HookCall:
     executed: bool = False
     attempt: int = 0
     workflow_data: dict = field(default_factory=dict, repr=False)
+    search_task_key: str | None = field(default=None, repr=False)
+    search_budget: dict | None = field(default=None, repr=False)
 
 
 def error_category(error):
@@ -57,11 +59,24 @@ def error_category(error):
     return classify_tool_error(error)
 
 
+def error_message(error):
+    if type(error).__name__ == "CancelledError":
+        context = get_run_context()
+        if context and context.stop_status == "timed_out":
+            return "任务达到总时限，已取消当前操作"
+        if context and context.stop_status == "interrupted":
+            return "服务关闭，已取消当前操作"
+        return "当前操作已取消"
+    return redact_text(str(error) or type(error).__name__)
+
+
 def record_hook(name, call):
     context = get_run_context()
     if context is None or context.event_sink is None:
         return  # Standalone execution makes no persistence claim.
     data = {"hook": name, "elapsed_ms": call.elapsed_ms, "args": call.args, "attempt": call.attempt}
+    if call.search_budget is not None:
+        data["search_budget"] = call.search_budget
     if name == "after_tool":
         data["result_length"] = len(str(call.result)) if call.result is not None else 0
         data["result_type"] = type(call.result).__name__
@@ -69,7 +84,7 @@ def record_hook(name, call):
     if name == "after_subagent":
         data.update(check_status=call.check_status, result_length=len(str(call.result)))
     if call.error is not None:
-        data.update(error=redact_text(str(call.error)), error_category=error_category(call.error))
+        data.update(error=error_message(call.error), error_category=error_category(call.error))
     context.event_sink.submit(
         make_event(
             context.thread_id,
@@ -179,7 +194,12 @@ class HookToolMiddleware(AgentMiddleware):
         tool = getattr(request, "tool", None)
         if tool is not None:
             try:
-                tool.tool_call_schema.model_validate(call.args)
+                parsed_args = tool.tool_call_schema.model_validate(call.args).model_dump(exclude_unset=True)
+                # Validate policy against the same values the tool will actually use
+                # (e.g. compatible transports encode integers/arrays as strings).
+                # Preserve unknown fields so policy can still reject extra task args.
+                call.args = {**call.args, **parsed_args}
+                request.tool_call["args"] = call.args
             except ValueError as exc:
                 raise HookRejected("Invalid tool arguments") from exc
         if request.tool_call["name"] == "task":

@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
-DISPLAY_NAMES = {"db": "数据分析助手", "search": "市场情报助手", "knowledge": "内部知识助手"}
+DISPLAY_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}
 
 
 @dataclass(frozen=True)
@@ -73,10 +73,9 @@ def load_default_registry():
     # Legacy definitions supply prompts/tools only. Their Chinese names are
     # display labels; factory and framework routing always use stable IDs.
     from agent.subagents.database_query_agent import database_query_agent
-    from agent.subagents.knowledge_base_agent import knowledge_base_agent
     from agent.subagents.network_search_agent import network_search_agent
 
-    sources = (("db", database_query_agent), ("search", network_search_agent), ("knowledge", knowledge_base_agent))
+    sources = (("db", database_query_agent), ("search", network_search_agent))
     return SubagentRegistry(
         [
             SubagentSpec(
@@ -85,14 +84,16 @@ def load_default_registry():
                 source["description"],
                 source["system_prompt"],
                 tuple(source["tools"]),
-                allowed_skill_ids=("ecommerce-analysis",) if agent_id in ("db", "search") else (),
+                allowed_skill_ids={
+                    "db": ("ecommerce-analysis", "data-analysis"),
+                    "search": ("ecommerce-analysis", "research"),
+                }[agent_id],
                 review_config=ReviewConfig(
                     enabled=True,
                     model_check=True,
                     required_tools={
                         "db": ("get_table_data", "execute_sql_query"),
                         "search": ("internet_search",),
-                        "knowledge": ("create_ask_delete",),
                     }[agent_id],
                     require_sources=agent_id == "search",
                 ),

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MultiAgent-Search — 电商运营智能分析</title>
+<title>MultiAgent-Search — 多智能体任务助手</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -174,12 +174,24 @@
   select { background:var(--panel); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:5px; }
   .notice { padding:8px 20px; color:var(--orange); min-height:34px; font-size:13px; }
   .run-summary { padding:12px 20px; border-bottom:1px solid var(--border); font-size:13px; }
-  .answer { white-space:pre-wrap; overflow-wrap:anywhere; padding:16px 20px; line-height:1.7; border-bottom:1px solid var(--border); max-height:32vh; overflow:auto; }
+  .answer { white-space:normal; overflow-wrap:anywhere; padding:16px 20px; line-height:1.7; border-bottom:1px solid var(--border); max-height:32vh; overflow:auto; }
   details { color:var(--text-dim); margin-top:6px; font-size:12px; }
   details pre { white-space:pre-wrap; overflow-wrap:anywhere; }
   .btn:disabled { opacity:.45; cursor:not-allowed; }
   .tab .tab-status.partial, .tab .tab-status.timed_out, .tab .tab-status.cancelled { color:var(--orange); }
   @media(max-width:760px) { .file-panel { width:210px; } .input-bar { flex-wrap:wrap; } .input-bar input { min-width:100%; } }
+  .answer h1, .answer h2, .answer h3 { line-height:1.4; margin:1em 0 .5em; }
+  .answer > :first-child { margin-top:0; }
+  .answer > :last-child { margin-bottom:0; }
+  .answer p, .answer ul, .answer ol, .answer blockquote { margin:.65em 0; }
+  .answer ul, .answer ol { padding-left:1.7em; }
+  .answer table { border-collapse:collapse; width:100%; margin:12px 0; font-size:13px; }
+  .answer th, .answer td { border:1px solid var(--border); padding:8px 12px; text-align:left; }
+  .answer th { background:rgba(128,128,128,.12); }
+  .answer blockquote { border-left:3px solid var(--border); padding-left:12px; color:var(--text-dim); }
+  .answer pre { white-space:pre-wrap; padding:12px; background:rgba(128,128,128,.12); border-radius:6px; }
+  .answer code { font-family:Consolas,monospace; }
+  .answer a { color:var(--accent); text-decoration:underline; }
 </style>
 </head>
 <body>
@@ -193,7 +205,7 @@
 </header>
 
 <div class="input-bar">
-  <input id="queryInput" aria-label="分析问题" type="text" placeholder="输入分析问题，例如：帮我分析最近电商行业的热门品类趋势" />
+  <input id="queryInput" aria-label="分析问题" type="text" placeholder="输入问题，例如：明天武汉适合穿什么衣服？" />
   <button class="btn btn-primary" id="sendBtn" onclick="sendTask()">▶ 发送新任务</button>
   <button class="btn btn-ghost" onclick="closeAllSessions()">移除全部视图</button>
 </div>
@@ -203,6 +215,9 @@
   <label>业务模式 <select id="modeSelect" aria-label="业务模式"><option value="ordinary">普通任务</option><option value="internal_external">内部数据与市场对照</option></select></label>
   <label><input type="checkbox" id="ecommerceSkill"> 运营分析 Skill</label>
   <label><input type="checkbox" id="reportSkill"> 报告写作 Skill</label>
+  <label><input type="checkbox" id="researchSkill"> 信息调研 Skill</label>
+  <label><input type="checkbox" id="documentSkill"> 文档分析 Skill</label>
+  <label><input type="checkbox" id="dataSkill"> 数据分析 Skill</label>
 </div>
 <div class="notice" id="notice" role="status" aria-live="polite"></div>
 
@@ -224,6 +239,8 @@
 </div>
 
 <script src="/static/run-events.js"></script>
+<script src="/static/vendor/marked.umd.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,6 @@
+$ .venv\Scripts\python.exe -X utf8 -m pytest tests/test_skill_loading.py tests/test_delegation.py tests/test_hook_pipeline.py tests/test_tool_policies.py -q --tb=short -p no:cacheprovider --basetemp=output/pytest-skills15-01
+........................................................................ [ 34%]
+........................................................................ [ 69%]
+..............................................................           [100%]
+206 passed in 152.71s (0:02:32)
+Exit code: 0

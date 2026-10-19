@@ -15,7 +15,7 @@ import pytest
 # Set before test modules are collected, not only inside a test fixture.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 for _key in tuple(os.environ):
-    if _key.startswith(("OPENAI_", "ANTHROPIC_", "TAVILY_", "RAGFLOW_", "MYSQL_")):
+    if _key.startswith(("OPENAI_", "ANTHROPIC_", "TAVILY_", "MYSQL_")):
         os.environ.pop(_key)
 os.environ.pop("LLM_QWEN_MAX", None)
 os.environ.pop("LANGSMITH_API_KEY", None)
