@@ -1,7 +1,0 @@
-$ .venv/Scripts/python.exe -m pytest tests/test_delegation.py tests/test_tool_policies.py tests/test_workflow_order.py -q --tb=short -p no:cacheprovider --basetemp=output/pytest-step14-task-arguments
-........................................................................ [ 45%]
-........................................................................ [ 90%]
-...............                                                          [100%]
-159 passed in 166.80s (0:02:46)
-
-EXIT_CODE=0

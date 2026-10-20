@@ -1,5 +1,0 @@
-$ .venv/Scripts/python.exe -m pytest tests/test_run_cancellation.py tests/test_event_replay.py tests/test_delegation.py tests/test_run_concurrency.py tests/test_events.py tests/test_run_history.py -q --tb=short -p no:cacheprovider --basetemp=output/pytest-step13-regression
-....................................................................     [100%]
-68 passed in 113.28s (0:01:53)
-
-exit_code: 0

@@ -18,6 +18,20 @@ from agent.runtime.search import search_allowance
 from api.monitor import monitor
 
 
+def preserve_http_errors(client):
+    """Keep status and Retry-After before the SDK converts HTTP errors to headerless exceptions."""
+    session = getattr(client, "session", None)
+    if session is None:
+        return
+
+    def inspect(response, **kwargs):
+        if response.status_code >= 400:
+            response.raise_for_status()
+        return response
+
+    session.hooks.setdefault("response", []).append(inspect)
+
+
 def compact_search_response(payload, limits, query=None):
     """Keep actual URLs and explicit excerpts without loading full pages into the model context."""
     remaining = limits.content_chars
@@ -28,6 +42,7 @@ def compact_search_response(payload, limits, query=None):
         remaining -= len(excerpt)
         rows.append(
             dict(
+                source_id=__import__("hashlib").sha256(str(result.get("url", "")).encode()).hexdigest()[:12],
                 title=result.get("title", ""),
                 url=result.get("url", ""),
                 content=excerpt,
@@ -96,6 +111,7 @@ def internet_search(
     allowance = search_allowance.get()
     depth = "advanced" if allowance and allowance.task.refinement_open else "basic"
     with TavilyClient(api_key=key) as client:
+        preserve_http_errors(client)
         payload = client.search(
             query=query,
             **({"include_domains": include_domains} if include_domains else {}),
@@ -150,6 +166,7 @@ def read_web_page(url: str, query: str):
     limits = policy_for_run().search
     monitor.report_tool("网页正文读取工具", {"url": url, "query": query})
     with TavilyClient(api_key=key) as client:
+        preserve_http_errors(client)
         payload = client.extract(
             urls=[url],
             query=query,

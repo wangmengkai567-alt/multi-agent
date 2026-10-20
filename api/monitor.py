@@ -142,6 +142,7 @@ class ToolMonitor:
             actor=message.name or "tool",
             status="failed" if message.status == "error" else "returned",
             call_id=subtask["call_id"] if subtask else message.tool_call_id,
+            parent_call_id=message.tool_call_id if subtask else None,
         )
 
     def report_task_result(self, result: str):

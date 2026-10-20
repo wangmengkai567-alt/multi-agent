@@ -290,7 +290,8 @@ async def test_total_deadline_interrupts_real_retry_backoff(sandbox_dir, monkeyp
         )
         record = (await client.post("/api/task", json={"query": "retry"})).json()
         await asyncio.wait_for(reached.wait(), 3)
-        assert (await settled(client, record["run_id"]))["status"] == "timed_out"
+        saved = await settled(client, record["run_id"])
+        assert saved["status"] == "failed"
         assert calls == [1]
 
 

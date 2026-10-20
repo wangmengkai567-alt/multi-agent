@@ -48,6 +48,8 @@ class Budgets(StrictConfig):
     review: int = Field(ge=1, le=10000)
     tool: int = Field(ge=1, le=10000)
     retry: int = Field(ge=0, le=10000)
+    tools_per_turn: int = Field(default=8, ge=1, le=100)
+    near_ratio: float = Field(default=0.85, gt=0, lt=1)
 
 
 class SQLLimits(StrictConfig):
@@ -112,6 +114,7 @@ class RetryLimits(StrictConfig):
     max_retries: int = Field(ge=0, le=3)
     delay_seconds: float = Field(ge=0, le=5)
     tools: list[str]
+    max_delay_seconds: float = Field(default=20.0, ge=0, le=300)
 
     @model_validator(mode="after")
     def safe_tools(self):
@@ -131,11 +134,17 @@ class TimeoutLimits(StrictConfig):
     total_seconds: float = Field(default=300.0, gt=0, le=86400)
     request_seconds: float = Field(default=30.0, gt=0, le=300)
     shutdown_seconds: float = Field(default=5.0, gt=0, le=30)
+    tool_seconds: float = Field(default=25.0, gt=0, le=300)
+    finalize_seconds: float = Field(default=45.0, ge=0, le=300)
+    job_seconds: float = Field(default=1800.0, gt=0, le=86400)
 
 
 class RuntimePolicy(StrictConfig):
     timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)
     budgets: Budgets
+    job_budgets: Budgets = Field(
+        default_factory=lambda: Budgets(total=240, main_model=40, sub_model=90, review=24, tool=120, retry=24)
+    )
     sql: SQLLimits
     search: SearchLimits = Field(default_factory=SearchLimits)
     files: FileLimits
@@ -178,6 +187,9 @@ def reserve_calls(*kinds):
                 raise BudgetExceeded(f"{kind} call budget exhausted")
         for kind, count in requested.items():
             context.call_counts[kind] += count
+        from agent.runtime.checkpoints import save_job_checkpoint
+
+        save_job_checkpoint(context)
 
 
 def request_timeout(maximum=None):
@@ -357,8 +369,12 @@ def classify_tool_error(error):
     status = getattr(response, "status_code", None) or getattr(error, "status_code", None)
     if status in (401, 403) or getattr(error, "errno", None) in (1044, 1045, 1142):
         return "permission"
-    if status in (408, 429, 500, 502, 503, 504):
+    if status == 429:
+        return "rate_limited"
+    if status == 408 or status is not None and 500 <= status < 600:
         return "transient"
+    if status is not None and 400 <= status < 500:
+        return "permanent"
     if isinstance(
         error,
         TimeoutError
@@ -379,6 +395,19 @@ def validate_tool_call(call):
 
     name = call.actor.rsplit(":", 1)[-1]
     args = call.args
+    context = get_run_context()
+    if (
+        context
+        and context.background_job
+        and name in ("generate_markdown", "convert_md_to_pdf", "write_file", "edit_file")
+    ):
+        raise PolicyError("当前持久化研究任务仅执行只读查询；文件交付由交互轮次单独执行")
+    if (
+        context
+        and not context.collecting
+        and name in ("task", "internet_search", "read_web_page", "submit_research_job")
+    ):
+        raise BudgetExceeded("本轮已进入交付阶段，不再启动调查")
     if name == "execute":
         raise PolicyError("Script execution is disabled")
     if name == "task" and set(args) - {"description", "subagent_type"}:
@@ -454,7 +483,17 @@ def before_tool_policy(call):
 
             if allowance := search_allowance.get():
                 allowance.reserve_page(call.call_id, retry=call.attempt > 0)
-        reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
+        context = get_run_context()
+        owner = call.parent_call_id or context.run_id
+        turn = context.tool_turns.get((owner, call.call_id), owner)
+        with context.budget_lock:
+            if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
+                raise BudgetExceeded("单次模型回合工具调用次数已达到上限")
+            reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
+            context.turn_counts[turn] = context.turn_counts.get(turn, 0) + 1
+            from agent.runtime.checkpoints import save_job_checkpoint
+
+            save_job_checkpoint(context)
         from agent.runtime.workflows import before_tool_workflow
 
         before_tool_workflow(call)

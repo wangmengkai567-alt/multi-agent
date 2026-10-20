@@ -52,7 +52,8 @@ class AnswerReviewMiddleware(AgentMiddleware):
         if context is None:
             return None
         if (
-            context.search_tasks
+            context.enforce_plan
+            or context.search_tasks
             or context.approved_internal
             or context.answer_repair_attempted
             or cited_urls(message.text) - cited_urls(context.user_query)
@@ -75,6 +76,22 @@ class AnswerReviewMiddleware(AgentMiddleware):
 
     def _source_gap(self, message, evidence):
         context = get_run_context()
+        import re
+
+        if re.search(r"\[source:[^\]]+\]", message.text):
+            return ReviewResult(
+                verdict="insufficient",
+                issues=["引用了未登记的来源 ID"],
+                missing_evidence=["实际来源ID"],
+                revision_instruction="只使用本任务实际 allowed_sources 中的 ID，删除未知引用及其无依据断言。",
+            )
+        if context.accepted_plan and not evidence and not context.approved_internal:
+            return ReviewResult(
+                verdict="insufficient",
+                issues=["已登记研究分工但尚无通过检查的实际结果"],
+                missing_evidence=["当前研究任务的真实证据"],
+                revision_instruction="继续执行已登记任务，不以调查计划或即将调用工具的承诺结束；不可核实则明确有限结果。",
+            )
         known = {source_page(url) for url in source_urls(evidence)}
         provided = {source_page(url) for url in cited_urls(context.user_query)}
         missing = {source_page(url) for url in cited_urls(message.text)} - known - provided
@@ -92,6 +109,11 @@ class AnswerReviewMiddleware(AgentMiddleware):
                     dict(
                         excluded_source_urls=sorted(missing),
                         allowed_source_urls=sorted(set(source_urls(evidence)) | cited_urls(context.user_query)),
+                        allowed_sources=[
+                            {"source_id": __import__("hashlib").sha256(url.encode()).hexdigest()[:12], "url": url}
+                            for url in source_urls(evidence)
+                        ],
+                        repair_phase="citation",
                     ),
                     ensure_ascii=False,
                 )
@@ -100,6 +122,11 @@ class AnswerReviewMiddleware(AgentMiddleware):
 
     def _record(self, review):
         context = get_run_context()
+        context.delivery_status = (
+            "complete"
+            if review.verdict == "passed" and getattr(review, "answer_kind", "complete") == "complete"
+            else "partial"
+        )
         if context.event_sink is not None:
             context.event_sink.submit(
                 make_event(
@@ -120,19 +147,30 @@ class AnswerReviewMiddleware(AgentMiddleware):
 
     def _revision(self, request, message, review):
         context = get_run_context()
-        if context.answer_repair_attempted or review.verdict != "insufficient":
+        if review.verdict != "insufficient":
+            return None
+        citation_only = bool(review.issues) and all(
+            issue.startswith(("部分引用没有本轮实际检索依据", "引用了未登记的来源 ID")) for issue in review.issues
+        )
+        flag = "answer_citation_repair_attempted" if citation_only else "answer_repair_attempted"
+        if getattr(context, flag):
             return None
         try:
             reserve_calls("retry")
         except BudgetExceeded:
             return None
-        context.answer_repair_attempted = True
+        setattr(context, flag, True)
         if context.search_tasks or context.approved_internal:
             # Do not restart searches to repair the final prose; approved bodies are the source of truth.
             _, evidence = self._reviewer(message)
             data = dict(
                 user_query=context.user_query,
                 allowed_source_urls=sorted(set(source_urls(evidence)) | cited_urls(context.user_query)),
+                allowed_sources=[
+                    {"source_id": __import__("hashlib").sha256(url.encode()).hexdigest()[:12], "url": url}
+                    for url in source_urls(evidence)
+                ],
+                repair_phase="citation" if citation_only else "facts",
                 verified_results=[
                     *[task.result for task in context.search_tasks.values() if task.check_status == "passed"],
                     *[result["text"] for result in context.approved_internal.values()],
@@ -145,7 +183,7 @@ class AnswerReviewMiddleware(AgentMiddleware):
                 draft=message.text,
                 revision=review.revision_instruction,
             )
-            note = "最终答复未通过检查。只使用已通过检查的资料修订文字和来源，不调用工具；失败任务的内容不能充当事实。allowed_source_urls 是程序从已通过任务的真实工具记录及用户输入中提取的可引用来源，资料正文中的预期链接或记忆链接也不能越过该范围。资料不足时明确有限结论。不回显内部 JSON 或思考过程。"
+            note = "优先使用 allowed_sources 中的 [source:来源ID] 引用，由程序填入实际 URL。修订定位到具体事实冲突时按真实依据修正或删掉该断言，不为保留可选数字再调查。最终答复未通过检查。只使用已通过检查的资料修订文字和来源，不调用工具；失败任务的内容不能充当事实。allowed_source_urls 是程序从已通过任务的真实工具记录及用户输入中提取的可引用来源，资料正文中的预期链接或记忆链接也不能越过该范围。资料不足时明确有限结论。不回显内部 JSON 或思考过程。"
             return request.override(
                 tools=[],
                 tool_choice="none",

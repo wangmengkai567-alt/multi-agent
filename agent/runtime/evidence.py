@@ -67,6 +67,9 @@ def model_evidence(evidence, content_chars, per_source_chars=1000):
                     query=content.get("query"),
                     results=[
                         dict(
+                            source_id=__import__("hashlib")
+                            .sha256(str(source.get("url", "")).encode())
+                            .hexdigest()[:12],
                             title=source.get("title", ""),
                             url=source.get("url", ""),
                             content=str(source.get("raw_content") or source.get("content") or ""),

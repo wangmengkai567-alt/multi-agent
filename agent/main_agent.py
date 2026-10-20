@@ -38,8 +38,10 @@ def _build_agent(saver):
     from agent.runtime.answer_review import AnswerReviewMiddleware
     from agent.runtime.finalization import SearchFinalizationMiddleware
     from agent.runtime.skills import ProjectSkillsMiddleware
+    from agent.runtime.task_plan import plan_research
     from agent.subagent_factory import build_subagents
     from agent.subagent_registry import load_default_registry
+    from tools.job_tools import get_research_job, submit_research_job
     from tools.markdown_tools import generate_markdown
     from tools.pdf_tools import convert_md_to_pdf
     from tools.upload_file_read_tool import read_file_content
@@ -50,7 +52,14 @@ def _build_agent(saver):
         model=budget_model(model, "main_model"),
         backend=run_backend,
         system_prompt=main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT,
-        tools=[generate_markdown, convert_md_to_pdf, read_file_content],
+        tools=[
+            generate_markdown,
+            convert_md_to_pdf,
+            read_file_content,
+            plan_research,
+            submit_research_job,
+            get_research_job,
+        ],
         checkpointer=saver,
         subagents=subagents,
         middleware=[
@@ -95,7 +104,7 @@ async def shutdown_agent():
 project_root_path = Path(__file__).parents[1].resolve()
 
 
-async def run_deep_agent(task_query, session_id):
+async def run_deep_agent(task_query, session_id, *, resume=False):
     """Run the root graph using this round's context and output directory."""
     validate_identifier(session_id)
     context = get_run_context()
@@ -151,8 +160,20 @@ async def run_deep_agent(task_query, session_id):
         config = {"configurable": {"thread_id": session_id}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))
+        stream_input = {"messages": [{"role": "user", "content": task_query + path_instruction}]}
+        if context.background_job:
+            path_instruction += "\n当前是持久化后台执行：不得创建嵌套后台任务；直接登记分工、查询并完成最终答复。"
+            stream_input = {"messages": [{"role": "user", "content": task_query + path_instruction}]}
+        if resume:
+            previous = await agent.aget_state(config)
+            if previous.values:
+                if not previous.next:
+                    final = previous.values.get("messages", [])[-1]
+                    if isinstance(final, AIMessage) and not final.tool_calls:
+                        return final.text
+                stream_input = None
         stream = agent.astream(
-            {"messages": [{"role": "user", "content": task_query + path_instruction}]},
+            stream_input,
             config=config,
             stream_mode="updates",
         )

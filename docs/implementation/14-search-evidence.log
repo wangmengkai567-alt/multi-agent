@@ -1,6 +1,0 @@
-$ .venv/Scripts/python.exe -m pytest tests/test_subagent_review.py tests/test_result_handoff.py tests/test_workflow_order.py tests/test_acceptance14.py -q --tb=short -p no:cacheprovider --basetemp=output/pytest-step14-search-evidence
-........................................................................ [ 92%]
-......                                                                   [100%]
-78 passed in 210.78s (0:03:30)
-
-EXIT_CODE=0

@@ -1,4 +1,0 @@
-Real HTTP duplicate submission during the controlled acceptance run
-HTTP 409
-{"status": "busy", "thread_id": "2e0082a8-ed5f-4a7b-a80c-e2152211192d", "run_id": "9818a2d5-4ac4-475f-afac-7cd8def3f75c"}
-ASSERT same original run_id: True

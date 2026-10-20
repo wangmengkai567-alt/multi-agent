@@ -74,6 +74,14 @@ def sanitize(value, *, arguments=False, depth=0):
 def make_event(
     thread_id, run_id, event, message, data=None, *, actor="main", status="info", call_id=None, parent_call_id=None
 ):
+    from agent.runtime.context import get_run_context
+
+    context = get_run_context()
+    label = context.call_labels.get(call_id) if context else None
+    if context and call_id in context.original_call_ids:
+        data = dict(data or {}, provider_call_id=context.original_call_ids[call_id])
+    if label:
+        data = dict(data or {}, task_label=label)
     return {
         "thread_id": thread_id,
         "run_id": run_id,
@@ -176,10 +184,17 @@ class EventSink:
             await self.flush(context.run_id)
         except EventPersistenceError as exc:
             recording_error = exc
+        if status != "completed" and not getattr(context, "partial_answer", False):
+            answer = None
         answer = redact_text(answer) if answer is not None else None
         error = redact_text(error) if error is not None else None
         kind = "task_result" if status == "completed" else "error" if status == "failed" else f"run_{status}"
-        data = {"result": answer} if status == "completed" else {"error": error}
+        data = {"result": answer} if status == "completed" else {"error": error, "partial_result": answer}
+        if getattr(context, "delivery_status", None):
+            data["delivery_status"] = context.delivery_status
+        if getattr(context, "pending_jobs", None):
+            data["delivery_status"] = "pending"
+            data["jobs"] = list(context.pending_jobs.values())
         if hasattr(context, "call_counts"):
             data["call_counts"] = dict(context.call_counts)
         hook_failures = getattr(context, "hook_failures", [])

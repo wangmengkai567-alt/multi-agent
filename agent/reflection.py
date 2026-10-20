@@ -92,6 +92,22 @@ def capture_tool(call):
         )
     )
 
+    context = get_run_context()
+    if context:
+        from hashlib import sha256
+
+        from agent.runtime.checkpoints import save_job_checkpoint, write_json
+
+        if context.work_dir.is_dir():
+            key = sha256(((call.parent_call_id or context.run_id) + call.call_id).encode()).hexdigest()[:24]
+            write_json(context.work_dir / "results" / "tools" / f"{key}-{call.attempt}.json", collector[-1])
+        from agent.runtime.search import search_allowance
+
+        allowance = search_allowance.get()
+        if allowance:
+            allowance.task.evidence = list(collector)
+        save_job_checkpoint(context)
+
 
 def insufficient(issue):
     return ReviewResult(
@@ -128,7 +144,20 @@ def source_urls(evidence):
     return list(dict.fromkeys(urls))
 
 
+def source_id(url):
+    from hashlib import sha256
+
+    return sha256(url.encode("utf-8")).hexdigest()[:12]
+
+
 def normalize_source_citations(text, evidence):
+    registered = {source_id(url): url for url in source_urls(evidence)}
+    text = re.sub(
+        r"\[source:\s*([0-9a-f]{12})\s*\]",
+        lambda match: "[来源](" + registered[match[1].lower()] + ")" if match[1].lower() in registered else match[0],
+        text,
+        flags=re.IGNORECASE,
+    )
     # Repair only omitted schemes for exact URLs actually returned by a successful search.
     # A hostname alone cannot be expanded to a page, nor can a different URL be substituted.
     for url in sorted(source_urls(evidence), key=len, reverse=True):
@@ -154,7 +183,11 @@ def rule_review(text, evidence, settings):
         and not (
             not item.get("executed")
             and item.get("error_category") == "invalid_argument"
-            and last_success.get(item["name"], -1) > index
+            and (
+                last_success.get(item["name"], -1) > index
+                or item["name"] not in settings.required_tools
+                and any(name in last_success for name in settings.required_tools)
+            )
         )
     ]
     if failed:
@@ -181,12 +214,41 @@ def rule_review(text, evidence, settings):
             return insufficient("缺少关键字段：" + key)
     if settings.require_sources:
         sources = source_urls(successful)
+        unresolved = re.findall(r"\[source:([^\]]+)\]", text)
+        if unresolved:
+            result = insufficient("引用了未登记的来源 ID")
+            result.revision_instruction = "仅修订来源 ID，不重新搜索。\n" + json.dumps(
+                {
+                    "unknown_source_ids": unresolved,
+                    "allowed_sources": [{"source_id": source_id(url), "url": url} for url in sources],
+                },
+                ensure_ascii=False,
+            )
+            return result
         known_pages = {source_page(url) for url in sources}
         cited_pages = {source_page(url) for url in cited_urls(text)}
         if not cited_pages & known_pages:
-            return insufficient("缺少与实际网页检索结果一致的来源 URL")
+            result = insufficient("缺少与实际网页检索结果一致的来源 URL")
+            result.revision_instruction = (
+                "仅修订引用，不重新搜索。使用实际来源 ID 或完整 URL；不能仅写网站名。\n"
+                + json.dumps(
+                    {"allowed_sources": [{"source_id": source_id(url), "url": url} for url in sources]},
+                    ensure_ascii=False,
+                )
+            )
+            return result
         if cited_pages - known_pages:
-            return insufficient("部分引用没有实际网页检索依据，请仅保留真实返回的来源 URL")
+            result = insufficient("部分引用没有实际网页检索依据，请仅保留真实返回的来源 URL")
+            missing = cited_pages - known_pages
+            result.revision_instruction = "仅修订引用及相应无依据断言，不重新搜索，不推定不同域名等价。\n" + json.dumps(
+                {
+                    "unobserved_urls": sorted(missing),
+                    "claim_lines": [line for line in text.splitlines() if cited_urls(line) & missing],
+                    "allowed_sources": [{"source_id": source_id(url), "url": url} for url in sources],
+                },
+                ensure_ascii=False,
+            )
+            return result
     return ReviewResult(verdict="passed")
 
 

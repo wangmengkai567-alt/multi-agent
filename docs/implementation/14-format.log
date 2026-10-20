@@ -1,4 +1,0 @@
-$ .venv/Scripts/python.exe -m ruff format --check agent/main_agent.py agent/runtime/delegation.py agent/reflection.py agent/runtime/policies.py tools/markdown_tools.py tests/test_acceptance14.py tests/test_run_concurrency.py tests/test_delegation.py tests/test_subagent_review.py tests/manual/acceptance14.py
-10 files already formatted
-
-EXIT_CODE=0

@@ -9,6 +9,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 
 from agent.runtime.context import get_run_context
+from agent.runtime.governance import register_turn
 from agent.runtime.output import normalize_model_message
 from agent.runtime.policies import request_timeout, reserve_calls
 
@@ -54,7 +55,7 @@ class BudgetChatModel(BaseChatModel):
                 raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
             raise
         get_run_context().check_active()
-        return ChatResult(generations=[ChatGeneration(message=normalize_model_message(message))])
+        return ChatResult(generations=[ChatGeneration(message=register_turn(normalize_model_message(message)))])
 
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         reserve_calls(self.category)
@@ -68,7 +69,7 @@ class BudgetChatModel(BaseChatModel):
                 raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
             raise
         get_run_context().check_active()
-        return ChatResult(generations=[ChatGeneration(message=normalize_model_message(message))])
+        return ChatResult(generations=[ChatGeneration(message=register_turn(normalize_model_message(message)))])
 
 
 def budget_model(model, category):

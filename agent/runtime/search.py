@@ -32,6 +32,10 @@ def search_must_finish(context):
     # Two exhausted search failures are a signal to summarize, not rename tasks.
     with context.budget_lock:
         tasks = list(context.search_tasks.values())
+        if context.enforce_plan and context.accepted_plan and tasks and not any(t.active for t in tasks):
+            planned = set(context.task_scopes)
+            if planned.issubset(context.search_tasks):
+                return True
         return (
             context.business_mode == "ordinary"
             and not any(task.active for task in tasks)
@@ -179,7 +183,13 @@ def needs_search_refinement(review, evidence):
     from agent.reflection import source_urls
 
     successful = bool(source_urls(evidence))
-    formatting = ("缺少与实际网页检索结果一致的来源 URL", "结果为空", "缺少关键字段：")
+    formatting = (
+        "缺少与实际网页检索结果一致的来源 URL",
+        "部分引用没有实际网页检索依据",
+        "引用了未登记的来源 ID",
+        "结果为空",
+        "缺少关键字段：",
+    )
     return not (successful and review.issues and all(issue.startswith(formatting) for issue in review.issues))
 
 

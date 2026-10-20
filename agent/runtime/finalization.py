@@ -54,6 +54,7 @@ def partial_search_answer(context, reason="部分必要信息尚未核实"):
 
 
 def partial_response(context, reason):
+    context.delivery_status = "partial"
     return ModelResponse(
         result=[
             AIMessage(
@@ -85,9 +86,27 @@ class SearchFinalizationMiddleware(AgentMiddleware):
     def __init__(self, system_prompt=""):
         self.system_prompt = system_prompt
 
+    def pending_response(self):
+        context = get_run_context()
+        if context is None or not context.pending_jobs:
+            return None
+        context.delivery_status = "pending"
+        text = (
+            "后台任务已受理，正在执行。可以继续处理其他工作；本页会按建议间隔更新任务状态和最终结果。\n\n"
+            + "\n".join(f"- 任务 {job_id}：{job['status']}" for job_id, job in context.pending_jobs.items())
+        )
+        return ModelResponse(result=[AIMessage(content=text, additional_kwargs={"deterministic_fallback": True})])
+
     def final_request(self, request):
         context = get_run_context()
-        if context is None or not search_must_finish(context):
+        if context is None:
+            return request
+        from agent.runtime.governance import announce, near_budget
+
+        if near_budget(context):
+            announce(context, "时间或调用次数接近本轮限制")
+        all_passed = context.search_tasks and all(t.check_status == "passed" for t in context.search_tasks.values())
+        if context.collecting and (not search_must_finish(context) or all_passed):
             return request
         with context.budget_lock:
             tasks = list(context.search_tasks.values())
@@ -134,12 +153,18 @@ class SearchFinalizationMiddleware(AgentMiddleware):
         )
 
     def wrap_model_call(self, request, handler):
+        pending = self.pending_response()
+        if pending is not None:
+            return pending
         final = self.final_request(request)
         if final is not request:
             return partial_response(get_run_context(), "的受控检索已结束，仍有必要信息未核实")
         return handler(final)
 
     async def awrap_model_call(self, request, handler):
+        pending = self.pending_response()
+        if pending is not None:
+            return pending
         final = self.final_request(request)
         if final is not request:
             return partial_response(get_run_context(), "的受控检索已结束，仍有必要信息未核实")

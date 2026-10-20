@@ -1,5 +1,0 @@
-$ .venv/Scripts/python.exe -X utf8 -m pytest tests/test_result_handoff.py -q -p no:cacheprovider --basetemp=output/test-step10-handoff-final
-.................                                                        [100%]
-17 passed in 85.57s (0:01:25)
-
-Exit code: 0

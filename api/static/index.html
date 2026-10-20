@@ -192,6 +192,11 @@
   .answer pre { white-space:pre-wrap; padding:12px; background:rgba(128,128,128,.12); border-radius:6px; }
   .answer code { font-family:Consolas,monospace; }
   .answer a { color:var(--accent); text-decoration:underline; }
+ .agent-group {border:1px solid var(--border,#ddd);border-radius:10px;margin:12px;padding:10px;}
+ .agent-group h3 {font-size:14px;margin:2px 0 10px;}
+ .agent-group > summary {cursor:pointer;font-weight:600;font-size:13px;padding:6px 2px;}
+ .agent-group[open] > summary {margin-bottom:10px;}
+ #jobArea:empty {display:none;}
 </style>
 </head>
 <body>
@@ -212,6 +217,7 @@
 
 <div class="options">
   <label>发送到 <select id="threadSelect" aria-label="发送到"><option value="">新会话</option></select></label>
+  <label>执行方式 <select id="executionSelect"><option value="auto">自动</option><option value="foreground">前台执行</option><option value="background">后台公开调研</option></select></label>
   <label>业务模式 <select id="modeSelect" aria-label="业务模式"><option value="ordinary">普通任务</option><option value="internal_external">内部数据与市场对照</option></select></label>
   <label><input type="checkbox" id="ecommerceSkill"> 运营分析 Skill</label>
   <label><input type="checkbox" id="reportSkill"> 报告写作 Skill</label>
@@ -227,6 +233,7 @@
   <div class="log-panel">
     <div class="run-summary" id="runSummary">选择任务可查看进度和结果</div>
     <div class="answer" id="answer" hidden></div>
+    <div id="jobArea" aria-live="polite"></div>
     <div class="log-scroll" id="logArea"></div>
   </div>
   <div class="file-panel">

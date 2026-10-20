@@ -4,7 +4,6 @@ from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
 from deepagents.middleware.summarization import SummarizationMiddleware, _compute_summarization_defaults
 from langchain.agents import create_agent
-from langchain.agents.middleware import TodoListMiddleware
 
 from agent.reflection import ResultReviewer
 from agent.results import RESULT_PROMPT, ResultService
@@ -38,7 +37,6 @@ def build_subagents(registry, model, *, models=None, hooks=None):
                     if spec.agent_id == "search"
                     else []
                 ),
-                TodoListMiddleware(),
                 *([ProjectSkillsMiddleware(spec.allowed_skill_ids)] if spec.allowed_skill_ids else []),
                 FilesystemMiddleware(backend=run_backend),
                 SummarizationMiddleware(

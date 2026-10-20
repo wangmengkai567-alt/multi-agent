@@ -1,4 +1,0 @@
-$ .venv/Scripts/python.exe -m ruff format --check agent/runtime/context.py agent/runtime/policies.py agent/runtime/hooks.py agent/runtime/models.py agent/llm.py tools/tavily_tool.py tools/ragflow_tools.py tools/db_tools.py api/run_store.py agent/runtime/delegation.py api/server.py api/monitor.py tests/test_runs.py tests/test_events.py tests/test_result_handoff.py tests/test_run_concurrency.py tests/test_run_cancellation.py tests/test_event_replay.py tests/test_delegation.py tests/test_agent_lifecycle.py tests/test_hook_pipeline.py
-21 files already formatted
-
-exit_code: 0

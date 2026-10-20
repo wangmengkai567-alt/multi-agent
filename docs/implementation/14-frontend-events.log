@@ -1,4 +1,0 @@
-$ node tests/frontend/run-events.test.cjs
-PASS: cursor gaps, reconnect cursor, duplicate and cross-run filtering, terminal events, explicit close
-
-EXIT_CODE=0

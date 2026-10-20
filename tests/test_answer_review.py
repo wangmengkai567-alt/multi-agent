@@ -105,7 +105,11 @@ async def test_real_graph_cannot_publish_memory_citations_without_actual_search(
     result = await asyncio.to_thread(graph.invoke, inputs) if sync else await graph.ainvoke(inputs)
     assert actual == ["official source"]
     assert result["messages"][-1].text == "Checked fact " + URL
-    assert context.answer_repair_attempted and len(root.seen_messages) == 3
+    assert (
+        context.answer_citation_repair_attempted
+        and not context.answer_repair_attempted
+        and len(root.seen_messages) == 3
+    )
     assert len(reviewer.seen_messages) == 1
 
 

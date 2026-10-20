@@ -510,7 +510,7 @@ class RunStore:
                 cursor = await self.connection.execute(
                     """UPDATE runs SET status=?,answer=?,error=?,ended_at=?
                        WHERE run_id=? AND status IN ('queued','running')""",
-                    (status, answer if status == "completed" else None, error, _now(), run_id),
+                    (status, answer, error, _now(), run_id),
                 )
                 changed = cursor.rowcount == 1
                 await cursor.close()

@@ -2,6 +2,9 @@ timeouts:
   total_seconds: 300.0
   request_seconds: 60.0
   shutdown_seconds: 5.0
+  tool_seconds: 25.0
+  finalize_seconds: 45.0
+  job_seconds: 1800.0
 review:
   # Current provider supports strict JSON Schema; disable strict_schema for JSON-object-only providers.
   json_mode: true
@@ -14,6 +17,17 @@ budgets:
   review: 12
   tool: 40
   retry: 12
+  tools_per_turn: 8
+  near_ratio: 0.85
+job_budgets:
+  total: 240
+  main_model: 40
+  sub_model: 90
+  review: 24
+  tool: 120
+  retry: 24
+  tools_per_turn: 8
+  near_ratio: 0.85
 sql:
   # Empty by default. Add only actual business tables approved for querying.
   allowed_tables: []
@@ -40,4 +54,5 @@ files:
 retry:
   max_retries: 1
   delay_seconds: 0.25
+  max_delay_seconds: 20.0
   tools: [read_web_page, internet_search, list_sql_tables, get_table_data, execute_sql_query]

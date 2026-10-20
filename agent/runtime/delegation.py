@@ -44,6 +44,12 @@ class DelegationRunnable(Runnable):
         if not messages or not isinstance(messages[-1], HumanMessage) or not messages[-1].text.strip():
             raise HookRejected("Expert execution requires a non-empty task description")
         description = messages[-1].text
+        task_id, description, label = None, description, ""
+        if self.spec.agent_id == "search":
+            from agent.runtime.task_plan import resolve_task
+
+            task_id, description, label = resolve_task(context, description)
+            inputs["messages"] = [*messages[:-1], HumanMessage(content=description)]
         parent = active_call.get()
         request_id = parent.call_id if parent and parent.target == self.spec.agent_id else None
         call = HookCall(
@@ -53,6 +59,10 @@ class DelegationRunnable(Runnable):
             args={"description": description},
             target=self.spec.agent_id,
         )
+        if label:
+            context.call_labels[call.call_id] = label
+            if request_id:
+                context.call_labels[request_id] = label
         record = dict(
             call_id=call.call_id,
             run_id=context.run_id,
@@ -73,11 +83,14 @@ class DelegationRunnable(Runnable):
         )
         if self.spec.agent_id == "search":
             try:
-                call.search_task_key = sha256(
-                    (" ".join(description.split()) + f"\ninternal_results:{context.internal_result_version}").encode(
-                        "utf-8"
-                    )
-                ).hexdigest()
+                call.search_task_key = (
+                    task_id
+                    or sha256(
+                        (
+                            " ".join(description.split()) + f"\ninternal_results:{context.internal_result_version}"
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
                 allowance = SearchAllowance(context, call.search_task_key)
                 allowance.claim()
                 allowance.task.description = description
@@ -176,6 +189,9 @@ class DelegationRunnable(Runnable):
                 result=record["result"] or "",
                 sources=allowance.task.sources,
             )
+        from agent.runtime.checkpoints import save_job_checkpoint
+
+        save_job_checkpoint(context)
         call.elapsed_ms = (monotonic() - started) * 1000
         self._save(context, call, record, call.status)
         if call.executed:
@@ -209,6 +225,25 @@ class DelegationRunnable(Runnable):
             if self.spec.agent_id == "db":
                 with context.budget_lock:
                     context.approved_internal[call.call_id] = dict(text=record["result"], evidence=call.review_evidence)
+            if self.spec.agent_id == "search" and context.enforce_plan:
+                from agent.reflection import source_id
+                from agent.runtime.output import cited_urls
+
+                cited = cited_urls(record["result"])
+                sources = [
+                    {"source_id": source_id(url), "url": url}
+                    for url in source_urls(call.review_evidence)
+                    if url in cited
+                ]
+                final = result["messages"][-1]
+                final = final.model_copy(
+                    update={
+                        "content": final.text
+                        + "\n\n程序生成的引用映射（仅用于上文已核实事实）：\n"
+                        + json.dumps(sources, ensure_ascii=False)
+                    }
+                )
+                result = dict(result, messages=[*result["messages"][:-1], final])
             return result
         if self.spec.agent_id == "search":
             reason = None
@@ -252,6 +287,10 @@ class DelegationRunnable(Runnable):
             return None
         if context.deadline is not None and context.deadline <= datetime.now(UTC):
             return None
+        from agent.runtime.governance import near_budget
+
+        if near_budget(context):
+            return None
         reserve_calls("retry")
         if self.spec.agent_id == "search":
             SearchAllowance(context, call.search_task_key).begin_refinement(
@@ -286,6 +325,10 @@ class DelegationRunnable(Runnable):
         return dict(inputs, messages=[*messages[:-1], HumanMessage(content=content)])
 
     def _dependency(self, error):
+        from agent.runtime.recovery import ToolCallTimeout
+
+        if isinstance(error, ToolCallTimeout):
+            return ReviewResult(verdict="tool_failed", issues=[str(error)])
         if isinstance(error, ModelRequestTimeout):
             context = get_run_context()
             with context.budget_lock:
@@ -300,10 +343,25 @@ class DelegationRunnable(Runnable):
             return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + reason])
         return ReviewResult(verdict="tool_failed", issues=["子任务执行失败：" + reason])
 
+    def _recovered_result(self, inputs):
+        context = get_run_context()
+        if not context or not context.background_job or not context.resume_graph or self.spec.agent_id != "search":
+            return None
+        from agent.runtime.task_plan import resolve_task
+
+        task_id, _, _ = resolve_task(context, inputs["messages"][-1].text)
+        task = context.search_tasks.get(task_id)
+        if task and task.check_status == "passed" and task.result:
+            return {"messages": [AIMessage(content=task.result)]}
+        return None
+
     def invoke(self, input, config=None, **kwargs):
         return self._invoke(input, config, **kwargs)
 
     def _invoke(self, input, config=None, **kwargs):
+        recovered = self._recovered_result(input)
+        if recovered is not None:
+            return recovered
         context, call, record = self._prepare(input)
         token = active_call.set(call)
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
@@ -319,7 +377,11 @@ class DelegationRunnable(Runnable):
             if self.spec.agent_id == "search" and context.event_sink is not None:
                 input = sync_result(self.results.search_input(context, call, input), context.event_sink)
             current = input
-            search_evidence = []  # Isolated per delegation; retained only across its own refinements.
+            search_evidence = (
+                list(SearchAllowance(context, call.search_task_key).task.evidence)
+                if self.spec.agent_id == "search"
+                else []
+            )
             for attempt in range(self.spec.review_config.max_refinements + 1):
                 context.check_active()
                 evidence = search_evidence if self.spec.agent_id == "search" else []
@@ -382,6 +444,9 @@ class DelegationRunnable(Runnable):
                 active_call.reset(token)
 
     async def ainvoke(self, input, config=None, **kwargs):
+        recovered = self._recovered_result(input)
+        if recovered is not None:
+            return recovered
         context, call, record = self._prepare(input)
         token = active_call.set(call)
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
@@ -394,7 +459,11 @@ class DelegationRunnable(Runnable):
             if self.spec.agent_id == "search":
                 input = await self.results.search_input(context, call, input)
             current = input
-            search_evidence = []  # Isolated per delegation; retained only across its own refinements.
+            search_evidence = (
+                list(SearchAllowance(context, call.search_task_key).task.evidence)
+                if self.spec.agent_id == "search"
+                else []
+            )
             for attempt in range(self.spec.review_config.max_refinements + 1):
                 evidence = search_evidence if self.spec.agent_id == "search" else []
                 evidence_token = tool_evidence.set(evidence)
@@ -404,7 +473,16 @@ class DelegationRunnable(Runnable):
                 dependency = None
                 try:
                     try:
-                        result = await self.executor.ainvoke(current, config, **kwargs)
+                        from agent.runtime.governance import collection_timeout
+
+                        seconds = collection_timeout(context)
+                        if seconds is None:
+                            result = await self.executor.ainvoke(current, config, **kwargs)
+                        else:
+                            import asyncio
+
+                            async with asyncio.timeout(seconds):
+                                result = await self.executor.ainvoke(current, config, **kwargs)
                     except Exception as exc:
                         dependency = self._dependency(exc) if self.spec.review_config.enabled else None
                         if dependency is None:

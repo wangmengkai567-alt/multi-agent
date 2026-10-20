@@ -47,6 +47,7 @@ MySQL 为可选功能：需要时填写 `.env.example` 中的 `MYSQL_*` 配置�
 
 - [环境变量模板](.env.example)
 - [运行配置](config/runtime.yml)
+- [分层预算、受控重试与后台任务](docs/runtime-governance.md)
 - [设计与验证记录](docs/implementation/)
 
 ## License

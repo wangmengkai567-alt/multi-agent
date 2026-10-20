@@ -47,7 +47,7 @@ def convert_md_to_pdf_via_word(md_abs_path: Path, pdf_abs_path: Path) -> str:
         pdf_abs_path.parent.mkdir(parents=True, exist_ok=True)
         # Never put temporary HTML beside a read-only Skill or uploaded source.
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".html", dir=pdf_abs_path.parent, encoding="utf-8", delete=False
+            mode="w", suffix=".html", dir=pdf_abs_path.parent, encoding="utf-8", newline="\r\n", delete=False
         ) as stream:
             temp_path = Path(stream.name)
             stream.write(html)

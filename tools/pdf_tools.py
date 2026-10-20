@@ -20,7 +20,7 @@ def convert_md_to_pdf(
     pdf_filename: Annotated[str | None, "输出的PDF文件路径（可选，默认与源文件同名）"] = None,
 ) -> str:
     """
-    将Markdown文档转换为PDF（基于Word引擎）
+    将Markdown文档转换为PDF（基于Word引擎）；服务模式立即返回持久化 task_id，由页面更新结果，不代表转换已完成。
     核心优化：路径与资源管理逻辑分离，只保留Tool层的基础调用
     """
     monitor.report_tool("Markdown转PDF工具")
@@ -42,7 +42,15 @@ def convert_md_to_pdf(
         else:
             pdf_abs_path = Path(resolve_path(str(md_abs_path.with_suffix(".pdf")), session_dir, write=True))
 
-        # 4. 调用核心转换逻辑
+        # Long Word conversions use the durable protocol in the service.
+        from agent.runtime.context import get_run_context
+
+        context = get_run_context()
+        if context and context.job_service:
+            from agent.runtime.artifact_jobs import submit_conversion_sync
+
+            return submit_conversion_sync(context, md_abs_path, pdf_abs_path)
+        # Standalone tools retain their synchronous compatibility path.
         return convert_md_to_pdf_via_word(md_abs_path, pdf_abs_path)
 
     except Exception as e:

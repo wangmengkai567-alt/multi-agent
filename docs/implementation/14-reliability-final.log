@@ -1,6 +1,0 @@
-$ .venv/Scripts/python.exe -m pytest tests/test_run_cancellation.py tests/test_tool_policies.py tests/test_acceptance14.py tests/test_run_concurrency.py -q --tb=short -p no:cacheprovider --basetemp=output/pytest-step14-reliability-final
-........................................................................ [ 56%]
-........................................................                 [100%]
-128 passed in 62.78s (0:01:02)
-
-EXIT_CODE=0

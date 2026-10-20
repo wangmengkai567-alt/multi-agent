@@ -1,5 +1,0 @@
-One controlled diagnostic request to the real configured review model.
-RESPONSE: {"verdict": "passed", "issues": ["工具记录中的实际 query 为 'search'，与任务要求的 'site:docs.tavily.com search' 不完全一致，但返回结果确实来自 docs.tavily.com 官方域名，内容与句子相符", "返回的 content 字段存在明显的重复/乱码片段（如 async 定义重复），属于工具返回噪声，不影响主句引用的 search depth 描述"], "missing_evidence": [], "revision_instruction": "无需补查。可选：如需严格核验，仅记录工具日志中 query 字段与任务指定 query 的差异（实际为 'search'），其余证据（官方 URL、句子依据、三行 scope）均已由单次 internet_search 记录提供。"}
-PARSE_ERROR: ValidationError: 1 validation error for ReviewResult
-  Value error, A passed result must not contain unresolved issues [type=value_error, input_value={'verdict': 'passed', 'is...search 记录提供。"}, input_type=dict]
-    For further information visit https://errors.pydantic.dev/2.12/v/value_error

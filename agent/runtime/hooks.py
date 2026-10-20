@@ -95,7 +95,7 @@ def record_hook(name, call):
             actor=call.actor,
             status=call.status,
             call_id=call.call_id,
-            parent_call_id=call.parent_call_id or context.run_id,
+            parent_call_id=call.parent_call_id or (None if call.call_id == context.run_id else context.run_id),
         )
     )
 
@@ -192,6 +192,10 @@ class HookToolMiddleware(AgentMiddleware):
         if context := get_run_context():
             context.check_active()
         tool = getattr(request, "tool", None)
+        context = get_run_context()
+        if context and context.enforce_plan and hasattr(request, "tool") and tool is None:
+            error = ValueError("模型请求了未注册的工具，请选择实际提供的工具")
+            raise HookRejected(str(error)) from error
         if tool is not None:
             try:
                 parsed_args = tool.tool_call_schema.model_validate(call.args).model_dump(exclude_unset=True)
@@ -212,20 +216,17 @@ class HookToolMiddleware(AgentMiddleware):
         self.hooks.emit("before_tool", call)
 
     def _retry_delay(self, request, call, exc):
-        if context := get_run_context():
-            context.check_active()
-        from agent.runtime.policies import classify_tool_error, policy_for_run
+        from agent.runtime.recovery import retry_delay
 
-        if get_run_context() is None:
-            return None
-        limits = policy_for_run().retry
-        if (
-            request.tool_call["name"] not in limits.tools
-            or call.attempt >= limits.max_retries
-            or classify_tool_error(exc) != "transient"
-        ):
-            return None
-        return limits.delay_seconds
+        return retry_delay(request, call, exc)
+
+    def _timeout(self, call):
+        from agent.runtime.policies import policy_for_run, request_timeout
+
+        name = call.actor.rsplit(":", 1)[-1]
+        if name == "task":
+            return None  # Delegations have their own collection and run deadlines.
+        return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None
 
     def _error(self, call, exc):
         call.error = exc
@@ -273,7 +274,13 @@ class HookToolMiddleware(AgentMiddleware):
                     prepare_tool_sync(call)
                     self._before(request, call)
                     call.executed = True
-                    call.result = handler(request)
+                    seconds = self._timeout(call)
+                    if seconds is None:
+                        call.result = handler(request)
+                    else:
+                        from agent.runtime.tool_timeout import invoke_bounded
+
+                        call.result = invoke_bounded(handler, request, seconds)
                     self._returned(call)
                     return call.result
                 except HookRejected as exc:
@@ -283,12 +290,31 @@ class HookToolMiddleware(AgentMiddleware):
                     self._error(call, exc)
                     delay = self._retry_delay(request, call, exc)
                     if delay is None:
+                        if call.workflow_data.get("retry_blocked"):
+                            return ToolMessage(
+                                content=call.workflow_data["retry_blocked"], tool_call_id=call.call_id, status="error"
+                            )
                         raise
                 except BaseException as exc:
                     self._error(call, exc)
                     raise
                 finally:
                     self._after(request, call, started)
+                context = get_run_context()
+                if context and context.event_sink:
+                    context.event_sink.submit(
+                        make_event(
+                            context.thread_id,
+                            context.run_id,
+                            "tool_retry",
+                            "运行时安排有界重试",
+                            {"delay_seconds": delay, "attempt": call.attempt + 1},
+                            actor=call.actor,
+                            status="waiting",
+                            call_id=call.call_id,
+                            parent_call_id=call.parent_call_id or context.run_id,
+                        )
+                    )
                 call.attempt += 1
                 call.error, call.status, call.result, call.executed = None, "running", None, False
                 sleep(delay)
@@ -307,7 +333,19 @@ class HookToolMiddleware(AgentMiddleware):
                     await prepare_tool(call)
                     self._before(request, call)
                     call.executed = True
-                    call.result = await handler(request)
+                    seconds = self._timeout(call)
+                    if seconds is None:
+                        call.result = await handler(request)
+                    else:
+                        from agent.runtime.recovery import ToolCallTimeout
+
+                        try:
+                            async with asyncio.timeout(seconds):
+                                call.result = await handler(request)
+                        except TimeoutError as error:
+                            if isinstance(error, ToolCallTimeout):
+                                raise
+                            raise ToolCallTimeout(request.tool_call["name"], seconds) from error
                     self._returned(call)
                     return call.result
                 except HookRejected as exc:
@@ -317,12 +355,31 @@ class HookToolMiddleware(AgentMiddleware):
                     self._error(call, exc)
                     delay = self._retry_delay(request, call, exc)
                     if delay is None:
+                        if call.workflow_data.get("retry_blocked"):
+                            return ToolMessage(
+                                content=call.workflow_data["retry_blocked"], tool_call_id=call.call_id, status="error"
+                            )
                         raise
                 except BaseException as exc:
                     self._error(call, exc)
                     raise
                 finally:
                     self._after(request, call, started)
+                context = get_run_context()
+                if context and context.event_sink:
+                    context.event_sink.submit(
+                        make_event(
+                            context.thread_id,
+                            context.run_id,
+                            "tool_retry",
+                            "运行时安排有界重试",
+                            {"delay_seconds": delay, "attempt": call.attempt + 1},
+                            actor=call.actor,
+                            status="waiting",
+                            call_id=call.call_id,
+                            parent_call_id=call.parent_call_id or context.run_id,
+                        )
+                    )
                 call.attempt += 1
                 call.error, call.status, call.result, call.executed = None, "running", None, False
                 try:

@@ -7,7 +7,7 @@ const storageKey = 'multiagent.runs.v1';
 const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
-  cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步'};
+  pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步'};
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手'};
 const skills = {'ecommerce-analysis':'运营分析', 'report-writing':'报告写作',
   'research':'信息调研', 'document-analysis':'文档分析', 'data-analysis':'数据分析'};
@@ -68,6 +68,7 @@ function applyEvent(session, event) {
   session.logs.push(event);
   session.logs.sort((a,b) => a.event_seq - b.event_seq);
   const data = event.data || {};
+  if (data.delivery_status) session.deliveryStatus = data.delivery_status;
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
   if (currentState) session.statusSeq = event.event_seq;
@@ -77,10 +78,12 @@ function applyEvent(session, event) {
   if (event.event === 'workflow_state' && ['degraded','completed_degraded'].includes(event.status)) session.degraded = true;
   if (currentState && event.event === 'task_result') {
     session.status = 'completed'; session.answer = data.result;
+    if (data.jobs) { session.jobs = data.jobs; if (typeof setTimeout === 'function') syncJobs(session); }
     session.recordingIncomplete = data.recording_status === 'incomplete';
   }
   if (currentState && ['error','run_cancelled','run_timed_out','run_interrupted'].includes(event.event)) {
     session.status = event.status; session.error = data.error;
+    if (data.partial_result) session.answer = data.partial_result;
   }
   if (!activeStates.has(session.status) && session.status !== 'unknown') {
     if (session.stream) session.stream.close();
@@ -90,14 +93,17 @@ function applyEvent(session, event) {
   if (activeSessionId === session.runId) renderLog(session);
 }
 function displayStatus(session) {
+  if (session.status==='completed' && session.deliveryStatus==='partial') return 'partial';
+  if (session.status === 'completed' && session.jobs?.some(job=>job.status==='working'||job.status==='input_required')) return 'pending';
+  if (session.status === 'completed' && session.jobs?.some(job=>job.status==='failed'||job.result?.partial)) return 'partial';
   // Recovered failures need not make a later, checked successful result partial.
   const latestChecks = new Map();
   const latestTasks = new Map();
   const latestTools = new Map();
   for (const e of session.logs) {
     if (['subagent_review','answer_validation'].includes(e.event)) latestChecks.set(e.call_id, e.status);
-    if (['subagent_completed','subagent_failed','subagent_rejected'].includes(e.event)) latestTasks.set(e.actor, e.status);
-    if (e.event === 'after_tool' && e.data?.error_category !== 'search_limit') latestTools.set(e.actor, e.status);
+    if (['subagent_completed','subagent_failed','subagent_rejected'].includes(e.event)) latestTasks.set(e.call_id, e.status);
+    if (e.event === 'after_tool' && e.data?.error_category !== 'search_limit') latestTools.set(e.call_id, e.status);
   }
   const finalCheck = session.logs.filter(e => e.event === 'answer_validation').at(-1);
   const completeAnswer = finalCheck?.status === 'passed' && finalCheck.data?.answer_kind === 'complete';
@@ -111,6 +117,7 @@ async function syncSession(session) {
     const history = await request('/api/runs/' + encodeURIComponent(session.runId) + '/history');
     if (sessions[session.runId] !== session) return;
     if (history.run.thread_id !== session.id || history.run.run_id !== session.runId) throw new Error('运行归属不匹配');
+    session.subtasks = history.subtasks || [];
     for (const e of history.events) applyEvent(session, e);
     // A live terminal event may arrive while this earlier HTTP snapshot is in flight.
     if (activeStates.has(session.status) || session.status === 'unknown' || !activeStates.has(history.run.status)) {
@@ -136,15 +143,17 @@ async function syncSession(session) {
   }
   renderTabs();
   if (activeSessionId === session.runId) renderLog(session);
+  if (typeof setTimeout === 'function') syncJobs(session);
 }
 function switchSession(runId) {
   activeSessionId = runId;
-  renderTabs(); renderLog(sessions[runId]); persist(); refreshFiles(); updateWSStatus();
+  renderTabs(); renderLog(sessions[runId]); renderJobs(sessions[runId]); persist(); refreshFiles(); updateWSStatus();
 }
 function closeSession(runId) {
   const session = sessions[runId];
   if (!session) return;
   if (session.stream) session.stream.close();
+  if (session.jobTimer && typeof clearTimeout === 'function') clearTimeout(session.jobTimer);
   delete sessions[runId];
   if (activeSessionId === runId) activeSessionId = Object.keys(sessions).at(-1) || null;
   renderTabs(); renderLog(sessions[activeSessionId]); persist(); refreshFiles(); updateWSStatus();
@@ -182,19 +191,22 @@ function describeEvent(event) {
     const reason = revision && !['[REDACTED]','[OMITTED]'].includes(revision) ? revision : d.issues?.join('；');
     return `${who}补充查询：${reason || '补齐缺失依据'}`;
   }
+  if (event.event === 'budget_finalizing') return '预算接近阈值：优先交付已核实部分';
+  if (event.event === 'tool_retry') return `运行时重试 #${d.attempt}：等待 ${Number(d.delay_seconds || 0).toFixed(2)} 秒`;
+  if (event.event === 'research_plan') return '研究分工已登记：' + (d.tasks || []).map(t => t.label).join('、');
   if (event.event === 'search_finalizing') return '检索修订已结束：汇总已核实内容和剩余缺口';
   if (event.status === 'cancelled' && ['on_error','after_tool'].includes(event.event)) {
     const reason = d.error && !/^<object object at 0x[0-9a-f]+>$/i.test(d.error) ? d.error : '当前操作已取消';
     return '操作已取消：' + reason;
   }
-  if (event.event === 'after_tool') return event.status === 'completed' ? '工具执行完成' : '工具未完成：' + (d.error || event.status);
+  if (event.event === 'after_tool') return (d.tool_name || event.actor?.split(':').at(-1) || '工具') + (event.status === 'completed' ? ' · 已完成' : ' · 未完成：' + (d.error || event.status));
   if (event.event === 'on_error') return '动作失败：' + (d.error || '请查看详情');
   if (event.event === 'workflow_state') return ({initialized:'分析流程已准备', blocked:'前置条件未满足，需先完成查询或文件读取',
     degraded:'数据库不可用，改为外部资料分析', search_allowed:'内部查询已通过，开始市场检索',
     completed_degraded:'仅完成外部资料分析，缺少内部经营指标', completed:'所需查询与文件检查已完成',
     report_allowed:'报告前置条件已通过', upload_read:'用户文件已读取'}[event.status] || '分析流程更新');
   if (event.event === 'result_handoff') return '已将本轮查询摘要传给后续助手';
-  if (event.event === 'before_tool') return '工具执行前检查';
+  if (event.event === 'before_tool') return '执行前检查 · ' + (d.tool_name || event.actor?.split(':').at(-1) || '工具');
   if (event.event === 'before_delegate') return `${who}执行前检查`;
   if (event.event === 'after_subagent') return `${who}处理结束：${verdicts[d.check_status] || event.status}`;
   if (event.event === 'before_run') return '准备本轮任务与限制';
@@ -209,7 +221,7 @@ function renderLog(session) {
   const answer = $('#answer');
   if (!session) {
     $('#runSummary').textContent = '选择任务可查看进度和结果'; answer.hidden = true; answer.textContent = '';
-    $('#logArea').innerHTML = '<div class="empty-state">输入问题并发送任务</div>'; return;
+    $('#logArea').innerHTML = '<div class="empty-state">输入问题并发送任务</div>'; if ($('#jobArea')) $('#jobArea').innerHTML = ''; return;
   }
   const state = displayStatus(session);
   const partialWork = !activeStates.has(session.status) && session.status !== 'completed' && session.logs.some(e => e.event === 'subagent_completed');
@@ -220,20 +232,128 @@ function renderLog(session) {
     ${session.syncError ? `<p>${escapeHtml(session.syncError)}</p>` : ''}
     ${session.recordingIncomplete ? '<p>部分执行记录未保存，详情见最终事件。</p>' : ''}
     <details><summary>运行详情</summary><pre>${escapeHtml(JSON.stringify({thread_id:session.id,run_id:session.runId,status:session.status},null,2))}</pre></details>`;
+  renderJobs(session);
   answer.hidden = session.answer === null || session.answer === undefined;
   renderAnswer(answer, session.answer ?? '');
   const area = $('#logArea');
   const follow = area.scrollHeight - area.scrollTop - area.clientHeight < 80;
   const openDetails = new Set([...area.querySelectorAll('details[open]')].map(d => d.dataset.seq));
-  area.innerHTML = session.logs.map(e => {
-    const failed = e.data?.error_category !== 'search_limit' &&
-      ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(e.status);
-    return `<div class="log-entry"><div class="log-dot ${failed ? 'e':'a'}"></div><div class="log-body">
-      <span class="log-msg">${escapeHtml(describeEvent(e))}</span>
-      <div class="log-time">${escapeHtml(new Date(e.timestamp).toLocaleTimeString('zh-CN',{hour12:false}))}</div>
-      <details data-seq="${e.event_seq}" ${openDetails.has(String(e.event_seq)) ? 'open':''}><summary>展开执行详情</summary><pre>${escapeHtml(JSON.stringify(e,null,2))}</pre></details></div></div>`;
-  }).join('') || '<div class="empty-state">等待执行记录…</div>';
+  area.innerHTML = renderCallGroups(session, openDetails) || '<div class="empty-state">等待执行记录…</div>';
   if (follow) area.scrollTop = area.scrollHeight;
+}
+function callGroups(session) {
+  const agents = new Map(), aliases = new Map(), labels = new Map();
+  for (const event of session.logs) {
+    if (event.event === 'research_plan') for (const task of event.data?.tasks || []) labels.set(task.task_id, task.label);
+    if (event.event.startsWith('subagent_') && !['subagent_review','subagent_refinement'].includes(event.event)) {
+      const d = event.data || {};
+      if (!agents.has(event.call_id)) agents.set(event.call_id, {id:event.call_id, target:d.target || event.actor, label:d.task_label || '', events:[]});
+      if (d.request_call_id) aliases.set(d.request_call_id,event.call_id);
+      if (d.task_label) agents.get(event.call_id).label = d.task_label;
+    }
+  }
+  for (const task of session.subtasks || []) {
+    if (!agents.has(task.call_id)) agents.set(task.call_id,{id:task.call_id,target:task.target,label:'',events:[]});
+    if (task.request_call_id) aliases.set(task.request_call_id,task.call_id);
+  }
+  const root = {id:session.runId,target:'main',label:'主助手',events:[]};
+  const owners = new Map(session.logs.map(e => [e.call_id,e.parent_call_id]));
+  function owner(event) {
+    // Older providers may reuse a tool ID across agents; the event's own parent wins.
+    if (agents.has(event.parent_call_id)) return agents.get(event.parent_call_id);
+    let id = event.call_id;
+    const visited = new Set();
+    while (id && !visited.has(id)) {
+      visited.add(id);
+      id = aliases.get(id) || id;
+      if (agents.has(id)) return agents.get(id);
+      id = owners.get(id);
+    }
+    return root;
+  }
+  for (const group of agents.values()) group.requestIds = new Set([...aliases].filter(([,id])=>id===group.id).map(([id])=>id));
+  for (const event of session.logs) {
+    const group = owner(event);
+    group.events.push(event);
+    if (event.data?.task_label) group.label = event.data.task_label;
+  }
+  return [root,...agents.values()].filter(group => group.events.length);
+}
+function renderCallGroups(session, openDetails = new Set()) {
+  return callGroups(session).map((group,index) => {
+    const agentName = actors[group.target] || group.target || '助手';
+    const terminal = group.events.filter(e=>['subagent_completed','subagent_failed','subagent_cancelled','subagent_rejected'].includes(e.event)).at(-1);
+    const outcome = terminal ? ' · ' + ({completed:'检查通过',failed:'未通过',cancelled:'已取消',rejected:'已拒绝'}[terminal.status] || terminal.status) : '';
+    const title = index === 0 && group.target === 'main' ? '主助手' : `${agentName} · ${group.label || '独立分工'} · ${group.id.slice(0,8)}${outcome}`;
+    const calls = new Map();
+    for (const e of group.events) {
+      const key = group.requestIds?.has(e.call_id) ? group.id : e.call_id;
+      if (!calls.has(key)) calls.set(key,[]);
+      calls.get(key).push(e);
+    }
+    let toolNumber = 0;
+    const rows = [...calls.values()].map((events,i) => {
+      const last = events.at(-1), d = last.data || {};
+      const failed = d.error_category !== 'search_limit' && ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(last.status);
+      const name = events.find(e=>e.data?.tool_name)?.data.tool_name || events.find(e=>e.actor?.includes(':'))?.actor.split(':').at(-1);
+      const toolNames = {internet_search:'网络搜索',read_web_page:'网页正文读取',read_file:'读取文件',write_todos:'更新计划',plan_research:'登记分工',task:'委派任务'};
+      const caption = name ? `${toolNames[name] || name} #${++toolNumber} · ${last.event==='after_tool' && last.status==='completed'?'已完成':describeEvent(last)}` : describeEvent(last);
+      const budget = [...events].reverse().find(e=>e.data?.search_budget)?.data.search_budget;
+      const quota = budget ? ` · 本任务 ${budget.task_used}/${budget.task_limit}，整轮 ${budget.run_used}/${budget.run_limit}` : '';
+      const start = new Date(events[0].timestamp), end = new Date(last.timestamp);
+      const elapsed = Number.isFinite(end-start) ? ` · ${((end-start)/1000).toFixed(1)} 秒` : '';
+      return `<div class="log-entry" data-call="${escapeHtml(last.call_id)}"><div class="log-dot ${failed?'e':'a'}"></div><div class="log-body">
+        <span class="log-msg">${escapeHtml(caption + quota + elapsed)}</span>
+        <div class="log-time">${escapeHtml(end.toLocaleTimeString('zh-CN',{hour12:false}))}</div>
+        <details data-seq="${escapeHtml('call:'+last.call_id)}" ${openDetails.has('call:'+last.call_id)?'open':''}><summary>展开调用过程（${events.length} 条）</summary>
+        ${events.map(e=>`<div>${escapeHtml(describeEvent(e))}</div>`).join('')}
+        <pre>${escapeHtml(JSON.stringify(events,null,2))}</pre></details></div></div>`;
+    }).join('');
+    const key = 'group:'+group.id;
+    return `<details class="agent-group" data-agent="${escapeHtml(group.id)}" data-seq="${escapeHtml(key)}" ${openDetails.has(key)?'open':''}>
+      <summary>${escapeHtml(title)} · ${toolNumber} 次工具调用</summary>${rows}</details>`;
+  }).join('');
+}
+async function syncJobs(session) {
+  if (session.jobSyncing || sessions[session.runId] !== session) return;
+  session.jobSyncing = true;
+  try {
+    const data = await request('/api/runs/'+encodeURIComponent(session.runId)+'/jobs');
+    if (sessions[session.runId] !== session) return;
+    session.jobs = data.jobs || [];
+    session.jobError = '';
+    renderTabs();
+    renderJobs(session);
+    const working = session.jobs.filter(j=>j.status === 'working');
+    if (session.jobs.some(job=>job.kind==='pdf_conversion' && job.status==='completed')) refreshFiles();
+    if (working.length && typeof setTimeout === 'function') {
+      clearTimeout(session.jobTimer);
+      const delay = Math.max(1,...working.map(j=>j.poll_after_seconds || 3));
+      session.jobTimer = setTimeout(()=>syncJobs(session),delay*1000);
+    }
+  } catch (error) {
+    session.jobError = '后台任务状态读取失败：'+error.message;
+    renderJobs(session);
+    if (session.jobs?.some(j=>j.status==='working') && typeof setTimeout === 'function') {
+      session.jobTimer = setTimeout(()=>syncJobs(session),5000);
+    }
+  } finally { session.jobSyncing = false; }
+}
+function renderJobs(session) {
+  if (activeSessionId !== session.runId) return;
+  const area = $('#jobArea');
+  if (!area) return;
+  const names = {working:'后台执行中',completed:'已完成',failed:'失败',cancelled:'已取消',input_required:'等待你的输入'};
+  area.innerHTML = (session.jobs || []).map(job=>`<section class="agent-group" data-job="${escapeHtml(job.task_id)}">
+    <h3>${job.kind==='pdf_conversion'?'PDF 转换':'研究任务'} · ${escapeHtml(job.task_id.slice(0,8))} · ${escapeHtml(names[job.status] || job.status)}${job.result?.partial?' · 有限结果':''}</h3>
+    ${job.error?`<p>${escapeHtml(job.error)}</p>`:''}
+    ${job.status==='working'?`<button class="btn" data-cancel-job="${escapeHtml(job.task_id)}">取消后台任务</button>`:''}
+    ${job.status==='input_required'?`<label>补充信息 <input data-job-input="${escapeHtml(job.task_id)}"></label><button class="btn" data-resume-job="${escapeHtml(job.task_id)}">提交并继续</button>`:''}
+    ${job.result?.answer?`<div data-job-answer="${escapeHtml(job.task_id)}"></div>`:''}
+    ${(job.result?.artifacts || []).map(file=>`<a class="btn" href="/api/download?path=${encodeURIComponent(file.path)}" target="_blank" rel="noopener">下载 ${escapeHtml(file.name)}</a>`).join('')}
+    ${job.execution_run_id?`<button class="btn" data-open-job="${escapeHtml(job.execution_run_id)}" data-job-thread="${escapeHtml(job.task_id)}">查看后台执行详情</button>`:''}
+    </section>`).join('') + (session.jobError?`<p>${escapeHtml(session.jobError)}</p>`:'');
+  for (const job of session.jobs || []) if (job.result?.answer) renderAnswer(area.querySelector(`[data-job-answer="${job.task_id}"]`),job.result.answer);
 }
 async function sendTask() {
   const input = $('#queryInput'), query = input.value.trim();
@@ -251,7 +371,7 @@ async function sendTask() {
   }
   try {
     const data = await request('/api/task', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query, skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
+      body:JSON.stringify({query, execution_mode:$('#executionSelect').value || 'auto', skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
     const session = createSession(data.thread_id, query, data.run_id);
     session.status = 'queued'; input.value = ''; notify('任务已接收');
     await syncSession(session);
@@ -322,3 +442,23 @@ $('#modeSelect').addEventListener('change', () => {
 });
 $('#queryInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); } });
 restoreSessions();
+
+if ($('#jobArea')) $('#jobArea').addEventListener('click', async event => {
+  const session = sessions[activeSessionId];
+  if (!session) return;
+  const target = event.target;
+  try {
+    if (target.dataset.cancelJob) await request('/api/jobs/'+encodeURIComponent(target.dataset.cancelJob)+'/cancel?thread_id='+encodeURIComponent(session.id),{method:'POST'});
+    if (target.dataset.resumeJob) {
+      const id = target.dataset.resumeJob;
+      const input = $('#jobArea').querySelector(`[data-job-input="${id}"]`).value;
+      await request('/api/jobs/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thread_id:session.id,user_input:input})});
+    }
+    if (target.dataset.openJob) {
+      const view = createSession(target.dataset.jobThread,'后台研究执行',target.dataset.openJob);
+      await syncSession(view);
+      return;
+    }
+    await syncJobs(session);
+  } catch (error) { notify(error.message); }
+});

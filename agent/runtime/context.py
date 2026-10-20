@@ -40,9 +40,28 @@ class RunContext:
     search_tasks: dict = field(default_factory=dict, repr=False)
     search_finalization_announced: bool = False
     answer_repair_attempted: bool = False
+    answer_citation_repair_attempted: bool = False
+    delivery_status: str | None = None
+    original_call_ids: dict = field(default_factory=dict, repr=False)
     approved_internal: dict = field(default_factory=dict, repr=False)
     internal_result_version: int = 0
     user_query: str = field(default="", repr=False)
+    latest_message: str = field(default="", repr=False)
+    tool_turns: dict = field(default_factory=dict, repr=False)
+    turn_counts: dict = field(default_factory=dict, repr=False)
+    task_scopes: dict = field(default_factory=dict, repr=False)
+    call_labels: dict = field(default_factory=dict, repr=False)
+    pending_jobs: dict = field(default_factory=dict, repr=False)
+    job_service: object | None = field(default=None, repr=False)
+    background_job: bool = False
+    job_checkpoint_path: Path | None = field(default=None, repr=False)
+    job_checkpoint_closed: bool = False
+    collecting: bool = True
+    resume_graph: bool = False
+    partial_answer: bool = False
+    accepted_plan: bool = False
+    enforce_plan: bool = False
+    execution_mode: str = "auto"
     budget_lock: object = field(default_factory=RLock, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(

@@ -1,4 +1,0 @@
-$ .venv/Scripts/python.exe -X utf8 -B C:/Users/Dell/.codex/skills/.system/skill-creator/scripts/quick_validate.py skills/report-writing
-Skill is valid!
-
-Exit code: 0
