@@ -1,0 +1,2 @@
+# Match the project's Python formatter on Windows and Linux checkouts.
+*.py text eol=crlf

@@ -12,10 +12,11 @@
         ...
 """
 
-import time
 import functools
 import threading
-from typing import Type, Tuple, Callable, Any
+import time
+from collections.abc import Callable
+from typing import Any
 
 
 def retry_with_backoff(
@@ -23,7 +24,7 @@ def retry_with_backoff(
     base_delay: float = 1.0,
     max_delay: float = 30.0,
     backoff_factor: float = 2.0,
-    exceptions: Tuple[Type[BaseException], ...] = (Exception,),
+    exceptions: tuple[type[BaseException], ...] = (Exception,),
 ):
     """
     指数退避重试装饰器。
@@ -41,6 +42,7 @@ def retry_with_backoff(
     重试时间线示例（base_delay=1, factor=2, max=30）:
         首次失败 → 等 1s → 重试1 → 等 2s → 重试2 → 等 4s → 重试3 → 仍失败则抛出
     """
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -62,10 +64,7 @@ def retry_with_backoff(
                         time.sleep(delay)
                         delay = min(delay * backoff_factor, max_delay)
                     else:
-                        print(
-                            f"[Retry] {func.__name__} 重试 {max_retries} 次后仍失败: "
-                            f"{last_exception}"
-                        )
+                        print(f"[Retry] {func.__name__} 重试 {max_retries} 次后仍失败: {last_exception}")
 
             raise last_exception  # type: ignore[misc]
 
@@ -76,8 +75,10 @@ def retry_with_backoff(
 
 # ── 线程安全版本（用于可能在不同线程调用的工具） ──
 
+
 class RetryState(threading.local):
     """线程本地重试计数器，避免多线程并发时互相干扰。"""
+
     def __init__(self):
         self.attempt = 0
 

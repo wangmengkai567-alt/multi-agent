@@ -21,27 +21,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Cache pip
-        uses: actions/cache@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v9
         with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-
-      - name: Install dependencies
-        run: |
-          pip install ruff
-          # 安装核心依赖（跳过 Windows 专用包）
-          grep -v 'pywin32' requirements.txt > requirements-ci.txt
-          pip install -r requirements-ci.txt
+          version: "0.11.26"
 
       - name: Ruff lint
-        run: ruff check . --output-format=github
+        run: uvx --from ruff==0.11.13 ruff check . --output-format=github
 
       - name: Ruff format check
-        run: ruff format --check .
+        run: uvx --from ruff==0.11.13 ruff format --check .
 
   # ============================================
-  # 语法检查（确保代码可导入）
+  # 标准库语法编译检查，不执行应用导入或安装业务依赖
   # ============================================
   syntax:
     name: Syntax Check
@@ -54,11 +46,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install core dependencies
-        run: |
-          grep -v 'pywin32' requirements.txt > requirements-ci.txt
-          pip install -r requirements-ci.txt
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.11.26"
 
       - name: Check syntax (compile all .py files)
-        run: |
-          python -m compileall agent/ api/ tools/ utils/
+        run: uv run --no-project --python 3.11 python -m compileall -q agent/ api/ tools/ utils/
