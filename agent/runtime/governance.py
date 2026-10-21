@@ -27,6 +27,13 @@ def register_turn(message):
     return message.model_copy(update={"tool_calls": calls})
 
 
+def delivery_reserve(context):
+    """Keep one synthesis/check cycle and one correction out of collection's budget."""
+    if not context.collecting or not context.search_calls:
+        return {}
+    return {"main_model": 2, "review": 2, "retry": 1}
+
+
 def near_budget(context):
     policy = context.policy
     if policy is None:
@@ -34,8 +41,13 @@ def near_budget(context):
     remaining = context.remaining()
     reserve = min(policy.timeouts.finalize_seconds, policy.timeouts.total_seconds * 0.2)
     counts = context.call_counts
+    reserved = delivery_reserve(context)
+    delivery_pressure = sum(counts.values()) + sum(reserved.values()) >= policy.budgets.total or any(
+        counts[kind] + count >= getattr(policy.budgets, kind) for kind, count in reserved.items()
+    )
     return (
-        remaining is not None
+        delivery_pressure
+        or remaining is not None
         and remaining <= reserve
         or sum(counts.values()) >= policy.budgets.total * policy.budgets.near_ratio
         or any(
@@ -55,7 +67,7 @@ def announce(context, reason):
                     context.thread_id,
                     context.run_id,
                     "budget_finalizing",
-                    "预算接近阈值，优先交付已核实部分",
+                    "预算接近阈值，停止资料收集并保留综合与检查步骤",
                     {"reason": reason},
                     status="partial",
                     call_id=context.run_id,

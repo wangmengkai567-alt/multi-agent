@@ -62,7 +62,7 @@ async def smoke(case=None):
     env = dotenv_values(ROOT / ".env")
     lines = [
         "Real production-model acceptance: " + datetime.now(UTC).isoformat(),
-        "Model: " + str(env.get("LLM_QWEN_MAX")),
+        "Models: " + ", ".join(f"{role}={env.get(f'LLM_{role}_MODEL')}" for role in ("MAIN", "SUB", "REVIEW")),
         "Storage: output/step14-live (isolated)",
         "MySQL independent read-only credentials present: "
         + str(bool(env.get("MYSQL_READONLY_USER") and env.get("MYSQL_READONLY_PASSWORD"))),

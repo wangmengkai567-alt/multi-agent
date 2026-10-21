@@ -106,7 +106,7 @@ def build(parent_responses, *, db_error=None, db_probe=None, tools=None):
         model=budget_model(parent, "main_model"),
         backend=run_backend,
         tools=tools if tools is not None else [generate_markdown, read_file_content],
-        subagents=build_subagents(registry, parent, models={"db": db, "search": search}),
+        subagents=build_subagents(registry, parent, review_model=parent, models={"db": db, "search": search}),
         middleware=[HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True)],
     )
     return graph, parent, db, search, counts

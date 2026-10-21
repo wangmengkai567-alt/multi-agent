@@ -29,6 +29,13 @@ class SearchLimitReached(PolicyError):
     pass
 
 
+class SearchPrerequisiteRequired(PolicyError):
+    pass
+
+
+SEARCH_CONTROL_CATEGORIES = frozenset(("search_limit", "search_prerequisite"))
+
+
 class BudgetExceeded(PolicyError):
     pass
 
@@ -178,12 +185,15 @@ def reserve_calls(*kinds):
     context.check_active()
     limits = policy_for_run().budgets
     requested = {kind: kinds.count(kind) for kind in set(kinds)}
+    from agent.runtime.governance import delivery_reserve
+
     with context.budget_lock:
+        reserved = delivery_reserve(context)
         context.check_active()
-        if sum(context.call_counts.values()) + len(kinds) > limits.total:
-            raise BudgetExceeded("Total run call budget exhausted")
+        if sum(context.call_counts.values()) + len(kinds) + sum(reserved.values()) > limits.total:
+            raise BudgetExceeded("Total collection call budget reached; synthesis and review calls are reserved")
         for kind, count in requested.items():
-            if context.call_counts[kind] + count > getattr(limits, kind):
+            if context.call_counts[kind] + count + reserved.get(kind, 0) > getattr(limits, kind):
                 raise BudgetExceeded(f"{kind} call budget exhausted")
         for kind, count in requested.items():
             context.call_counts[kind] += count
@@ -357,6 +367,8 @@ def classify_tool_error(error):
         return "configuration"
     if isinstance(error, SearchLimitReached):
         return "search_limit"
+    if isinstance(error, SearchPrerequisiteRequired):
+        return "search_prerequisite"
     if isinstance(error, BudgetExceeded):
         return "budget"
     if isinstance(error, PermissionError):
@@ -418,7 +430,7 @@ def validate_tool_call(call):
     if name == "read_web_page":
         from tools.tavily_tool import validate_page_request
 
-        validate_page_request(args.get("url", ""), args.get("query", ""))
+        args["url"] = validate_page_request(args.get("url", ""), args.get("query", ""))
     if name == "internet_search":
         if not isinstance(args.get("query"), str) or not args["query"].strip():
             raise PolicyError("Search query must not be empty")

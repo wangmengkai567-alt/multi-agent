@@ -294,20 +294,19 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         )
         return "private document must not be logged"
 
-    responses = []
+    main_responses, child_responses = [], []
     for target in ("db", "search"):
-        responses.extend(
-            [
-                call("task", {"subagent_type": target, "description": "query"}, f"delegate-{target}"),
-                call("probe", {"value": target}, f"tool-{target}"),
-                AIMessage(content=f"answer-{target}"),
-                AIMessage(content=ReviewResult(verdict="passed").model_dump_json()),
-            ]
+        main_responses.append(call("task", {"subagent_type": target, "description": "query"}, f"delegate-{target}"))
+        child_responses.extend(
+            [call("probe", {"value": target}, f"tool-{target}"), AIMessage(content=f"answer-{target}")]
         )
-    responses.extend([AIMessage(content="done"), AIMessage(content=ReviewResult(verdict="passed").model_dump_json())])
-    model = ScriptedModel(responses=responses)
+    model = ScriptedModel(responses=[*main_responses, AIMessage(content="done")])
+    child_model = ScriptedModel(responses=child_responses)
+    review_model = ScriptedModel(
+        responses=[AIMessage(content=ReviewResult(verdict="passed").model_dump_json()) for _ in range(3)]
+    )
     fake_modules = {
-        "agent.llm": SimpleNamespace(model=model),
+        "agent.llm": SimpleNamespace(main_model=model, sub_model=child_model, review_model=review_model),
         "agent.prompts": SimpleNamespace(main_agent_content={"system_prompt": "query"}),
         "tools.markdown_tools": SimpleNamespace(generate_markdown=probe),
         "tools.pdf_tools": SimpleNamespace(convert_md_to_pdf=None),
@@ -348,6 +347,11 @@ async def test_production_builder_and_persisted_child_correlation(sandbox_dir, m
         assert "关键词或趋势一致不能作为事实证明" in str(model.seen_messages[0])
         assert "不要求为凑字数扩写或捏造数据" in str(model.seen_messages[0])
         assert executions == ["db", "search"]
+        assert len(model.seen_messages) == 3
+        assert len(child_model.seen_messages) == 4
+        assert len(review_model.seen_messages) == 3
+        assert "task" not in child_model.tool_names
+        assert not review_model.tool_names
         assert context.call_counts == {"main_model": 3, "sub_model": 4, "review": 3, "tool": 4, "retry": 0}
         await sink.flush(context.run_id)
         events = (await store.history(context.run_id))["events"]

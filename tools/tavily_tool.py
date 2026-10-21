@@ -14,6 +14,7 @@ from tavily import TavilyClient
 
 from agent.runtime.evidence import relevant_excerpt
 from agent.runtime.policies import MissingConfiguration, PolicyError, policy_for_run, request_timeout
+from agent.runtime.retrieval import SearchFollowUp, SearchHistory, usable_page
 from agent.runtime.search import search_allowance
 from api.monitor import monitor
 
@@ -90,8 +91,9 @@ def internet_search(
     max_results: int = 3,
     include_raw_content: bool = False,
     include_domains: DomainList | None = None,
+    follow_up: SearchFollowUp | None = None,
 ):
-    """Search public web sources. Return concise excerpts and exact citation URLs; start with one query. For official sources, set include_domains to the actual official domains; use site: with a version path when needed."""
+    """Search public sources; start with one query. Every subsequent search requires follow_up grounded in the previous call: confirmed information, a necessary missing fact, why existing sources cannot answer it, and a targeted search goal. Assess key listed source_ids; explain every source only when claiming all previous results are irrelevant; read key relevant pages before searching again. The runtime binds the previous search automatically; do not supply tool-call IDs. For official sources use include_domains, and site: plus the required version path."""
     if include_domains is not None and (
         not 1 <= len(include_domains) <= 20
         or any(
@@ -132,6 +134,7 @@ def validate_page_request(url, query):
 
     if not isinstance(url, str) or not isinstance(query, str) or not query.strip() or len(query) > 2000:
         raise PolicyError("网页读取必须提供 URL 和简短的当前问题")
+    url = SearchHistory(tool_evidence.get() or []).resolve_url(url)
     parsed = urlsplit(url)
     host = parsed.hostname or ""
     if (
@@ -153,12 +156,13 @@ def validate_page_request(url, query):
     allowed += list(cited_urls(context.user_query)) if context else []
     if host not in {urlsplit(value).hostname for value in allowed}:
         raise PolicyError("只能读取当前子任务实际搜索取得的域名或用户提供的 URL；不能借用其他子任务来源")
+    return url
 
 
 @tool(response_format="content_and_artifact")
 def read_web_page(url: str, query: str):
-    """Read real webpage sections relevant to query, after search. Use the observed public origin; an exact version path on that same origin may be opened and verified. This is a page read, not another search. Returns actual source text and URL; unavailable pages are explicitly reported."""
-    validate_page_request(url, query)
+    """Read only sections needed for query. Pass a returned source_id as url to preserve the exact discovered address. A full URL is used for user-provided pages or a specific new version path on an observed origin. This returns relevant excerpts, not a guarantee of full-page reading. Error/login pages are unavailable evidence."""
+    url = validate_page_request(url, query)
     load_dotenv()
     key = os.getenv("TAVILY_API_KEY")
     if not key:
@@ -175,8 +179,22 @@ def read_web_page(url: str, query: str):
             format="text",
             timeout=request_timeout(limits.timeout_seconds),
         )
-    # Keep failures and the exact provider response, including returned version paths.
-    payload = {**payload, "query": query}
+    # Keep rejected rows as failure evidence, never as readable/citable page results.
+    results = payload.get("results", [])
+    rejected = [
+        {**row, "error": "未取得有效正文：错误页、登录/验证页或空正文"} for row in results if not usable_page(row)
+    ]
+    payload = {
+        **payload,
+        "query": query,
+        "results": [row for row in results if usable_page(row)],
+        "failed_results": [*payload.get("failed_results", []), *rejected],
+        "read_status": "read" if any(usable_page(row) for row in results) else "unavailable",
+    }
     compact = json.loads(compact_search_response(payload, limits.model_copy(update={"result_chars": 5000}), query))
-    compact["failed_results"] = payload.get("failed_results", [])
+    compact["failed_results"] = [
+        {"url": row.get("url", ""), "error": row.get("error", "正文不可用")}
+        for row in payload.get("failed_results", [])
+    ]
+    compact["read_status"] = payload["read_status"]
     return json.dumps(compact, ensure_ascii=False), payload

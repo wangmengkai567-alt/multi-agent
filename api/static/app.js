@@ -103,7 +103,7 @@ function displayStatus(session) {
   for (const e of session.logs) {
     if (['subagent_review','answer_validation'].includes(e.event)) latestChecks.set(e.call_id, e.status);
     if (['subagent_completed','subagent_failed','subagent_rejected'].includes(e.event)) latestTasks.set(e.call_id, e.status);
-    if (e.event === 'after_tool' && e.data?.error_category !== 'search_limit') latestTools.set(e.call_id, e.status);
+    if (e.event === 'after_tool' && !isSearchControl(e.data)) latestTools.set(e.call_id, e.status);
   }
   const finalCheck = session.logs.filter(e => e.event === 'answer_validation').at(-1);
   const completeAnswer = finalCheck?.status === 'passed' && finalCheck.data?.answer_kind === 'complete';
@@ -175,8 +175,13 @@ function renderTabs() {
     `<option value="${escapeHtml(s.id)}">会话 ${i+1} · ${escapeHtml(s.query.slice(0,18))}</option>`).join('');
   if (threads.some(s => s.id === selected)) select.value = selected;
 }
+function isSearchControl(data) {
+  return ['search_limit','search_prerequisite'].includes(data?.error_category);
+}
+
 function describeEvent(event) {
   const d = event.data || {}, who = d.assistant_name || actors[event.actor] || '助手';
+  if (d.error_category === 'search_prerequisite') return '此补查请求未执行（需先评估已有结果并读取关键来源）';
   if (d.error_category === 'search_limit') return event.event === 'on_error'
     ? '检索额度限制：已拦截新的请求，已获准请求仍会完成'
     : '此检索请求未执行（检索额度限制）';
@@ -294,7 +299,7 @@ function renderCallGroups(session, openDetails = new Set()) {
     let toolNumber = 0;
     const rows = [...calls.values()].map((events,i) => {
       const last = events.at(-1), d = last.data || {};
-      const failed = d.error_category !== 'search_limit' && ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(last.status);
+      const failed = !isSearchControl(d) && ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(last.status);
       const name = events.find(e=>e.data?.tool_name)?.data.tool_name || events.find(e=>e.actor?.includes(':'))?.actor.split(':').at(-1);
       const toolNames = {internet_search:'网络搜索',read_web_page:'网页正文读取',read_file:'读取文件',write_todos:'更新计划',plan_research:'登记分工',task:'委派任务'};
       const caption = name ? `${toolNames[name] || name} #${++toolNumber} · ${last.event==='after_tool' && last.status==='completed'?'已完成':describeEvent(last)}` : describeEvent(last);

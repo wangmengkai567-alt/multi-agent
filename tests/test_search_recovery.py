@@ -36,7 +36,43 @@ def spec(settings):
 
 
 def search(call_id, actual):
-    request = SimpleNamespace(tool_call={"name": "internet_search", "id": call_id, "args": {"query": "forecast"}})
+    allowance = search_allowance.get()
+    args = {"query": "forecast " + call_id}
+    if allowance and allowance.calls:
+        from agent.reflection import source_id
+        from agent.runtime.retrieval import SearchHistory
+
+        previous = SearchHistory(allowance.task.evidence).previous_sources(allowance.calls)
+        for row in list(previous.values())[:1]:
+            page = SimpleNamespace(
+                tool_call={
+                    "name": "read_web_page",
+                    "id": "read-" + call_id,
+                    "args": {"url": row["url"], "query": "missing required fact"},
+                }
+            )
+            HookToolMiddleware("search").wrap_tool_call(
+                page,
+                lambda req, url=row["url"]: ToolMessage(
+                    content=json.dumps({"results": [{"url": url, "content": "forecast; exact date unavailable"}]}),
+                    tool_call_id=req.tool_call["id"],
+                ),
+            )
+        args["follow_up"] = dict(
+            known_information="Forecast overview confirmed",
+            missing_information="Exact forecast date still missing",
+            insufficiency="The source and its page only give an overview without the required date",
+            search_target="Find the precise date for the same forecast",
+            sources=[
+                dict(
+                    source_id=source_id(row["url"]),
+                    relevant=True,
+                    reason="Current forecast source omits its precise date",
+                )
+                for row in list(previous.values())[:1]
+            ],
+        )
+    request = SimpleNamespace(tool_call={"name": "internet_search", "id": call_id, "args": args})
 
     def execute(request):
         actual.append(call_id)
@@ -144,7 +180,7 @@ async def test_refinement_keeps_draft_evidence_and_does_not_reset_search_quota(c
     result = await asyncio.to_thread(wrapper.invoke, inputs) if sync else await wrapper.ainvoke(inputs)
     assert result["messages"][-1].text == "forecast " + URL
     assert actual == ["one", "two"] and len(executions) == 2
-    assert context.call_counts["tool"] == 2
+    assert context.call_counts["tool"] == 3
 
 
 @pytest.mark.asyncio

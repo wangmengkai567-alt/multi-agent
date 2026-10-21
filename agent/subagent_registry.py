@@ -20,12 +20,18 @@ class ReviewConfig:
     required_tools: tuple[str, ...] = ()
     required_fields: tuple[str, ...] = ()
     require_sources: bool = False
+    grounded_report: bool = False
 
     def __post_init__(self):
         if type(self.max_refinements) is not int or self.max_refinements not in (0, 1):
             raise ValueError("At most one refinement is allowed")
-        if any(type(value) is not bool for value in (self.enabled, self.model_check, self.require_sources)):
+        if any(
+            type(value) is not bool
+            for value in (self.enabled, self.model_check, self.require_sources, self.grounded_report)
+        ):
             raise ValueError("Review flags must be booleans")
+        if self.grounded_report and not (self.enabled and self.model_check):
+            raise ValueError("Grounded reports require enabled semantic review")
         for values in (self.required_tools, self.required_fields):
             if not isinstance(values, tuple) or any(
                 not isinstance(value, str) or not value.strip() for value in values
@@ -96,6 +102,7 @@ def load_default_registry():
                         "search": ("internet_search",),
                     }[agent_id],
                     require_sources=agent_id == "search",
+                    grounded_report=agent_id == "search",
                 ),
             )
             for agent_id, source in sources

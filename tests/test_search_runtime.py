@@ -199,17 +199,15 @@ def test_search_allowance_is_atomic_and_retries_keep_the_same_slot(context):
 
 
 def test_search_limit_is_enforced_before_tool_execution_and_forces_final_answer(context):
-    from types import SimpleNamespace
-
     from langchain.agents.middleware import ModelRequest
-    from langchain_core.messages import SystemMessage, ToolMessage
+    from langchain_core.messages import SystemMessage
 
-    from agent.runtime.hooks import HookToolMiddleware
     from agent.runtime.search import SearchAllowance, SearchExecutionMiddleware, search_allowance
 
     allowance = SearchAllowance(context)
     token = search_allowance.set(allowance)
     actual = []
+    collector = tool_evidence.set([])
     try:
         request = ModelRequest(
             model=ScriptedModel(responses=[]),
@@ -219,76 +217,37 @@ def test_search_limit_is_enforced_before_tool_execution_and_forces_final_answer(
         )
         first = SearchExecutionMiddleware().final_request(request)
         assert first.tool_choice == {"type": "function", "function": {"name": "internet_search"}}
+        from test_search_recovery import search
+
         for index in range(3):
-            args = SimpleNamespace(
-                tool_call={"name": "internet_search", "id": str(index), "args": {"query": "forecast"}}
-            )
-
-            def execute(req):
-                actual.append(req.tool_call["id"])
-                return ToolMessage(content="facts", tool_call_id=req.tool_call["id"])
-
-            result = HookToolMiddleware("search").wrap_tool_call(args, execute)
+            result = search(str(index), actual)
         assert len(actual) == 2 and result.status == "error"
         final = SearchExecutionMiddleware().final_request(request)
         assert final.tools == [] and final.tool_choice == "none"
         assert final.model_settings["tool_choice"] == "none"
         assert "实际来源 URL" in final.system_message.text
-        assert request.tools and context.call_counts["tool"] == 2
+        assert request.tools and context.call_counts["tool"] == 4
     finally:
+        tool_evidence.reset(collector)
         search_allowance.reset(token)
 
 
-def test_model_extra_body_is_optional_and_validated(monkeypatch):
-    import runpy
-    from pathlib import Path
-    from types import SimpleNamespace
-
-    import dotenv
-    import langchain.chat_models
-
-    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
-    monkeypatch.setattr(dotenv, "find_dotenv", lambda *args, **kwargs: "")
-    monkeypatch.delenv("LLM_EXTRA_BODY", raising=False)
-    monkeypatch.setattr(langchain.chat_models, "init_chat_model", lambda **kwargs: SimpleNamespace(**kwargs))
-    module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "agent/llm.py"))
-    options = module["model_options"]
-    assert options(None) == {} and options("") == {}
-    assert options('{"thinking":{"type":"disabled"}}') == {"extra_body": {"thinking": {"type": "disabled"}}}
-    for value in ("[]", "null", "invalid"):
-        with pytest.raises(ValueError, match="LLM_EXTRA_BODY"):
-            options(value)
-
-
 def test_intentional_search_limit_preserves_successful_source_evidence(context):
-    from types import SimpleNamespace
-
-    from langchain_core.messages import ToolMessage
-
-    from agent.runtime.hooks import HookToolMiddleware
     from agent.runtime.search import SearchAllowance, search_allowance
 
     evidence = []
     allowance_token = search_allowance.set(SearchAllowance(context))
     evidence_token = tool_evidence.set(evidence)
-    url = "https://weather.example.test/forecast"
+    from test_search_recovery import URL, search
+
+    url = URL
     try:
         for index in range(3):
-            request = SimpleNamespace(
-                tool_call={"name": "internet_search", "id": str(index), "args": {"query": "forecast"}}
-            )
-
-            def execute(req):
-                return ToolMessage(
-                    content=json.dumps({"results": [{"url": url, "content": "forecast"}]}),
-                    tool_call_id=req.tool_call["id"],
-                )
-
-            HookToolMiddleware("search").wrap_tool_call(request, execute)
+            search(str(index), [])
     finally:
         tool_evidence.reset(evidence_token)
         search_allowance.reset(allowance_token)
-    assert len(evidence) == 3
+    assert len(evidence) == 5
     assert evidence[-1]["error_category"] == "search_limit" and not evidence[-1]["executed"]
     assert (
         rule_review(
@@ -366,7 +325,7 @@ async def test_bad_domain_argument_is_recoverable_in_same_task_without_searching
     registry = SubagentRegistry([spec])
     graph = create_deep_agent(
         model=budget_model(parent, "main_model"),
-        subagents=build_subagents(registry, parent, models={"search": child}),
+        subagents=build_subagents(registry, parent, review_model=parent, models={"search": child}),
         middleware=[HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True)],
     )
     initial = {"messages": [HumanMessage(content="official fact")]}

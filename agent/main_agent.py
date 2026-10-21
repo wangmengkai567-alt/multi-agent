@@ -32,7 +32,7 @@ def _build_agent(saver):
     # These modules load credentials and construct clients, so import only at startup.
     from deepagents import create_deep_agent
 
-    from agent.llm import model
+    from agent.llm import main_model, review_model, sub_model
     from agent.prompts import main_agent_content
     from agent.results import RESULT_DISPLAY_PROMPT
     from agent.runtime.answer_review import AnswerReviewMiddleware
@@ -47,9 +47,9 @@ def _build_agent(saver):
     from tools.upload_file_read_tool import read_file_content
 
     registry = load_default_registry()
-    subagents = build_subagents(registry, model)
+    subagents = build_subagents(registry, sub_model, review_model=review_model)
     return create_deep_agent(
-        model=budget_model(model, "main_model"),
+        model=budget_model(main_model, "main_model"),
         backend=run_backend,
         system_prompt=main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT,
         tools=[
@@ -63,7 +63,7 @@ def _build_agent(saver):
         checkpointer=saver,
         subagents=subagents,
         middleware=[
-            AnswerReviewMiddleware(model),
+            AnswerReviewMiddleware(review_model),
             SearchFinalizationMiddleware(main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT),
             ProjectSkillsMiddleware(),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),

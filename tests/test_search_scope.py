@@ -178,16 +178,16 @@ async def test_real_framework_finalizes_after_two_failed_tasks_without_third_del
     registry = SubagentRegistry([spec])
     graph = create_deep_agent(
         model=budget_model(parent, "main_model"),
-        subagents=build_subagents(registry, parent, models={"search": child}),
+        subagents=build_subagents(registry, parent, review_model=parent, models={"search": child}),
         middleware=[
             SearchFinalizationMiddleware("Summarize actual facts"),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
         ],
     )
     result = await graph.ainvoke({"messages": [HumanMessage(content=context.user_query)]})
-    assert "无法给出完整、可靠的结论" in result["messages"][-1].text
-    assert result["messages"][-1].additional_kwargs["deterministic_fallback"] is True
-    assert len(context.search_tasks) == 2 and len(parent.seen_messages) == 1
+    assert result["messages"][-1].text == "关键依据未核实，无法给出可靠的型号推荐。"
+    assert not result["messages"][-1].additional_kwargs.get("deterministic_fallback")
+    assert len(context.search_tasks) == 2 and len(parent.seen_messages) == 2
     assert len(child.seen_messages) == 4
 
 

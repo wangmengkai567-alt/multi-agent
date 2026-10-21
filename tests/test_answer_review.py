@@ -94,7 +94,7 @@ async def test_real_graph_cannot_publish_memory_citations_without_actual_search(
     registry = SubagentRegistry([spec])
     graph = create_deep_agent(
         model=budget_model(root, "main_model"),
-        subagents=build_subagents(registry, root, models={"search": child}),
+        subagents=build_subagents(registry, root, review_model=root, models={"search": child}),
         middleware=[
             AnswerReviewMiddleware(reviewer),
             SearchFinalizationMiddleware(),
@@ -335,7 +335,7 @@ async def test_real_database_delegation_supplies_approved_evidence_to_root_revie
     registry = SubagentRegistry([spec])
     graph = create_deep_agent(
         model=budget_model(root, "main_model"),
-        subagents=build_subagents(registry, root, models={"db": child}),
+        subagents=build_subagents(registry, root, review_model=root, models={"db": child}),
         middleware=[
             AnswerReviewMiddleware(reviewer),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
@@ -380,7 +380,7 @@ async def test_real_graph_recovers_wrong_arguments_without_poisoning_successful_
     registry = SubagentRegistry([spec])
     graph = create_deep_agent(
         model=budget_model(root, "main_model"),
-        subagents=build_subagents(registry, root, models={"search": child}),
+        subagents=build_subagents(registry, root, review_model=root, models={"search": child}),
         middleware=[
             AnswerReviewMiddleware(reviewer),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),

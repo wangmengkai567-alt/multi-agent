@@ -31,7 +31,7 @@ def spec(target, tools=()):
 def build(registry, parent, children, *, hooks=None):
     return create_deep_agent(
         model=budget_model(parent, "main_model"),
-        subagents=build_subagents(registry, parent, models=children, hooks=hooks),
+        subagents=build_subagents(registry, parent, review_model=parent, models=children, hooks=hooks),
         middleware=[HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True, hooks=hooks)],
     )
 
@@ -492,7 +492,7 @@ async def test_factory_child_tool_rejection_prevents_actual_business_function(ru
 def test_factory_rejects_unbudgeted_sdk_retries():
     model = ScriptedModel(responses=[]).model_copy(update={"max_retries": 3})
     with pytest.raises(ValueError, match="retries"):
-        build_subagents(SubagentRegistry([spec("db")]), model)
+        build_subagents(SubagentRegistry([spec("db")]), model, review_model=model)
 
 
 @pytest.mark.asyncio

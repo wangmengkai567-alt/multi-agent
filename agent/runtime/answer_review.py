@@ -9,10 +9,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from agent.reflection import ResultReviewer, ReviewResult, normalize_source_citations, source_urls
 from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event
+from agent.runtime.evidence import model_evidence
+from agent.runtime.facts import approved_reports, report_references
 from agent.runtime.finalization import partial_response
 from agent.runtime.models import ModelRequestTimeout
 from agent.runtime.output import cited_urls, source_page
-from agent.runtime.policies import BudgetExceeded, reserve_calls
+from agent.runtime.policies import BudgetExceeded, policy_for_run, reserve_calls
 from agent.subagent_registry import ReviewConfig
 
 
@@ -161,10 +163,18 @@ class AnswerReviewMiddleware(AgentMiddleware):
             return None
         setattr(context, flag, True)
         if context.search_tasks or context.approved_internal:
-            # Do not restart searches to repair the final prose; approved bodies are the source of truth.
+            # Reuse the same bounded evidence as review; approved summaries can contain mistakes.
             _, evidence = self._reviewer(message)
+            reports = approved_reports(context)
             data = dict(
+                verified_reports=reports,
                 user_query=context.user_query,
+                tools=model_evidence(
+                    evidence,
+                    policy_for_run().search.model_context_chars,
+                    policy_for_run().search.result_chars,
+                    references=report_references(reports),
+                ),
                 allowed_source_urls=sorted(set(source_urls(evidence)) | cited_urls(context.user_query)),
                 allowed_sources=[
                     {"source_id": __import__("hashlib").sha256(url.encode()).hexdigest()[:12], "url": url}
@@ -172,7 +182,11 @@ class AnswerReviewMiddleware(AgentMiddleware):
                 ],
                 repair_phase="citation" if citation_only else "facts",
                 verified_results=[
-                    *[task.result for task in context.search_tasks.values() if task.check_status == "passed"],
+                    *[
+                        task.result
+                        for task in context.search_tasks.values()
+                        if task.check_status == "passed" and task.report is None
+                    ],
                     *[result["text"] for result in context.approved_internal.values()],
                 ],
                 failed_checks=[
@@ -183,7 +197,7 @@ class AnswerReviewMiddleware(AgentMiddleware):
                 draft=message.text,
                 revision=review.revision_instruction,
             )
-            note = "优先使用 allowed_sources 中的 [source:来源ID] 引用，由程序填入实际 URL。修订定位到具体事实冲突时按真实依据修正或删掉该断言，不为保留可选数字再调查。最终答复未通过检查。只使用已通过检查的资料修订文字和来源，不调用工具；失败任务的内容不能充当事实。allowed_source_urls 是程序从已通过任务的真实工具记录及用户输入中提取的可引用来源，资料正文中的预期链接或记忆链接也不能越过该范围。资料不足时明确有限结论。不回显内部 JSON 或思考过程。"
+            note = "所有具体外部事实必须对应 verified_reports.facts；内部数据以 verified_results 与真实 SQL 为依据。删除检查指出的无依据附加断言，不能换个说法保留；保留 scope 与生效时间，不采纳 superseded 或未解决 conflicts 作确定结论。tools 是检查器使用的同一份真实证据摘录；若 verified_results 中的数值与实际证据冲突，修正或删除错误断言，不要原样沿用报告。优先使用 allowed_sources 中的 [source:来源ID] 引用，由程序填入实际 URL。修订定位到具体事实冲突时按真实依据修正或删掉该断言，不为保留可选数字再调查。最终答复未通过检查。只使用已通过检查的资料修订文字和来源，不调用工具；失败任务的内容不能充当事实。allowed_source_urls 是程序从已通过任务的真实工具记录及用户输入中提取的可引用来源，资料正文中的预期链接或记忆链接也不能越过该范围。资料不足时明确有限结论。不回显内部 JSON 或思考过程。"
             return request.override(
                 tools=[],
                 tool_choice="none",

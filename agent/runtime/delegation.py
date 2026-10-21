@@ -17,6 +17,7 @@ from agent.runtime.events import make_event, redact_text
 from agent.runtime.hooks import HookCall, HookRejected, active_call, error_message, pipeline
 from agent.runtime.models import ModelRequestTimeout
 from agent.runtime.policies import BudgetExceeded, SearchLimitReached, classify_tool_error, reserve_calls
+from agent.runtime.reporting import ReportRevision, ResearchOutputError
 from agent.runtime.search import SearchAllowance, needs_search_refinement, search_allowance
 from agent.runtime.skills import skill_scope
 from agent.runtime.workflows import prepare_delegate
@@ -149,7 +150,7 @@ class DelegationRunnable(Runnable):
         final = messages[-1] if messages else None
         if not isinstance(final, AIMessage) or final.tool_calls:
             raise RuntimeError("Expert executor did not return a final assistant message")
-        if self.spec.agent_id == "search":
+        if self.spec.agent_id == "search" and not self.spec.review_config.grounded_report:
             text = normalize_source_citations(final.text, evidence)
             if text != final.text:
                 final = final.model_copy(update={"content": text})
@@ -222,6 +223,21 @@ class DelegationRunnable(Runnable):
         call.check_status = record["check_status"] = review.verdict
         self._review_event(context, call, review, attempt)
         if review.verdict == "passed":
+            if self.spec.review_config.grounded_report:
+                from agent.runtime.facts import parse_report, render_report
+
+                limits = context.policy.search
+                report = parse_report(
+                    record["result"], call.review_evidence, limits.model_context_chars // (2 * limits.max_tasks_per_run)
+                )
+                SearchAllowance(context, call.search_task_key).task.report = report
+                record["result"] = render_report(report)
+                final = result["messages"][-1].model_copy(
+                    update={"content": json.dumps({"verified_report": report}, ensure_ascii=False)}
+                )
+                result = dict(result, messages=[*result["messages"][:-1], final])
+                call.result = result
+                return result
             if self.spec.agent_id == "db":
                 with context.budget_lock:
                     context.approved_internal[call.call_id] = dict(text=record["result"], evidence=call.review_evidence)
@@ -292,11 +308,12 @@ class DelegationRunnable(Runnable):
         if near_budget(context):
             return None
         reserve_calls("retry")
+        allow_search = needs_search_refinement(review, evidence)
         if self.spec.agent_id == "search":
-            SearchAllowance(context, call.search_task_key).begin_refinement(
-                allow_search=needs_search_refinement(review, evidence)
-            )
+            SearchAllowance(context, call.search_task_key).begin_refinement(allow_search=allow_search)
         self._review_event(context, call, review, attempt + 1, "subagent_refinement")
+        if self.spec.review_config.grounded_report and not allow_search:
+            return ReportRevision(result["messages"][-1].text, review.revision_instruction)
         # Keep the actual tool turns as well as the draft: an exhausted quota must
         # still allow citation/wording fixes using sources already retrieved.
         messages = result["messages"]
@@ -327,6 +344,8 @@ class DelegationRunnable(Runnable):
     def _dependency(self, error):
         from agent.runtime.recovery import ToolCallTimeout
 
+        if isinstance(error, ResearchOutputError):
+            return ReviewResult(verdict="insufficient", issues=[str(error)], revision_instruction=str(error))
         if isinstance(error, ToolCallTimeout):
             return ReviewResult(verdict="tool_failed", issues=[str(error)])
         if isinstance(error, ModelRequestTimeout):
@@ -352,6 +371,12 @@ class DelegationRunnable(Runnable):
         task_id, _, _ = resolve_task(context, inputs["messages"][-1].text)
         task = context.search_tasks.get(task_id)
         if task and task.check_status == "passed" and task.result:
+            if self.spec.review_config.grounded_report:
+                if task.report is None:
+                    raise HookRejected("缺少已核验的结构化事实，不能恢复该检索结果")
+                return {
+                    "messages": [AIMessage(content=json.dumps({"verified_report": task.report}, ensure_ascii=False))]
+                }
             return {"messages": [AIMessage(content=task.result)]}
         return None
 
@@ -397,7 +422,11 @@ class DelegationRunnable(Runnable):
                         dependency = self._dependency(exc) if self.spec.review_config.enabled else None
                         if dependency is None:
                             raise
-                        result = {"messages": [AIMessage(content="")]}
+                        result = (
+                            exc.result
+                            if isinstance(exc, ResearchOutputError)
+                            else {"messages": [AIMessage(content="")]}
+                        )
                 finally:
                     search_allowance.reset(search_token)
                     tool_evidence.reset(evidence_token)
@@ -487,7 +516,11 @@ class DelegationRunnable(Runnable):
                         dependency = self._dependency(exc) if self.spec.review_config.enabled else None
                         if dependency is None:
                             raise
-                        result = {"messages": [AIMessage(content="")]}
+                        result = (
+                            exc.result
+                            if isinstance(exc, ResearchOutputError)
+                            else {"messages": [AIMessage(content="")]}
+                        )
                 finally:
                     search_allowance.reset(search_token)
                     tool_evidence.reset(evidence_token)

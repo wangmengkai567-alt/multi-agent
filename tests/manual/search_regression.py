@@ -10,6 +10,7 @@ import json
 import re
 import sys
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from time import monotonic
 from uuid import uuid4
@@ -33,16 +34,17 @@ async def main(case="weather"):
     server.output_dir = directory / "files"
     server.updated_dir = directory / "updated"
     # Record request controls only: never persist prompts, tool bodies, headers or credentials.
-    from agent.llm import model
+    from agent.llm import main_model, review_model, sub_model
     from agent.runtime.search import search_allowance
 
     request_controls = []
 
-    async def record_controls(request):
+    async def record_controls(request, *, role):
         payload = json.loads(request.content)
         allowance = search_allowance.get()
         request_controls.append(
             dict(
+                role=role,
                 timestamp=datetime.now(UTC).isoformat(),
                 tool_choice=payload.get("tool_choice"),
                 response_format=payload.get("response_format"),
@@ -52,7 +54,10 @@ async def main(case="weather"):
             )
         )
 
-    model.root_async_client._client.event_hooks.setdefault("request", []).append(record_controls)
+    for role, client in {"main": main_model, "sub": sub_model, "review": review_model}.items():
+        client.root_async_client._client.event_hooks.setdefault("request", []).append(
+            partial(record_controls, role=role)
+        )
     question = {
         "weather": "明天武汉适合穿什么衣服？请写明预报日期并提供来源链接。",
         "arithmetic": "计算17乘以23，直接给出结果。",

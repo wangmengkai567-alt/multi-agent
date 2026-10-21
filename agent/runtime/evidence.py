@@ -46,7 +46,7 @@ def relevant_excerpt(text, size, query=""):
     return (marker if start else "") + text[start:end] + (marker if end < len(text) else "")
 
 
-def model_evidence(evidence, content_chars, per_source_chars=1000):
+def model_evidence(evidence, content_chars, per_source_chars=1000, *, references=()):
     # Keep actual call IDs/parameters/URLs and explicit truncation markers.
     result, bodies = [], []
     for item in evidence:
@@ -78,27 +78,51 @@ def model_evidence(evidence, content_chars, per_source_chars=1000):
                         for source in content.get("results", [])
                         if isinstance(source, dict)
                     ],
-                    evidence_note="真实工具记录；部分正文片段可能截断，完整原文另行保存。",
+                    evidence_note="真实工具响应；搜索片段与定向正文摘录均不保证网页全文，原始响应另行保存。",
+                    read_status=content.get("read_status"),
+                    failed_results=[
+                        {"url": failure.get("url", ""), "error": failure.get("error", "正文不可用")}
+                        for failure in content.get("failed_results", [])
+                    ],
                 )
                 for source in content.get("results", []):
                     if isinstance(source, dict) and isinstance(source.get("content"), str):
                         bodies.append(source)
                         source["_page"] = item["name"] == "read_web_page"
+                        source["_eligible"] = item.get("executed") and item.get("status") == "completed"
                         source["_query"] = item.get("request_parameters", {}).get(
                             "query", str(content.get("query") or "")
                         )
         row["content"] = content
         result.append(row)
+    # Pin the exact approved quotes before allocating background excerpts.
+    pinned = {}
+    for ref in references:
+        target = next(
+            (
+                source
+                for source in bodies
+                if source["_eligible"] and source["source_id"] == ref["source_id"] and ref["quote"] in source["content"]
+            ),
+            None,
+        )
+        if target is None:
+            raise ValueError("Approved source quote is missing from actual evidence")
+        pinned.setdefault(id(target), []).append(ref["quote"])
+    pinned = {key: "\n[…独立摘录…]\n".join(dict.fromkeys(quotes)) for key, quotes in pinned.items()}
+    allowances = {key: len(text) for key, text in pinned.items()}
+    remaining = content_chars - sum(allowances.values())
+    if remaining < 0:
+        raise ValueError("Approved quotes exceed the evidence context budget")
     capacities = {
         id(source): min(len(source["content"]), 5000 if source["_page"] else per_source_chars) for source in bodies
     }
-    remaining, pending = content_chars, list(bodies)
-    allowances = {}
+    pending = [source for source in bodies if id(source) not in pinned]
     # Targeted page extracts carry the sections the worker actually read. Keep
     # those before spending the remainder on discovery snippets.
-    pages = [source for source in bodies if source["_page"]]
+    pages = [source for source in pending if source["_page"]]
     if pages:
-        share = min(5000, content_chars // len(pages))
+        share = min(5000, remaining // len(pages))
         for source in pages:
             allowances[id(source)] = min(capacities[id(source)], share)
             remaining -= allowances[id(source)]
@@ -118,8 +142,12 @@ def model_evidence(evidence, content_chars, per_source_chars=1000):
         text = source["content"]
         size = allowances[id(source)]
         source.pop("_page", None)
+        source.pop("_eligible", None)
         query = source.pop("_query", "")
-        if size < len(text):
+        if id(source) in pinned:
+            source["content"] = pinned[id(source)]
+            source["excerpt_truncated"] = source["excerpt_truncated"] or source["content"] != text
+        elif size < len(text):
             source["content"] = relevant_excerpt(text, size, query)
             source["excerpt_truncated"] = True
     return result

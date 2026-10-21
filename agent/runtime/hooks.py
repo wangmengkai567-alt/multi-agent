@@ -12,6 +12,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import Runnable
 from langgraph.types import Command
+from pydantic import ValidationError
 
 from agent.runtime.context import get_run_context
 from agent.runtime.events import EventPersistenceError, make_event, redact_text
@@ -204,8 +205,12 @@ class HookToolMiddleware(AgentMiddleware):
                 # Preserve unknown fields so policy can still reject extra task args.
                 call.args = {**call.args, **parsed_args}
                 request.tool_call["args"] = call.args
-            except ValueError as exc:
-                raise HookRejected("Invalid tool arguments") from exc
+            except ValidationError as exc:
+                fields = "; ".join(
+                    f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                    for error in exc.errors(include_input=False, include_url=False)[:5]
+                )
+                raise HookRejected("Invalid tool arguments: " + fields) from exc
         if request.tool_call["name"] == "task":
             if call.target not in self.allowed_targets:
                 raise HookRejected(f"Subagent target is not allowed: {call.target}")

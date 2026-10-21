@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from deepagents import create_deep_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langchain_core.tools import tool
@@ -13,12 +14,14 @@ from test_delegation import build
 from test_framework_contract import ScriptedModel, call
 from test_review_contract import finding, rejected
 
-from agent.reflection import ResultReviewer, ReviewResult, rule_review
+from agent.reflection import ResultReviewer, ReviewResult, rule_review, source_id
 from agent.runtime.context import RunContext, reset_run_context, set_run_context
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.events import EventSink
 from agent.runtime.hooks import HookToolMiddleware
+from agent.runtime.models import budget_model
 from agent.runtime.policies import MissingConfiguration, RuntimePolicy, load_runtime_policy
+from agent.subagent_factory import build_subagents
 from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentRegistry, SubagentSpec
 from api.run_store import RunStore
 
@@ -54,6 +57,14 @@ def approved():
     return AIMessage(content=ReviewResult(verdict="passed").model_dump_json())
 
 
+def reviewed_search(registry, parent, child, reviewer):
+    return create_deep_agent(
+        model=budget_model(parent, "main_model"),
+        subagents=build_subagents(registry, child, review_model=reviewer),
+        middleware=[HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True)],
+    )
+
+
 @pytest.mark.asyncio
 async def test_search_review_keeps_actual_request_separate_from_normalized_response(runtime):
     import json
@@ -76,17 +87,17 @@ async def test_search_review_keeps_actual_request_separate_from_normalized_respo
                 "internet_search", {"query": requested, "max_results": 2, "include_raw_content": False}, "search-tool"
             ),
             AIMessage(content="官方文档：" + url),
-            approved(),
         ]
     )
+    reviewer = ScriptedModel(responses=[approved()])
     parent = ScriptedModel(
         responses=[call("task", {"subagent_type": "search", "description": requested}), AIMessage(content="done")]
     )
-    await build(SubagentRegistry([spec(settings, (internet_search,))]), parent, {"search": child}).ainvoke(
+    await reviewed_search(SubagentRegistry([spec(settings, (internet_search,))]), parent, child, reviewer).ainvoke(
         {"messages": [("user", requested)]}
     )
     assert actual == [(requested, 2, False)]
-    review_input = json.loads(child.seen_messages[-1][-1].text)
+    review_input = json.loads(reviewer.seen_messages[0][-1].text)
     evidence = review_input["tools"][0]
     assert evidence["executed"] and evidence["status"] == "completed"
     assert evidence["request_parameters"] == {"query": requested, "max_results": 2, "include_raw_content": False}
@@ -155,15 +166,15 @@ async def test_actual_framework_search_sources_are_reused_on_citation_revision(r
             call("internet_search", {"query": "first"}, "web-first"),
             AIMessage(content="no citations"),
             AIMessage(content="facts https://example.org/evidence"),
-            approved(),
         ]
     )
+    reviewer = ScriptedModel(responses=[approved()])
     parent = ScriptedModel(
         responses=[call("task", {"subagent_type": "search", "description": "search facts"}), AIMessage(content="done")]
     )
-    result = await build(SubagentRegistry([spec(settings, (internet_search,))]), parent, {"search": child}).ainvoke(
-        {"messages": [("user", "search")]}
-    )
+    result = await reviewed_search(
+        SubagentRegistry([spec(settings, (internet_search,))]), parent, child, reviewer
+    ).ainvoke({"messages": [("user", "search")]})
     assert result["messages"][-1].text == "done" and queries == ["first"]
     assert "来源 URL" in str(child.seen_messages[2])
     assert context.call_counts == dict(main_model=2, sub_model=3, review=1, tool=2, retry=1)
@@ -485,15 +496,36 @@ async def test_exhausted_search_refinement_retains_real_source_evidence(runtime)
         actual.append(query)
         return {"results": [{"url": url, "content": "forecast"}]}
 
+    context.policy = context.policy.model_copy(
+        update={"search": context.policy.search.model_copy(update={"page_reads_per_task": 1})}
+    )
+
+    @tool
+    def read_web_page(url: str, query: str):
+        """Return a source paragraph before a justified follow-up."""
+        return {"results": [{"url": url, "content": "facts; precise date is unavailable"}]}
+
+    follow_up = dict(
+        known_information="The overview facts are confirmed",
+        missing_information="Precise date is still necessary",
+        insufficiency="The searched source and its paragraph omit the required date",
+        search_target="Find a dated source for the exact same object",
+        sources=[
+            dict(
+                source_id=source_id("https://example.test/actual-source"),
+                relevant=True,
+                reason="This is the relevant overview source without a precise date",
+            )
+        ],
+    )
+
     child = ScriptedModel(
         responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "internet_search", "args": {"query": "first"}, "id": "one", "type": "tool_call"},
-                    {"name": "internet_search", "args": {"query": "second"}, "id": "two", "type": "tool_call"},
-                ],
+            call("internet_search", {"query": "first"}, "one"),
+            call(
+                "read_web_page", {"url": "https://example.test/actual-source", "query": "missing precise date"}, "page"
             ),
+            call("internet_search", {"query": "second", "follow_up": follow_up}, "two"),
             AIMessage(content="draft without citations"),
             AIMessage(content="facts " + url),
         ]
@@ -505,13 +537,13 @@ async def test_exhausted_search_refinement_retains_real_source_evidence(runtime)
         ]
     )
     settings = ReviewConfig(enabled=True, required_tools=("internet_search",), require_sources=True)
-    await build(SubagentRegistry([spec(settings, (internet_search,))]), parent, {"search": child}).ainvoke(
-        {"messages": [("user", "forecast")]}
-    )
+    await build(
+        SubagentRegistry([spec(settings, (internet_search, read_web_page))]), parent, {"search": child}
+    ).ainvoke({"messages": [("user", "forecast")]})
     assert sorted(actual) == ["first", "second"] and len(context.search_calls) == 2
     final_context = child.seen_messages[-1]
     final_payload = __import__("json").loads(final_context[-1].text)
-    assert {tool["call_id"] for tool in final_payload["tools"] if tool["executed"]} == {"one", "two"}
+    assert {tool["call_id"] for tool in final_payload["tools"] if tool["executed"]} == {"one", "page", "two"}
     assert all(tool["content"]["results"][0]["url"] == url for tool in final_payload["tools"] if tool["executed"])
     assert "original forecast task" in str(final_context)
     await sink.flush()
@@ -520,6 +552,8 @@ async def test_exhausted_search_refinement_retains_real_source_evidence(runtime)
 
 @pytest.mark.asyncio
 async def test_actual_framework_binds_none_after_initial_search_slots(runtime):
+    context, _, _, _ = runtime
+
     class ChoiceModel(ScriptedModel):
         choices: list = Field(default_factory=list)
 
@@ -537,15 +571,34 @@ async def test_actual_framework_binds_none_after_initial_search_slots(runtime):
         """Return verified source data through the real framework."""
         return {"results": [{"url": "https://example.test/source", "content": "facts"}]}
 
+    context.policy = context.policy.model_copy(
+        update={"search": context.policy.search.model_copy(update={"page_reads_per_task": 1})}
+    )
+
+    @tool
+    def read_web_page(url: str, query: str):
+        """Return a source paragraph before a justified follow-up."""
+        return {"results": [{"url": url, "content": "facts; precise date is unavailable"}]}
+
+    follow_up = dict(
+        known_information="The overview facts are confirmed",
+        missing_information="Precise date is still necessary",
+        insufficiency="The searched source and its paragraph omit the required date",
+        search_target="Find a dated source for the exact same object",
+        sources=[
+            dict(
+                source_id=source_id("https://example.test/source"),
+                relevant=True,
+                reason="This is the relevant overview source without a precise date",
+            )
+        ],
+    )
+
     child = ChoiceModel(
         responses=[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "internet_search", "args": {"query": "one"}, "id": "one", "type": "tool_call"},
-                    {"name": "internet_search", "args": {"query": "two"}, "id": "two", "type": "tool_call"},
-                ],
-            ),
+            call("internet_search", {"query": "first"}, "one"),
+            call("read_web_page", {"url": "https://example.test/source", "query": "missing precise date"}, "page"),
+            call("internet_search", {"query": "second", "follow_up": follow_up}, "two"),
             AIMessage(content="facts https://example.test/source"),
         ]
     )
@@ -553,8 +606,8 @@ async def test_actual_framework_binds_none_after_initial_search_slots(runtime):
         responses=[call("task", {"subagent_type": "search", "description": "lookup"}), AIMessage(content="done")]
     )
     settings = ReviewConfig(enabled=True, required_tools=("internet_search",), require_sources=True)
-    await build(SubagentRegistry([spec(settings, (internet_search,))]), parent, {"search": child}).ainvoke(
-        {"messages": [("user", "lookup")]}
-    )
+    await build(
+        SubagentRegistry([spec(settings, (internet_search, read_web_page))]), parent, {"search": child}
+    ).ainvoke({"messages": [("user", "lookup")]})
     assert child.choices[0] == {"type": "function", "function": {"name": "internet_search"}}
     assert child.choices[-1] == "none"

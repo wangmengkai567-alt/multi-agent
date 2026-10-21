@@ -223,7 +223,7 @@ async def test_child_is_explicitly_scoped_and_parent_metadata_is_refreshed(runti
     agent = create_deep_agent(
         model=parent,
         backend=run_backend,
-        subagents=build_subagents(SubagentRegistry([spec]), parent, models={"db": child}),
+        subagents=build_subagents(SubagentRegistry([spec]), parent, review_model=parent, models={"db": child}),
         middleware=[ProjectSkillsMiddleware(), HookToolMiddleware(allowed_targets=("db",), managed_delegation=True)],
     )
     await agent.ainvoke({"messages": [("user", "analyze")]})
@@ -418,7 +418,7 @@ async def test_new_skills_reach_scoped_expert_and_record_resources(runtime, targ
     agent = create_deep_agent(
         model=parent,
         backend=run_backend,
-        subagents=build_subagents(SubagentRegistry([spec]), parent, models={target: child}),
+        subagents=build_subagents(SubagentRegistry([spec]), parent, review_model=parent, models={target: child}),
         middleware=[ProjectSkillsMiddleware(), HookToolMiddleware(allowed_targets=(target,), managed_delegation=True)],
     )
     await agent.ainvoke({"messages": [("user", "分析材料")]})

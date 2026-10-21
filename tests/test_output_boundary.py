@@ -36,7 +36,26 @@ def test_empty_successful_search_can_use_reserved_content_refinement(context):
         scope = search_allowance.get()
         assert scope is not None
         request = SimpleNamespace(
-            tool_call={"name": "internet_search", "id": f"query-{number}", "args": {"query": "topic"}}
+            tool_call={
+                "name": "internet_search",
+                "id": f"query-{number}",
+                "args": {
+                    "query": "topic" if number == 0 else "topic precise official source",
+                    **(
+                        {
+                            "follow_up": dict(
+                                known_information="The first query returned no sources",
+                                missing_information="The requested fact has no source yet",
+                                insufficiency="The actual previous results list was empty",
+                                search_target="Use a more precise query to locate an official source",
+                                sources=[],
+                            )
+                        }
+                        if number
+                        else {}
+                    ),
+                },
+            }
         )
 
         def provider(request):
