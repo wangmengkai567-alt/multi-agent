@@ -91,7 +91,12 @@ def internet_search(
     max_results: int = 3,
     include_raw_content: bool = False,
     include_domains: DomainList | None = None,
-    follow_up: SearchFollowUp | None = None,
+    follow_up: Annotated[
+        SearchFollowUp | None,
+        Field(
+            description="First search: null. Subsequent searches: a JSON object with the declared fields, never a JSON-encoded string. Do not stringify this nested object."
+        ),
+    ] = None,
 ):
     """Search public sources; start with one query. Every subsequent search requires follow_up grounded in the previous call: confirmed information, a necessary missing fact, why existing sources cannot answer it, and a targeted search goal. Assess key listed source_ids; explain every source only when claiming all previous results are irrelevant; read key relevant pages before searching again. The runtime binds the previous search automatically; do not supply tool-call IDs. For official sources use include_domains, and site: plus the required version path."""
     if include_domains is not None and (
@@ -160,7 +165,15 @@ def validate_page_request(url, query):
 
 
 @tool(response_format="content_and_artifact")
-def read_web_page(url: str, query: str):
+def read_web_page(
+    url: Annotated[
+        str,
+        Field(
+            description="Required argument named url, not source_id. Copy read_request.url or a discovered full URL."
+        ),
+    ],
+    query: Annotated[str, Field(description="The specific missing facts to read from this page.")],
+):
     """Read only sections needed for query. Pass a returned source_id as url to preserve the exact discovered address. A full URL is used for user-provided pages or a specific new version path on an observed origin. This returns relevant excerpts, not a guarantee of full-page reading. Error/login pages are unavailable evidence."""
     url = validate_page_request(url, query)
     load_dotenv()

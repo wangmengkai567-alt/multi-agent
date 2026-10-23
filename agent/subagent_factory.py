@@ -43,7 +43,11 @@ def build_subagents(registry, sub_model, *, review_model, models=None, hooks=Non
             tools=list(spec.tools),
             system_prompt=prompt,
             middleware=[
-                *([SearchExecutionMiddleware(prompt)] if spec.agent_id == "search" else []),
+                *(
+                    [SearchExecutionMiddleware(prompt, grounded_report=spec.review_config.grounded_report)]
+                    if spec.agent_id == "search"
+                    else []
+                ),
                 *([ProjectSkillsMiddleware(spec.allowed_skill_ids)] if spec.allowed_skill_ids else []),
                 FilesystemMiddleware(backend=run_backend),
                 SummarizationMiddleware(

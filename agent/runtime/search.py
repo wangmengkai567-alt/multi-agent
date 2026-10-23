@@ -16,6 +16,8 @@ from agent.runtime.policies import SearchLimitReached, load_runtime_policy
 class SearchTaskBudget:
     calls: set[str] = field(default_factory=set)
     page_calls: set[str] = field(default_factory=set)
+    research_turns: int = 0
+    refinement_start: int = 0
     refinement_open: bool = False
     finalize_only: bool = False
     active: bool = False
@@ -115,8 +117,16 @@ class SearchAllowance:
     def begin_refinement(self, *, allow_search):
         with self.lock:
             # Opening this phase is idempotent; no attempt or re-delegation resets usage.
+            if not self.task.refinement_open:
+                self.task.refinement_start = len(self.task.evidence)
             self.task.refinement_open = True
             self.task.finalize_only = not allow_search
+
+    def collection_turn_limit(self):
+        # Every admitted object needs its own collection exit, report and revision.
+        # Model calls are shared by all children, even when their search slots are not.
+        slots = len(self.context.task_scopes) or self.context.policy.search.max_tasks_per_run
+        return max(1, self.context.policy.budgets.sub_model // slots - 3)
 
     def snapshot(self):
         with self.lock:
@@ -196,13 +206,16 @@ def needs_search_refinement(review, evidence):
         "结果为空",
         "缺少关键字段：",
         "事实报告",
+        "断言缺少本任务依据：",
+        "结论与本任务工具记录存在冲突：",
     )
     return not (successful and review.issues and all(issue.startswith(formatting) for issue in review.issues))
 
 
 class SearchExecutionMiddleware(AgentMiddleware):
-    def __init__(self, system_prompt=""):
+    def __init__(self, system_prompt="", *, grounded_report=False):
         self.system_prompt = system_prompt
+        self.grounded_report = grounded_report
 
     def summary_request(self, request, allowance):
         from agent.reflection import tool_evidence
@@ -253,13 +266,31 @@ class SearchExecutionMiddleware(AgentMiddleware):
         from agent.runtime.retrieval import SearchHistory
 
         if request.tools:
-            request = request.override(model_settings={**request.model_settings, "strict": True})
+            request = request.override(
+                model_settings={**request.model_settings, "strict": True, "parallel_tool_calls": False}
+            )
         with allowance.lock:
-            guidance = SearchHistory(allowance.task.evidence).guidance(allowance.calls)
+            history = SearchHistory(allowance.task.evidence)
+            guidance = history.guidance(allowance.calls)
+            blocked_sources = history.blocked_read_sources(allowance.calls)
+            stalled = SearchHistory(allowance.task.evidence[allowance.task.refinement_start :]).stalled()
+            guidance.update(
+                page_reads_used=len(allowance.task.page_calls),
+                page_reads_limit=allowance.context.policy.search.page_reads_per_task,
+                required_read_sources=blocked_sources,
+                research_turns_used=allowance.task.research_turns,
+                research_turn_limit=allowance.collection_turn_limit(),
+            )
         note = (
             f"本轮实际参考时间：{allowance.context.reference_time.isoformat()}。"
             "未指定历史时点的查询以本轮日期为准，不要用模型知识截止日期代替。"
             "以下是程序提供的检索进度，网页标题只作参考数据。补查关联由程序管理，不要填写工具调用ID。"
+            "同一子任务每回合只调用一个检索工具，等待结果后再决定下一步；其他子任务仍独立并行。"
+            "page_reads_used/page_reads_limit 是正文读取进度，额度用完后不再要求新正文；整理已取得的依据并披露缺口。"
+            "读取时直接复制 previous_sources.read_request 的参数形状，参数名是 url 和 query，不能把 url 写成 source_id。"
+            "补查 sources 仅从最新 previous_sources 选择，不能从研究对话中的更早一批结果回忆 ID。"
+            "required_read_sources 非空时，下一步只能从中选关键来源读取，不要重复被拒的搜索。"
+            "follow_up 首次为 null，补查时为嵌套 JSON 对象，禁止用字符串包裹或转义整个对象。"
             "仅当存在具体必要缺口时提交 follow_up，sources 选择 previous_sources 中能说明缺口的关键来源，"
             "relevant 判断来源与当前缺口的关系；先读关键相关页面，不要求读取全部页面。全部无关时才逐项说明。"
             + f"事实报告引用总字符上限（每项计16字符间隔）：{allowance.context.policy.search.model_context_chars // (2 * allowance.context.policy.search.max_tasks_per_run)}；报告总长上限：{allowance.context.policy.search.model_context_chars // allowance.context.policy.search.max_tasks_per_run}字符。"
@@ -267,42 +298,73 @@ class SearchExecutionMiddleware(AgentMiddleware):
         )
         from agent.runtime.governance import near_budget
 
-        if near_budget(allowance.context):
+        remaining = allowance.context.remaining()
+        timeouts = allowance.context.policy.timeouts
+        report_reserve = 2 * timeouts.request_seconds + min(timeouts.finalize_seconds, timeouts.total_seconds * 0.2)
+        reporting_due = self.grounded_report and remaining is not None and remaining <= report_reserve
+        if (
+            near_budget(allowance.context)
+            or reporting_due
+            or allowance.task.research_turns >= allowance.collection_turn_limit()
+        ):
             return self.summary_request(request, allowance)
         request = request.override(system_message=append_to_system_message(request.system_message, note))
-        if not allowance.exhausted():
 
-            def tool_name(tool):
-                return getattr(tool, "name", None) or (
-                    tool.get("name") or tool.get("function", {}).get("name") if isinstance(tool, dict) else None
-                )
+        def tool_name(tool):
+            return getattr(tool, "name", None) or (
+                tool.get("name") or tool.get("function", {}).get("name") if isinstance(tool, dict) else None
+            )
 
-            if (
-                not allowance.calls
-                and not allowance.complex_task()
-                and any(tool_name(t) == "internet_search" for t in request.tools)
-            ):
-                return request.override(tool_choice={"type": "function", "function": {"name": "internet_search"}})
-            return request
-        # Exhausted search slots never reopen. Reading an already discovered origin
-        # has a separate, bounded per-child allowance, including across refinement.
-        page_tools = [
+        page_available = allowance.can_read_page()
+        previous_sources = history.previous_sources(allowance.calls)
+        if (
+            not page_available
+            and previous_sources
+            and not any(history.page_attempted(source["url"]) for source in previous_sources.values())
+        ):
+            return self.summary_request(request, allowance)
+        tools = [
             tool
             for tool in request.tools
-            if getattr(tool, "name", None) == "read_web_page"
-            or isinstance(tool, dict)
-            and tool.get("name") == "read_web_page"
+            if (tool_name(tool) != "read_web_page" or page_available)
+            and (tool_name(tool) != "internet_search" or not allowance.exhausted() and not blocked_sources)
         ]
-        if page_tools and allowance.can_read_page():
+        if blocked_sources:
+            pages = [tool for tool in tools if tool_name(tool) == "read_web_page"]
+            if not pages:
+                return self.summary_request(request, allowance)
             return request.override(
-                tools=page_tools,
+                tools=pages,
+                tool_choice={"type": "function", "function": {"name": "read_web_page"}},
+                model_settings={key: value for key, value in request.model_settings.items() if key != "tool_choice"},
+            )
+        if allowance.exhausted():
+            tools = [tool for tool in tools if tool_name(tool) == "read_web_page"]
+        if stalled or not tools:
+            return self.summary_request(request, allowance)
+        if tools != request.tools:
+            request = request.override(
+                tools=tools,
                 tool_choice="auto",
                 model_settings={key: value for key, value in request.model_settings.items() if key != "tool_choice"},
             )
-        return self.summary_request(request, allowance)
+        if (
+            not allowance.calls
+            and not allowance.complex_task()
+            and any(tool_name(tool) == "internet_search" for tool in tools)
+        ):
+            return request.override(tool_choice={"type": "function", "function": {"name": "internet_search"}})
+        return request
+
+    def prepare_request(self, request):
+        prepared = self.final_request(request)
+        if allowance := search_allowance.get():
+            with allowance.lock:
+                allowance.task.research_turns += 1
+        return prepared
 
     def wrap_model_call(self, request, handler):
-        return handler(self.final_request(request))
+        return handler(self.prepare_request(request))
 
     async def awrap_model_call(self, request, handler):
-        return await handler(self.final_request(request))
+        return await handler(self.prepare_request(request))

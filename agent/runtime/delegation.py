@@ -305,10 +305,18 @@ class DelegationRunnable(Runnable):
             return None
         from agent.runtime.governance import near_budget
 
-        if near_budget(context):
-            return None
-        reserve_calls("retry")
         allow_search = needs_search_refinement(review, evidence)
+        report_only = self.spec.review_config.grounded_report and not allow_search
+        if near_budget(context) and not report_only:
+            return None
+        if report_only:
+            remaining = context.remaining()
+            reserve = min(context.policy.timeouts.finalize_seconds, context.policy.timeouts.total_seconds * 0.2)
+            if remaining is not None and remaining <= reserve:
+                return None
+        # A report correction uses its reserved slot, not a reopened research loop.
+        # Hard model/retry/total caps still apply at the actual invocation boundary.
+        reserve_calls("retry")
         if self.spec.agent_id == "search":
             SearchAllowance(context, call.search_task_key).begin_refinement(allow_search=allow_search)
         self._review_event(context, call, review, attempt + 1, "subagent_refinement")

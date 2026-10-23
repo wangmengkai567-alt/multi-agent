@@ -181,7 +181,9 @@ function isSearchControl(data) {
 
 function describeEvent(event) {
   const d = event.data || {}, who = d.assistant_name || actors[event.actor] || '助手';
-  if (d.error_category === 'search_prerequisite') return '此补查请求未执行（需先评估已有结果并读取关键来源）';
+  if (event.event === 'model_request') return ({research:'检索决策（模型）',report_generation:'事实报告生成（模型）',
+    report_revision:'事实报告修订（模型）',semantic_review:'证据审核（模型）',coordination:'任务协调（模型）'}[d.phase] || '模型请求');
+  if (d.error_category === 'search_prerequisite') return '此补查请求未执行：' + (d.error || '需先评估已有结果并读取关键来源');
   if (d.error_category === 'search_limit') return event.event === 'on_error'
     ? '检索额度限制：已拦截新的请求，已获准请求仍会完成'
     : '此检索请求未执行（检索额度限制）';
@@ -305,8 +307,11 @@ function renderCallGroups(session, openDetails = new Set()) {
       const caption = name ? `${toolNames[name] || name} #${++toolNumber} · ${last.event==='after_tool' && last.status==='completed'?'已完成':describeEvent(last)}` : describeEvent(last);
       const budget = [...events].reverse().find(e=>e.data?.search_budget)?.data.search_budget;
       const quota = budget ? ` · 本任务 ${budget.task_used}/${budget.task_limit}，整轮 ${budget.run_used}/${budget.run_limit}` : '';
-      const start = new Date(events[0].timestamp), end = new Date(last.timestamp);
-      const elapsed = Number.isFinite(end-start) ? ` · ${((end-start)/1000).toFixed(1)} 秒` : '';
+      const end = new Date(last.timestamp);
+      const measured = [...events].reverse().find(e => Number.isFinite(e.data?.elapsed_ms) &&
+        (e.event === 'model_request' || ['after_tool','after_subagent'].includes(e.event)));
+      const elapsedMs = measured?.data.elapsed_ms;
+      const elapsed = Number.isFinite(elapsedMs) ? ` · ${(elapsedMs/1000).toFixed(1)} 秒` : '';
       return `<div class="log-entry" data-call="${escapeHtml(last.call_id)}"><div class="log-dot ${failed?'e':'a'}"></div><div class="log-body">
         <span class="log-msg">${escapeHtml(caption + quota + elapsed)}</span>
         <div class="log-time">${escapeHtml(end.toLocaleTimeString('zh-CN',{hour12:false}))}</div>

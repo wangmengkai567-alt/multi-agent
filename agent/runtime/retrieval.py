@@ -15,7 +15,11 @@ Explanation = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 class SourceAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    source_id: str = Field(min_length=1, max_length=200)
+    source_id: str = Field(
+        min_length=1,
+        max_length=200,
+        description="Copy the exact previous_sources.source_id. This assessment field is source_id, never url.",
+    )
     relevant: bool
     reason: Explanation
 
@@ -100,6 +104,34 @@ class SearchHistory:
             if row.get("url")
         }
 
+    def blocked_read_sources(self, reserved):
+        """A rejected follow-up must move to its missing read, not repeat the search."""
+        latest = next(
+            (item for item in reversed(self.evidence) if item["name"] in ("internet_search", "read_web_page")),
+            None,
+        )
+        if not latest or latest.get("error_category") != "search_prerequisite":
+            return []
+        follow_up = latest.get("request_parameters", {}).get("follow_up") or {}
+        previous = self.previous_sources(reserved)
+        relevant = [
+            previous[item["source_id"]]
+            for item in follow_up.get("sources", [])
+            if item.get("relevant") and item.get("source_id") in previous
+        ]
+        if any(self.page_attempted(row["url"]) for row in relevant):
+            return []
+        return [source_key(row["url"]) for row in relevant]
+
+    def stalled(self):
+        """Stop consecutive rejected requests with no intervening retrieval progress."""
+        recent = [item for item in self.evidence if item["name"] in ("internet_search", "read_web_page")][-2:]
+        return len(recent) == 2 and all(
+            not item.get("executed")
+            and item.get("error_category") in ("search_prerequisite", "search_limit", "invalid_argument")
+            for item in recent
+        )
+
     def guidance(self, reserved):
         return {
             "follow_up_required": bool(reserved),
@@ -108,6 +140,8 @@ class SearchHistory:
                 {
                     "source_id": key,
                     "title": row.get("title", "")[:160],
+                    "url": row["url"],
+                    "read_request": {"url": key, "query": row.get("title", "")[:160]},
                     "read_attempted": self.page_attempted(row["url"]),
                 }
                 for key, row in self.previous_sources(reserved).items()

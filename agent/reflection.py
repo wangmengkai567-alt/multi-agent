@@ -197,8 +197,17 @@ def rule_review(text, evidence, settings):
             and item.get("error_category") == "invalid_argument"
             and (
                 last_success.get(item["name"], -1) > index
-                or item["name"] not in settings.required_tools
-                and any(name in last_success for name in settings.required_tools)
+                or (
+                    item["name"] not in settings.required_tools
+                    or settings.grounded_report
+                    and item["name"] in ("internet_search", "read_web_page")
+                )
+                and (
+                    any(name in last_success for name in settings.required_tools)
+                    or not settings.required_tools
+                    and item["name"] in ("internet_search", "read_web_page")
+                    and bool(source_urls(evidence))
+                )
             )
         )
     ]
@@ -557,6 +566,32 @@ class ResultReviewer:
                         "",
                         *contract.requirement_quotes(),
                     ]
+                # Match the existing contract at generation time, before parsing.
+                finding = schema["$defs"]["Finding"]
+                variants = []
+                for kind in ("missing_requirement", "unsupported_claim", "contradicted_claim"):
+                    properties = {key: dict(value) for key, value in finding["properties"].items()}
+                    properties["kind"] = {"type": "string", "enum": [kind]}
+                    empty = (
+                        ("claim_quote", "evidence_call_id", "evidence_quote")
+                        if kind == "missing_requirement"
+                        else ("requirement_quote", "evidence_call_id", "evidence_quote")
+                        if kind == "unsupported_claim"
+                        else ("requirement_quote",)
+                    )
+                    for field in empty:
+                        properties[field] = {"type": "string", "enum": [""]}
+                    required_text = (
+                        ("requirement_quote", "scope_quote")
+                        if kind == "missing_requirement"
+                        else ("claim_quote",)
+                        if kind == "unsupported_claim"
+                        else ("claim_quote", "evidence_call_id", "evidence_quote")
+                    )
+                    for field in required_text:
+                        properties[field]["minLength"] = 1
+                    variants.append({**finding, "properties": properties})
+                schema["$defs"]["Finding"] = {**finding, "anyOf": variants}
                 for value in schema["properties"].values():
                     value.pop("default", None)
                 kwargs["response_format"] = {

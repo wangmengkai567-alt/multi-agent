@@ -13,12 +13,16 @@ from agent.runtime.hooks import HookRejected
 
 class ResearchScope(BaseModel):
     label: str = Field(min_length=1, max_length=100)
-    description: str = Field(min_length=1, max_length=8000)
+    description: str = Field(
+        min_length=1,
+        max_length=8000,
+        description="当前对象的必要事实；一般购买对比只分派一个明确容量的售价与少量核心使用差异，未指定的其他容量及渠道价格标为可选。不要另建横向综合或购买推荐任务。",
+    )
 
 
 @tool
 def plan_research(tasks: list[ResearchScope]) -> str:
-    """Register ALL independent research objects once, before delegating. Returns immutable task IDs. Revisions reuse IDs; no second plan can reopen completed work."""
+    """Register ALL independent research objects once, before delegating. One task per object; comparison and recommendations are synthesized by the main assistant, never an extra search task. Returns immutable task IDs. Revisions reuse IDs; no second plan can reopen completed work."""
     context = get_run_context()
     if context is None or not tasks:
         raise HookRejected("需要运行上下文及非空分工计划")
