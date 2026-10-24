@@ -3,8 +3,10 @@
 import asyncio
 import re
 from contextvars import ContextVar
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from types import MappingProxyType
 from typing import Annotated, NotRequired
 
 import yaml
@@ -18,14 +20,30 @@ from agent.runtime.experts import append_system
 from agent.runtime.policies import PROJECT_ROOT, MissingConfiguration, policy_for_run
 from utils.secure_paths import PathDenied, confined_path
 
-SKILL_FILES = {
-    "ecommerce-analysis": ("SKILL.md", "references/metrics.md"),
-    "report-writing": ("SKILL.md", "references/template.md"),
-    "research": ("SKILL.md", "references/source-review.md"),
-    "document-analysis": ("SKILL.md", "references/evidence-map.md"),
-    "data-analysis": ("SKILL.md", "references/quality-checks.md"),
-}
-SKILL_IDS = tuple(SKILL_FILES)
+
+@dataclass(frozen=True)
+class SkillDefinition:
+    label: str
+    files: tuple[str, ...]
+
+
+SKILL_DEFINITIONS = MappingProxyType(
+    {
+        "ecommerce-analysis": SkillDefinition("运营分析", ("SKILL.md", "references/metrics.md")),
+        "report-writing": SkillDefinition("报告写作", ("SKILL.md", "references/template.md")),
+        "research": SkillDefinition("信息调研", ("SKILL.md", "references/source-review.md")),
+        "document-analysis": SkillDefinition("文档分析", ("SKILL.md", "references/evidence-map.md")),
+        "data-analysis": SkillDefinition("数据分析", ("SKILL.md", "references/quality-checks.md")),
+    }
+)
+SKILL_FILES = MappingProxyType({name: definition.files for name, definition in SKILL_DEFINITIONS.items()})
+SKILL_IDS = tuple(SKILL_DEFINITIONS)
+BUSINESS_REQUIRED_SKILLS = MappingProxyType(
+    {
+        "ordinary": (),
+        "internal_external": ("ecommerce-analysis",),
+    }
+)
 skill_scope = ContextVar("skill_scope", default=("main", SKILL_IDS))
 SKILL_PROMPT = """
 ## 可用业务 Skill
@@ -47,6 +65,21 @@ def validate_skill_ids(values):
     if len(set(values)) != len(values):
         raise ValueError("Duplicate Skill ID")
     return values
+
+
+def required_skill_ids(business_mode):
+    if business_mode not in BUSINESS_REQUIRED_SKILLS:
+        raise ValueError("Unknown business mode")
+    return validate_skill_ids(BUSINESS_REQUIRED_SKILLS[business_mode])
+
+
+def skill_catalog():
+    """Public selection metadata only; instruction bodies remain scoped by the runtime."""
+    return {
+        "skills": [{"id": name, "label": definition.label} for name, definition in SKILL_DEFINITIONS.items()],
+        "max_selected": len(SKILL_IDS),
+        "required_skills": {mode: list(required_skill_ids(mode)) for mode in BUSINESS_REQUIRED_SKILLS},
+    }
 
 
 def skill_root():

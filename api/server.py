@@ -29,7 +29,7 @@ from agent.runtime.events import EventSink  # noqa: E402
 from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
 from agent.runtime.jobs import JobService  # noqa: E402
 from agent.runtime.policies import load_runtime_policy  # noqa: E402
-from agent.runtime.skills import validate_skill_ids  # noqa: E402
+from agent.runtime.skills import SKILL_IDS, required_skill_ids, skill_catalog, validate_skill_ids  # noqa: E402
 from agent.runtime.workflows import finalize_answer  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
@@ -272,9 +272,14 @@ app.add_middleware(
 )
 
 
+@app.get("/api/skills")
+async def get_skills():
+    return skill_catalog()
+
+
 class TaskRequest(BaseModel):
     query: str = Field(min_length=1)
-    skill_ids: list[StrictStr] | None = Field(default=None, max_length=2)
+    skill_ids: list[StrictStr] | None = Field(default=None, max_length=len(SKILL_IDS))
     business_mode: Literal["ordinary", "internal_external"] = "ordinary"
     execution_mode: Literal["auto", "foreground", "background"] = "auto"
     required_sources: list[Literal["db", "search"]] = Field(default_factory=list, max_length=2)
@@ -304,8 +309,9 @@ class TaskRequest(BaseModel):
     def explicit_workflow(self):
         if self.execution_mode == "background" and (self.business_mode != "ordinary" or self.required_uploads):
             raise ValueError("后台公开调研不接收内部业务流程或上传文件；请使用前台执行")
-        if self.business_mode == "internal_external" and "ecommerce-analysis" not in (self.skill_ids or []):
-            raise ValueError("internal_external requires explicit ecommerce-analysis selection")
+        missing = set(required_skill_ids(self.business_mode)) - set(self.skill_ids or ())
+        if missing:
+            raise ValueError(f"{self.business_mode} requires explicit skill selection: {', '.join(sorted(missing))}")
         return self
 
 

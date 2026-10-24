@@ -9,8 +9,8 @@ const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
   pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'已完成，覆盖待确认'};
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手'};
-const skills = {'ecommerce-analysis':'运营分析', 'report-writing':'报告写作',
-  'research':'信息调研', 'document-analysis':'文档分析', 'data-analysis':'数据分析'};
+const skills = Object.create(null);
+let skillCatalog = null;
 const verdicts = {partial_passed:'有效事实已保留', passed_with_gap:'事实通过，仍有缺口', partial_passed_with_gap:'部分事实通过，仍有缺口', passed_coverage_unknown:'事实通过，覆盖待确认', partial_coverage_unknown:'部分事实通过，覆盖待确认', passed:'通过', insufficient:'信息不足', dependency_unavailable:'依赖不可用',
   check_incomplete:'检查未完成', tool_failed:'工具失败', budget_exhausted:'次数耗尽', not_checked:'未检查'};
 
@@ -51,6 +51,64 @@ async function request(url, options) {
     throw Object.assign(new Error(detail), {status:response.status, data});
   }
   return data;
+}
+function requiredSkillsForMode() {
+  const mode = $('#modeSelect').value;
+  if (!Object.hasOwn(skillCatalog.required_skills, mode)) throw new Error('当前业务模式不在服务端技能目录中');
+  return new Set(skillCatalog.required_skills[mode]);
+}
+function applyRequiredSkills() {
+  if (skillCatalog === null) return;
+  const required = requiredSkillsForMode();
+  for (const input of $('#skillChoices').querySelectorAll('input[name="skill_id"]')) {
+    input.disabled = required.has(input.value);
+    input.title = input.disabled ? '当前业务模式要求选择此技能' : '';
+    if (input.disabled) input.checked = true;
+  }
+}
+async function loadSkillCatalog() {
+  const retry = $('#retrySkillsBtn'), choices = $('#skillChoices');
+  retry.disabled = true; $('#sendBtn').disabled = true;
+  choices.setAttribute('aria-busy', 'true');
+  try {
+    const catalog = await request('/api/skills');
+    if (!catalog || !Array.isArray(catalog.skills) || catalog.skills.length === 0 ||
+        catalog.max_selected !== catalog.skills.length || !catalog.required_skills ||
+        typeof catalog.required_skills !== 'object' || Array.isArray(catalog.required_skills)) {
+      throw new Error('服务端技能目录格式不符合约定');
+    }
+    const ids = new Set();
+    for (const item of catalog.skills) {
+      if (!item || typeof item.id !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.id) ||
+          ids.has(item.id) || typeof item.label !== 'string' || !item.label.trim()) {
+        throw new Error('服务端技能目录包含无效或重复的技能');
+      }
+      ids.add(item.id);
+    }
+    for (const option of $('#modeSelect').options) {
+      if (!Object.hasOwn(catalog.required_skills, option.value)) throw new Error('服务端缺少当前业务模式的技能要求');
+    }
+    for (const required of Object.values(catalog.required_skills)) {
+      if (!Array.isArray(required) || new Set(required).size !== required.length ||
+          required.some(id => !ids.has(id))) throw new Error('服务端业务模式技能要求不符合约定');
+    }
+    choices.innerHTML = catalog.skills.map(item => `<label><input type="checkbox" name="skill_id"
+      value="${escapeHtml(item.id)}"> ${escapeHtml(item.label)} Skill</label>`).join('');
+    for (const item of catalog.skills) skills[item.id] = item.label;
+    skillCatalog = catalog;
+    applyRequiredSkills();
+    retry.hidden = true; $('#sendBtn').disabled = submitting; notify('');
+  } catch (error) {
+    skillCatalog = null;
+    choices.textContent = '技能目录不可用';
+    retry.hidden = false;
+    notify('技能目录加载失败：' + error.message);
+    return;
+  } finally {
+    retry.disabled = false;
+    choices.setAttribute('aria-busy', 'false');
+  }
+  renderLog(sessions[activeSessionId]);
 }
 function createSession(threadId, query, runId, select = true) {
   if (sessions[runId]) { if (select) switchSession(runId); return sessions[runId]; }
@@ -182,7 +240,7 @@ function describeEvent(event) {
     ? '检索额度限制：已拦截新的请求，已获准请求仍会完成'
     : '此检索请求未执行（检索额度限制）';
   if (event.event === 'review_repair') return '检查输出格式不符合约定：仅重试检查，复用已有依据';
-  if (event.event === 'skill_state') return `Skill ${skills[d.skill_id] || '任务说明'}：` +
+  if (event.event === 'skill_state') return `Skill ${skills[d.skill_id] || d.skill_id}：` +
     ({selected:'已选择', loaded:'正文已读取', resource_loaded:'参考资源已读取'}[event.status] || event.status);
   if (event.event === 'answer_validation') return '最终答复检查：' + (event.status === 'partial' ? '有限结果' : verdicts[event.status] || event.status) + (d.issues?.length ? '；' + d.issues.join('；') : '');
   if (event.event === 'subagent_review') return `${who}结果检查：${verdicts[event.status] || event.status}` +
@@ -370,18 +428,14 @@ function renderJobs(session) {
 async function sendTask() {
   const input = $('#queryInput'), query = input.value.trim();
   if (!query || submitting) return;
+  if (skillCatalog === null) { notify('请先成功加载技能目录再提交任务'); return; }
   submitting = true; $('#sendBtn').disabled = true; notify('正在提交…');
-  const skillIds = [];
-  if ($('#ecommerceSkill').checked) skillIds.push('ecommerce-analysis');
-  if ($('#reportSkill').checked) skillIds.push('report-writing');
-  if ($('#researchSkill').checked) skillIds.push('research');
-  if ($('#documentSkill').checked) skillIds.push('document-analysis');
-  if ($('#dataSkill').checked) skillIds.push('data-analysis');
-  const mode = $('#modeSelect').value;
-  if (mode === 'internal_external' && !skillIds.includes('ecommerce-analysis')) {
-    skillIds.push('ecommerce-analysis'); $('#ecommerceSkill').checked = true;
-  }
   try {
+    applyRequiredSkills();
+    const skillIds = Array.from($('#skillChoices').querySelectorAll('input[name="skill_id"]:checked'), input => input.value);
+    if (skillIds.length > skillCatalog.max_selected || new Set(skillIds).size !== skillIds.length ||
+        skillIds.some(id => !Object.hasOwn(skills, id))) throw new Error('技能选择不符合服务端目录');
+    const mode = $('#modeSelect').value;
     const data = await request('/api/task', {method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({query, execution_mode:$('#executionSelect').value || 'auto', skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
     const session = createSession(data.thread_id, query, data.run_id);
@@ -393,7 +447,7 @@ async function sendTask() {
       notify('该会话忙碌，已显示正在执行的任务。请等待、取消，或选择新会话。');
       await syncSession(session);
     } else notify('提交失败：' + error.message);
-  } finally { submitting = false; $('#sendBtn').disabled = false; }
+  } finally { submitting = false; $('#sendBtn').disabled = skillCatalog === null; }
 }
 async function cancelRun() {
   const session = sessions[activeSessionId];
@@ -449,11 +503,10 @@ $('#runSummary').addEventListener('click', e => {
   if (e.target.id === 'cancelBtn') cancelRun();
   if (e.target.id === 'syncBtn' && sessions[activeSessionId]) syncSession(sessions[activeSessionId]);
 });
-$('#modeSelect').addEventListener('change', () => {
-  if ($('#modeSelect').value === 'internal_external') $('#ecommerceSkill').checked = true;
-});
+$('#modeSelect').addEventListener('change', applyRequiredSkills);
+$('#retrySkillsBtn').addEventListener('click', () => loadSkillCatalog().catch(error => notify('技能选项更新失败：' + error.message)));
 $('#queryInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); } });
-restoreSessions();
+Promise.all([loadSkillCatalog(), restoreSessions()]).catch(error => notify('页面初始化失败：' + error.message));
 
 if ($('#jobArea')) $('#jobArea').addEventListener('click', async event => {
   const session = sessions[activeSessionId];

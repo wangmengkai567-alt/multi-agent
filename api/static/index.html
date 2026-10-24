@@ -171,6 +171,7 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
   .options { display:flex; gap:16px; flex-wrap:wrap; padding:10px 20px; font-size:13px; border-bottom:1px solid var(--border); }
+  .skill-choices { display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
   select { background:var(--panel); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:5px; }
   .notice { padding:8px 20px; color:var(--orange); min-height:34px; font-size:13px; }
   .run-summary { padding:12px 20px; border-bottom:1px solid var(--border); font-size:13px; }
@@ -211,7 +212,7 @@
 
 <div class="input-bar">
   <input id="queryInput" aria-label="分析问题" type="text" placeholder="输入问题，例如：明天武汉适合穿什么衣服？" />
-  <button class="btn btn-primary" id="sendBtn" onclick="sendTask()">▶ 发送新任务</button>
+  <button class="btn btn-primary" id="sendBtn" onclick="sendTask()" disabled>▶ 发送新任务</button>
   <button class="btn btn-ghost" onclick="closeAllSessions()">移除全部视图</button>
 </div>
 
@@ -219,11 +220,8 @@
   <label>发送到 <select id="threadSelect" aria-label="发送到"><option value="">新会话</option></select></label>
   <label>执行方式 <select id="executionSelect"><option value="auto">自动</option><option value="foreground">前台执行</option><option value="background">后台公开调研</option></select></label>
   <label>业务模式 <select id="modeSelect" aria-label="业务模式"><option value="ordinary">普通任务</option><option value="internal_external">内部数据与市场对照</option></select></label>
-  <label><input type="checkbox" id="ecommerceSkill"> 运营分析 Skill</label>
-  <label><input type="checkbox" id="reportSkill"> 报告写作 Skill</label>
-  <label><input type="checkbox" id="researchSkill"> 信息调研 Skill</label>
-  <label><input type="checkbox" id="documentSkill"> 文档分析 Skill</label>
-  <label><input type="checkbox" id="dataSkill"> 数据分析 Skill</label>
+  <div id="skillChoices" class="skill-choices" role="group" aria-label="业务技能" aria-busy="true">正在加载技能目录…</div>
+  <button class="btn btn-ghost" id="retrySkillsBtn" type="button" hidden>重试加载技能目录</button>
 </div>
 <div class="notice" id="notice" role="status" aria-live="polite"></div>
 
@@ -248,6 +246,6 @@
 <script src="/static/run-events.js"></script>
 <script src="/static/vendor/marked.umd.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/app.js?v=review-v7.1"></script>
+<script src="/static/app.js?v=skills-catalog-v1"></script>
 </body>
 </html>
