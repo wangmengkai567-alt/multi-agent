@@ -42,6 +42,9 @@ run_db_path = project_root / "data" / "runs.db"
 
 def _task_finished(task, run_id):
     app.state.agent_tasks.discard(task)
+    context = app.state.run_contexts.get(run_id)
+    if context and context.scheduler_ticket:
+        context.scheduler.gate("runs").cancel(context.scheduler_ticket)
     if app.state.run_tasks.get(run_id) is task:
         del app.state.run_tasks[run_id]
         app.state.run_contexts.pop(run_id, None)
@@ -79,6 +82,24 @@ async def _run_body(record, context):
 
 
 async def _execute_run(record, context):
+    if context.deadline is None:
+        duration = context.policy.timeouts.total_seconds
+        context.deadline = datetime.now(UTC) + timedelta(seconds=duration)
+        context.deadline_clock = monotonic() + duration
+    try:
+        async with context.scheduler.run_slot(context):
+            await _execute_run_inner(record, context)
+    except BaseException as error:
+        # Queue cancellation/expiry must durably settle a run that never started.
+        current = await context.event_sink.store.get(context.run_id)
+        if current and current["status"] == "queued":
+            status = context.stop_status or ("cancelled" if isinstance(error, asyncio.CancelledError) else "failed")
+            context.stop(status)
+            await context.event_sink.finish(context, status, error=str(error) or status)
+        raise
+
+
+async def _execute_run_inner(record, context):
     token = set_run_context(context)
     outcome = HookCall("main", context.run_id)
     answer = None
@@ -113,11 +134,6 @@ async def _execute_run(record, context):
     except Exception as exc:
         outcome.status, outcome.error = context.stop_status or "failed", exc
         error = str(exc) or type(exc).__name__
-        if context.search_tasks or context.approved_internal:
-            from agent.runtime.finalization import partial_search_answer
-
-            answer = partial_search_answer(context, "达到执行边界，部分必要资料未核实")
-            context.partial_answer = True
         pipeline.emit("on_error", outcome)
         raise
     finally:
@@ -146,6 +162,15 @@ async def lifespan(app):
     sink = None
     try:
         app.state.runtime_policy = load_runtime_policy()
+        from agent.runtime.scheduler import ServiceScheduler
+
+        scheduler = getattr(app.state, "scheduler", None)
+        limits = app.state.runtime_policy.scheduler
+        if scheduler is not None and scheduler.limits != limits:
+            if any(row["active"] or row["queued"] for row in scheduler.snapshot().values()):
+                raise RuntimeError("Cannot change scheduling limits while previous calls are still in flight")
+            scheduler = None
+        app.state.scheduler = scheduler if scheduler is not None else ServiceScheduler(limits)
         await initialize_agent()
         store = await RunStore.open(run_db_path)
         app.state.run_store = store
@@ -157,6 +182,7 @@ async def lifespan(app):
             run_db_path.with_name("jobs.db"),
             {"research": _research_job, "pdf_conversion": _conversion_job},
             output_dir / "background-jobs",
+            scheduler=app.state.scheduler,
         )
         await app.state.job_service.recover()
         updated_dir.mkdir(exist_ok=True)
@@ -199,6 +225,15 @@ async def lifespan(app):
 
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
+
+
+from agent.runtime.scheduler import QueueFull  # noqa: E402
+
+
+@app.exception_handler(QueueFull)
+async def scheduling_backpressure(request, error):
+    return JSONResponse(status_code=503, content={"status": "busy", "detail": str(error)})
+
 
 # 挂载输出目录，以便前端访问生成的静态文件
 # 假设输出目录位于项目根目录下的 output
@@ -308,6 +343,7 @@ async def run_task(request: TaskRequest):
             deadline_clock=monotonic() + app.state.runtime_policy.timeouts.total_seconds,
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
+            scheduler=app.state.scheduler,
             user_query=await resolve_user_goal(thread_id, request.query),
             latest_message=request.query,
             job_service=getattr(app.state, "job_service", None),
@@ -318,6 +354,14 @@ async def run_task(request: TaskRequest):
             required_sources=tuple(request.required_sources),
             required_uploads=tuple(request.required_uploads),
         )
+        for previous_id in reversed(await app.state.run_store.thread_runs(thread_id)):
+            previous = await app.state.run_store.get(previous_id)
+            if previous_id == run_id or previous["status"] != "completed" or not previous.get("answer"):
+                continue
+            events = await app.state.run_store.list_events(previous_id)
+            if any(e["event"] == "answer_validation" and e["status"] == "passed" for e in events):
+                context.previous_run_id, context.previous_answer = previous_id, previous["answer"]
+                break
         previous_jobs = (
             await app.state.job_service.list_thread(thread_id) if context.user_query != request.query else []
         )
@@ -365,7 +409,17 @@ async def run_task(request: TaskRequest):
             }
         app.state.run_contexts[run_id] = context
         record = dict(record, question=context.user_query)
-        task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}")
+        from agent.runtime.scheduler import QueueFull
+
+        try:
+            context.scheduler_ticket = app.state.scheduler.gate("runs").enqueue()
+        except QueueFull:
+            await context.event_sink.finish(context, "failed", error="Service execution queue is full")
+            app.state.run_contexts.pop(run_id, None)
+            return JSONResponse(status_code=503, content={"status": "busy", "run_id": run_id})
+        from agent.runtime.scheduler import detached_context
+
+        task = asyncio.create_task(_execute_run(record, context), name=f"run:{run_id}", context=detached_context())
         app.state.agent_tasks.add(task)
         app.state.run_tasks[run_id] = task
         task.add_done_callback(lambda completed: _task_finished(completed, run_id))
@@ -426,22 +480,60 @@ async def _research_job(job):
         policy=policy,
         user_query=job["payload"]["user_query"],
         background_job=True,
+        scheduler=app.state.scheduler,
+        research_scope_id=job["task_id"],
         enforce_plan=True,
         resume_graph=job["attempts"] > 0,
         job_checkpoint_path=directory / "job-checkpoint.json",
     )
     app.state.job_service.contexts[job["task_id"]] = context
-    restore_job_checkpoint(context)
-    # Shutdown interrupted execution may safely repeat read-only queries, with original usage retained.
-    for task in context.search_tasks.values():
-        if task.check_status == "not_checked":
-            task.closed_reason = None
+    checkpoint_loaded = False
     try:
+        restore_job_checkpoint(context)
+        checkpoint_loaded = True
+        from agent.runtime.review_state import ReviewState
+
+        for task in context.search_tasks.values():
+            if task.current_result_id:
+                persisted = await app.state.run_store.get_current_result(
+                    task.current_result_id, task.result_run_id, context.thread_id
+                )
+                if (
+                    persisted is None
+                    or ReviewState.from_record(persisted) != task.state
+                    or persisted["review"].get("accepted_report") != task.report
+                ):
+                    context.stop("interrupted")
+                    raise RunStopped("恢复结果与数据库权威快照不一致")
+            if not task.state.judged:
+                task.closed_reason = None
+        for item in context.approved_internal.values():
+            import copy
+
+            persisted = await app.state.run_store.get_current_result(
+                item["result_id"], item["result_run_id"], context.thread_id
+            )
+            if persisted is None or ReviewState.from_record(persisted) != ReviewState.model_validate(item["state"]):
+                context.stop("interrupted")
+                raise RunStopped("恢复内部结果与数据库当前快照不一致")
+            report = copy.deepcopy(persisted["review"].get("accepted_report"))
+            if report is None:
+                raise RunStopped("恢复内部结果缺少已审核报告")
+            mapping = {f["id"]: f"{item['task_id']}:{item['report_attempt']}:{f['id']}" for f in report["facts"]}
+            for fact in report["facts"]:
+                fact["id"] = mapping[fact["id"]]
+            for analysis in report["analysis"]:
+                analysis["fact_ids"] = [mapping[k] for k in analysis["fact_ids"]]
+            if report != item["report"]:
+                context.stop("interrupted")
+                raise RunStopped("恢复内部报告内容与数据库不一致")
         await _execute_run(dict(record, question=context.user_query), context)
     except Exception as error:
         from agent.runtime.jobs import JobFailed
 
         saved = await app.state.run_store.get(run_id)
+        if saved and saved["status"] in ("queued", "running"):
+            await context.event_sink.finish(context, "interrupted", error=str(error))
         raise JobFailed(
             str(error),
             {"answer": saved["answer"], "execution_run_id": run_id, "partial": True}
@@ -450,7 +542,8 @@ async def _research_job(job):
         ) from error
     finally:
         with context.budget_lock:
-            save_job_checkpoint(context)
+            if checkpoint_loaded:
+                save_job_checkpoint(context)
             context.job_checkpoint_closed = True
         app.state.job_service.contexts.pop(job["task_id"], None)
     result = await app.state.run_store.get(run_id)
@@ -459,8 +552,8 @@ async def _research_job(job):
     return {
         "answer": result["answer"],
         "execution_run_id": run_id,
-        "partial": context.delivery_status != "complete"
-        or any(t.check_status != "passed" for t in context.search_tasks.values()),
+        "partial": context.coverage != "complete",
+        "coverage": context.coverage,
     }
 
 

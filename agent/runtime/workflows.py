@@ -110,7 +110,7 @@ async def snapshot(context):
     run = await sink.store.get(context.run_id)
     if run is None or run["thread_id"] != context.thread_id or run["status"] not in ("queued", "running"):
         raise refusal("run_ended", "本轮已结束，不再启动新动作。")
-    usable = await sink.store.list_results(context.run_id, thread_id=context.thread_id, usable_only=True)
+    usable = await sink.store.list_results(context.run_id, thread_id=context.thread_id, purpose="handoff")
     for row in usable:
         await ResultService().read_raw(context, row["result_id"])
     all_rows = await sink.store.list_results(context.run_id, thread_id=context.thread_id)
@@ -309,7 +309,7 @@ async def finalize_answer(context, answer):
         source_ids=data["source_ids"],
         db_failure_ids=data["db_failure_ids"],
     )
-    return degraded_content(data) if data["degraded"] else answer
+    return answer
 
 
 def instruction(context):

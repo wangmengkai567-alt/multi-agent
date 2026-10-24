@@ -6,9 +6,7 @@ from email.utils import parsedate_to_datetime
 
 from agent.runtime.context import get_run_context
 
-READ_ONLY = frozenset(
-    {"internet_search", "read_web_page", "list_sql_tables", "get_table_data", "execute_sql_query", "get_research_job"}
-)
+READ_ONLY = frozenset({"list_sql_tables", "get_table_data", "execute_sql_query", "get_research_job"})
 
 
 class ToolCallTimeout(TimeoutError):

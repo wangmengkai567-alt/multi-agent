@@ -44,7 +44,7 @@ class RunStore:
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise RuntimeError(f"Unsupported run database schema version: {version}")
             if version == 0:
                 try:
@@ -183,7 +183,8 @@ class RunStore:
                             CHECK((status IN ('queued','running') AND ended_at IS NULL)
                                 OR (status NOT IN ('queued','running') AND ended_at IS NOT NULL))
                         );
-                        INSERT INTO runs_v5 SELECT * FROM runs;
+                        INSERT INTO runs_v5 (run_id,thread_id,question,status,answer,error,created_at,ended_at)
+                            SELECT run_id,thread_id,question,status,answer,error,created_at,ended_at FROM runs;
                         DROP TABLE runs;
                         ALTER TABLE runs_v5 RENAME TO runs;
                         CREATE UNIQUE INDEX one_active_run_per_thread
@@ -194,6 +195,89 @@ class RunStore:
                 except BaseException:
                     await self.connection.rollback()
                     raise
+
+            if version < 6:
+                await self._migrate_v6()
+            await self.connection.execute("PRAGMA foreign_keys=ON")
+
+    async def _migrate_v6(self):
+        from agent.runtime.review_state import PRE_REVIEW, constraints_sql
+
+        try:
+            await self.connection.execute("BEGIN IMMEDIATE")
+            await self.connection.execute(
+                "ALTER TABLE runs ADD COLUMN coverage TEXT NOT NULL DEFAULT 'unknown' CHECK(coverage IN ('complete','partial','unknown'))"
+            )
+            async with self.connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='results' AND sql IS NOT NULL"
+            ) as cursor:
+                indexes = [r[0] for r in await cursor.fetchall()]
+            await self.connection.execute(
+                """CREATE TABLE results_v6 (
+                result_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(run_id),
+                thread_id TEXT NOT NULL, call_id TEXT NOT NULL REFERENCES subtasks(call_id),
+                attempt INTEGER NOT NULL CHECK(attempt>=0), source TEXT NOT NULL CHECK(source IN ('db','knowledge','search')),
+                created_at TEXT NOT NULL, query_object TEXT NOT NULL, time_range TEXT NOT NULL,
+                statistical_scope TEXT NOT NULL, raw_text TEXT, raw_path TEXT, raw_sha256 TEXT NOT NULL,
+                summary TEXT, check_status TEXT NOT NULL, review TEXT NOT NULL,
+                published INTEGER NOT NULL CHECK(published IN (0,1)), judged INTEGER NOT NULL DEFAULT 0,
+                facts_status TEXT CHECK(facts_status IN ('all_passed','some_passed','none_passed')),
+                coverage_status TEXT CHECK(coverage_status IN ('covered','missing','unknown')),
+                UNIQUE(call_id,attempt), CHECK((raw_text IS NULL)!=(raw_path IS NULL)), """
+                + constraints_sql()
+                + ")"
+            )
+            async with self.connection.execute("SELECT * FROM results") as cursor:
+                originals = [dict(r) for r in await cursor.fetchall()]
+            for row in originals:
+                review = json.loads(row["review"])
+                review["migration_origin"] = {key: row[key] for key in ("check_status", "summary", "published")}
+                row.update(
+                    judged=0,
+                    facts_status=None,
+                    coverage_status=None,
+                    summary=None,
+                    published=0,
+                    check_status=row["check_status"] if row["check_status"] in PRE_REVIEW else "not_checked",
+                    review=json.dumps(review, ensure_ascii=False),
+                )
+                columns = list(row)
+                await self.connection.execute(
+                    "INSERT INTO results_v6 ("
+                    + ",".join(columns)
+                    + ") VALUES ("
+                    + ",".join("?" for _ in columns)
+                    + ")",
+                    [row[k] for k in columns],
+                )
+            await self.connection.execute("DROP TABLE results")
+            await self.connection.execute("ALTER TABLE results_v6 RENAME TO results")
+            for statement in indexes:
+                await self.connection.execute(statement)
+            await self.connection.execute(
+                "ALTER TABLE subtasks ADD COLUMN current_result_id TEXT REFERENCES results(result_id)"
+            )
+            await self.connection.execute("""UPDATE subtasks SET current_result_id=(SELECT r.result_id FROM results r
+                WHERE r.call_id=subtasks.call_id ORDER BY r.attempt DESC LIMIT 1)""")
+            async with self.connection.execute(
+                "SELECT run_id,event_seq,data FROM events WHERE event='answer_validation' ORDER BY run_id,event_seq"
+            ) as cursor:
+                last = {}
+                for row in await cursor.fetchall():
+                    last[row["run_id"]] = json.loads(row["data"])
+            for run_id, event in last.items():
+                coverage = (
+                    event.get("answer_kind") if event.get("answer_kind") in ("complete", "partial") else "unknown"
+                )
+                await self.connection.execute("UPDATE runs SET coverage=? WHERE run_id=?", (coverage, run_id))
+            async with self.connection.execute("PRAGMA foreign_key_check") as cursor:
+                if await cursor.fetchone():
+                    raise ValueError("Migration foreign key integrity failed")
+            await self.connection.execute("PRAGMA user_version=6")
+            await self.connection.commit()
+        except BaseException:
+            await self.connection.rollback()
+            raise
 
     @staticmethod
     def _decode_result(row):
@@ -226,9 +310,10 @@ class RunStore:
                     or any(event[k] != record[k] for k in ("run_id", "thread_id", "call_id"))
                 ):
                     raise ValueError("Result does not belong to the subtask/run/session")
-                if record["review"]["verdict"] != record["check_status"]:
-                    raise ValueError("Result review status mismatch")
-                if record["published"] and (record["check_status"] != "passed" or not record["summary"]):
+                from agent.runtime.review_state import ReviewState, publishable
+
+                state = ReviewState.from_record(record)
+                if record["published"] and not publishable(state, record["summary"]):
                     raise ValueError("Only checked results may publish a summary")
                 record = dict(record)
                 if run["status"] not in ACTIVE or task["status"] not in ACTIVE:
@@ -242,6 +327,10 @@ class RunStore:
                     "INSERT INTO results (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")",
                     values,
                 )
+                await self.connection.execute(
+                    "UPDATE subtasks SET current_result_id=?,check_status=? WHERE call_id=?",
+                    (record["result_id"], state.check_status, record["call_id"]),
+                )
                 saved = await self._append_event(dict(event, data=dict(event["data"], published=record["published"])))
                 await self.connection.commit()
                 return saved
@@ -249,25 +338,38 @@ class RunStore:
                 await self.connection.rollback()
                 raise
 
-    async def _list_results(self, run_id, thread_id=None, usable_only=False):
+    async def _list_results(self, run_id, thread_id=None, purpose=None):
         sql = "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id WHERE r.run_id=?"
         args = [run_id]
         if thread_id is not None:
             sql += " AND r.thread_id=?"
             args.append(thread_id)
-        if usable_only:
-            sql += " AND r.published=1 AND r.check_status='passed' AND s.status='completed' AND s.check_status='passed'"
+        if purpose is not None:
+            from agent.runtime.review_state import result_filter
+
+            sql += " AND " + result_filter(purpose)
         async with self.connection.execute(sql + " ORDER BY r.created_at,r.result_id", args) as cursor:
             return [self._decode_result(row) for row in await cursor.fetchall()]
 
-    async def list_results(self, run_id, *, thread_id, usable_only=False):
+    async def list_results(self, run_id, *, thread_id, purpose=None):
         async with self._lock:
-            return await self._list_results(run_id, thread_id, usable_only)
+            return await self._list_results(run_id, thread_id, purpose)
 
     async def get_result(self, result_id, run_id, thread_id):
         async with self._lock:
             async with self.connection.execute(
                 "SELECT * FROM results WHERE result_id=? AND run_id=? AND thread_id=?",
+                (result_id, run_id, thread_id),
+            ) as cursor:
+                return self._decode_result(await cursor.fetchone())
+
+    async def get_current_result(self, result_id, run_id, thread_id):
+        """Restore only the current result of its actual subtask/run/thread."""
+        async with self._lock:
+            async with self.connection.execute(
+                "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id "
+                "AND s.run_id=r.run_id AND s.thread_id=r.thread_id AND s.current_result_id=r.result_id "
+                "WHERE r.result_id=? AND r.run_id=? AND r.thread_id=?",
                 (result_id, run_id, thread_id),
             ) as cursor:
                 return self._decode_result(await cursor.fetchone())
@@ -500,7 +602,7 @@ class RunStore:
                 await self.connection.rollback()
                 raise
 
-    async def finish(self, run_id: str, status: str, *, answer=None, error=None, event=None):
+    async def finish(self, run_id: str, status: str, *, answer=None, error=None, event=None, coverage="unknown"):
         if status not in TERMINAL:
             raise ValueError(f"Not a terminal status: {status}")
         if status == "completed" and not isinstance(answer, str):
@@ -508,9 +610,9 @@ class RunStore:
         async with self._lock:
             try:
                 cursor = await self.connection.execute(
-                    """UPDATE runs SET status=?,answer=?,error=?,ended_at=?
+                    """UPDATE runs SET status=?,answer=?,error=?,ended_at=?,coverage=?
                        WHERE run_id=? AND status IN ('queued','running')""",
-                    (status, answer, error, _now(), run_id),
+                    (status, answer, error, _now(), coverage, run_id),
                 )
                 changed = cursor.rowcount == 1
                 await cursor.close()

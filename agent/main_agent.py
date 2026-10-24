@@ -36,6 +36,7 @@ def _build_agent(saver):
     from agent.prompts import main_agent_content
     from agent.results import RESULT_DISPLAY_PROMPT
     from agent.runtime.answer_review import AnswerReviewMiddleware
+    from agent.runtime.contracts import TaskContractMiddleware
     from agent.runtime.finalization import SearchFinalizationMiddleware
     from agent.runtime.skills import ProjectSkillsMiddleware
     from agent.runtime.task_plan import plan_research
@@ -63,6 +64,7 @@ def _build_agent(saver):
         checkpointer=saver,
         subagents=subagents,
         middleware=[
+            TaskContractMiddleware(),
             AnswerReviewMiddleware(review_model),
             SearchFinalizationMiddleware(main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT),
             ProjectSkillsMiddleware(),
@@ -156,6 +158,8 @@ async def run_deep_agent(task_query, session_id, *, resume=False):
         /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。
         禁止访问本机真实绝对路径或其他轮次目录。
         """
+        if context.execution_mode == "foreground":
+            path_instruction += "\n当前明确前台执行：不要提交后台任务；直接登记研究对象并完成查询和交付。"
         path_instruction += instruction(context)
         config = {"configurable": {"thread_id": session_id}}
         agent = await initialize_agent()

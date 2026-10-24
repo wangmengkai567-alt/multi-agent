@@ -39,7 +39,9 @@ search:
   calls_per_task: 2
   refinement_calls_per_task: 2
   research_calls_per_task: 6
-  max_tasks_per_run: 3
+  max_tasks_per_run: 8
+  max_concurrent_tasks: 2
+  max_plan_expansions: 3
   # Whole-run hard caps cover all admitted tasks, including their reserved refinements.
   calls_per_run: 12
   research_calls_per_run: 24
@@ -55,4 +57,28 @@ retry:
   max_retries: 1
   delay_seconds: 0.25
   max_delay_seconds: 20.0
-  tools: [read_web_page, internet_search, list_sql_tables, get_table_data, execute_sql_query]
+  tools: [research_step, list_sql_tables, get_table_data, execute_sql_query]
+
+scheduler:
+  # Identical model endpoint/key pairs share a pool automatically.
+  # Map MAIN/SUB/REVIEW to the same account ID when one account has different API keys.
+  model_accounts: {}
+  runs: {concurrency: 2, queue_capacity: 16}
+  children: {concurrency: 4, queue_capacity: 64}
+  models: {concurrency: 2, queue_capacity: 32, requests_per_second: 2.0}
+  search: {concurrency: 2, queue_capacity: 32, requests_per_second: 3.0}
+sources:
+  # Operator-confirmed publisher mappings. A search-domain restriction alone is not an identity.
+  identities:
+    - {publisher: Python, host: python.org, include_subdomains: true, tier: official, verification: "https://www.python.org/"}
+    - {publisher: Tavily, host: tavily.com, include_subdomains: true, tier: official, verification: "https://tavily.com/"}
+    - {publisher: Apple, host: apple.com, include_subdomains: true, tier: official, verification: "https://www.apple.com/"}
+    - {publisher: Apple, host: apple.com.cn, include_subdomains: true, tier: official, verification: "https://www.apple.com.cn/"}
+    - {publisher: Huawei, host: huawei.com, include_subdomains: true, tier: official, verification: "https://www.huawei.com/"}
+    - {publisher: Huawei, host: vmall.com, include_subdomains: true, tier: official, verification: "https://www.vmall.com/"}
+    - {publisher: Xiaomi, host: mi.com, include_subdomains: true, tier: official, verification: "https://www.mi.com/"}
+    - {publisher: Xiaomi, host: xiaomi.com, include_subdomains: true, tier: official, verification: "https://www.xiaomi.com/"}
+    - {publisher: Deep Agents, host: github.com, path_prefix: /langchain-ai/deepagents, tier: official, verification: "https://github.com/langchain-ai/deepagents"}
+    - {publisher: Open Deep Research, host: github.com, path_prefix: /langchain-ai/open_deep_research, tier: official, verification: "https://github.com/langchain-ai/open_deep_research"}
+    - {publisher: smolagents, host: github.com, path_prefix: /huggingface/smolagents, tier: official, verification: "https://github.com/huggingface/smolagents"}
+    - {publisher: GPT Researcher, host: github.com, path_prefix: /assafelovic/gpt-researcher, tier: official, verification: "https://github.com/assafelovic/gpt-researcher"}

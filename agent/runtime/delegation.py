@@ -2,6 +2,7 @@
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from time import monotonic
@@ -18,9 +19,17 @@ from agent.runtime.hooks import HookCall, HookRejected, active_call, error_messa
 from agent.runtime.models import ModelRequestTimeout
 from agent.runtime.policies import BudgetExceeded, SearchLimitReached, classify_tool_error, reserve_calls
 from agent.runtime.reporting import ReportRevision, ResearchOutputError
+from agent.runtime.requirements import RequirementSpec, apply_coverage, ensure_task, original_required_clauses, register
+from agent.runtime.review_state import ReviewState, deliverable
 from agent.runtime.search import SearchAllowance, needs_search_refinement, search_allowance
 from agent.runtime.skills import skill_scope
 from agent.runtime.workflows import prepare_delegate
+
+
+@dataclass(frozen=True)
+class ReviewOnly:
+    result: dict
+    evidence: list
 
 
 class DelegationRunnable(Runnable):
@@ -97,6 +106,42 @@ class DelegationRunnable(Runnable):
                 allowance.task.description = description
             except SearchLimitReached as exc:
                 raise HookRejected(str(exc)) from exc
+        if self.spec.agent_id == "db":
+            call.search_task_key = "db:" + call.call_id
+            register(
+                context,
+                call.search_task_key,
+                [
+                    RequirementSpec(anchor=anchor, label=anchor[:160], kind="fact")
+                    for anchor in original_required_clauses(context.user_query)
+                ],
+                object_id=None,
+            )
+        else:
+            ensure_task(context, call.search_task_key, description)
+        from agent.runtime.reservations import hold
+
+        try:
+            hold(
+                context,
+                call.call_id,
+                {"sub_model": 1, "review": 1},
+                task_id=call.search_task_key,
+                protect_revision=self.spec.review_config.enabled and self.spec.review_config.max_refinements > 0,
+            )
+        except BudgetExceeded as exc:
+            if self.spec.agent_id == "search":
+                from agent.runtime.reservations import release
+
+                with context.budget_lock:
+                    for owner, reservation in list(context.revision_reservations.items()):
+                        if reservation["task_id"] == call.search_task_key:
+                            release(context, owner)
+                    allowance.task.active = False
+                    allowance.task.state = ReviewState(check_status="budget_exhausted")
+                    allowance.task.closed_reason = allowance.task.failure_reason = str(exc)
+            raise
+        record["state"] = ReviewState()
         if request_id:
             with context.budget_lock:
                 context.delegation_calls.setdefault(request_id, []).append(record)
@@ -133,7 +178,7 @@ class DelegationRunnable(Runnable):
             parent_call_id=call.parent_call_id,
         )
         try:
-            context.event_sink.submit_subtask(dict(record), event)
+            context.event_sink.submit_subtask({k: v for k, v in record.items() if k != "state"}, event)
         except Exception as exc:
             logging.getLogger(__name__).exception("Subtask record was NOT saved")
             context.hook_failures.append(f"subtask {call.call_id}: {redact_text(str(exc))}")
@@ -177,7 +222,10 @@ class DelegationRunnable(Runnable):
         self.hooks.emit("on_error", call)
 
     def _finish(self, context, call, record, started):
-        if self.spec.agent_id == "db" and call.status == "completed" and record["check_status"] == "passed":
+        from agent.runtime.reservations import release
+
+        release(context, call.call_id)
+        if self.spec.agent_id == "db" and call.status == "completed" and deliverable(record["state"]):
             with context.budget_lock:
                 context.internal_result_version += 1
         if self.spec.agent_id == "search":
@@ -186,7 +234,7 @@ class DelegationRunnable(Runnable):
             allowance.finish(
                 executed=call.executed,
                 reason=record["error"],
-                check_status=record["check_status"],
+                state=call.state,
                 result=record["result"] or "",
                 sources=allowance.task.sources,
             )
@@ -220,107 +268,114 @@ class DelegationRunnable(Runnable):
             context.hook_failures.append(f"review {call.call_id}: {redact_text(str(exc))}")
 
     def _checked(self, context, call, record, result, review, attempt):
-        call.check_status = record["check_status"] = review.verdict
+        from agent.runtime.facts import render_report
+
+        call.state = record["state"] = review.state
+        call.check_status = record["check_status"] = review.state.check_status
+        call.report_attempt = attempt
         self._review_event(context, call, review, attempt)
-        if review.verdict == "passed":
-            if self.spec.review_config.grounded_report:
-                from agent.runtime.facts import parse_report, render_report
-
-                limits = context.policy.search
-                report = parse_report(
-                    record["result"], call.review_evidence, limits.model_context_chars // (2 * limits.max_tasks_per_run)
-                )
-                SearchAllowance(context, call.search_task_key).task.report = report
-                record["result"] = render_report(report)
-                final = result["messages"][-1].model_copy(
-                    update={"content": json.dumps({"verified_report": report}, ensure_ascii=False)}
-                )
-                result = dict(result, messages=[*result["messages"][:-1], final])
-                call.result = result
-                return result
-            if self.spec.agent_id == "db":
-                with context.budget_lock:
-                    context.approved_internal[call.call_id] = dict(text=record["result"], evidence=call.review_evidence)
-            if self.spec.agent_id == "search" and context.enforce_plan:
-                from agent.reflection import source_id
-                from agent.runtime.output import cited_urls
-
-                cited = cited_urls(record["result"])
-                sources = [
-                    {"source_id": source_id(url), "url": url}
-                    for url in source_urls(call.review_evidence)
-                    if url in cited
-                ]
-                final = result["messages"][-1]
-                final = final.model_copy(
-                    update={
-                        "content": final.text
-                        + "\n\n程序生成的引用映射（仅用于上文已核实事实）：\n"
-                        + json.dumps(sources, ensure_ascii=False)
-                    }
-                )
-                result = dict(result, messages=[*result["messages"][:-1], final])
-            return result
-        if self.spec.agent_id == "search":
-            reason = None
-            if review.verdict == "check_incomplete":
-                reason = "结果检查未完成，已有检索记录已保存，重复搜索不能修复检查格式"
-            elif review.verdict == "insufficient" and attempt >= self.spec.review_config.max_refinements:
-                reason = "本轮搜索子任务已完成允许的修订，仍缺少合格依据，不再重新执行"
-            elif review.verdict != "insufficient":
-                reason = "本轮联网子任务执行失败，不再重复委派：" + "; ".join(review.issues)
-            if reason:
-                with context.budget_lock:
-                    SearchAllowance(context, call.search_task_key).task.closed_reason = reason
-        if review.verdict == "check_incomplete" and self.reviewer.allow_unchecked(review):
-            review_text = json.dumps(
-                dict(review=review.model_dump(), unchecked_result=record["result"]), ensure_ascii=False
-            )
+        if review.coverage:
+            apply_coverage(context, call.search_task_key, review.coverage)
         else:
-            parent_review = review.model_dump()
-            if review.verdict == "insufficient":
-                # Grounded findings contain quotes from REJECTED drafts. Keep
-                # them in local refinement/durable checks, never in parent facts.
-                parent_review.update(
-                    issues=["当前分工的必需内容或事实依据未通过检查，具体定位见执行详情；检查说明不能作为事实依据。"],
-                    missing_evidence=["当前分工的合格依据"],
-                    revision_instruction="本子任务未返回可采纳结果，保留原始问题范围并明确局限，不根据检查说明重建事实。",
-                )
-            review_text = json.dumps(
-                dict(review=parent_review, **({"retry_allowed": False} if self.spec.agent_id == "search" else {})),
-                ensure_ascii=False,
+            from agent.runtime.requirements import task_requirements
+
+            apply_coverage(
+                context,
+                call.search_task_key,
+                {
+                    r["rid"]: dict(status="unknown", fact_ids=[], claim_ids=[])
+                    for r in task_requirements(context, call.search_task_key)
+                },
             )
-            call.status = "failed"
-            record["error"] = redact_text("; ".join(review.issues))
-        # Never present rejected expert prose as an accepted answer to the parent.
-        result = dict(result, messages=[AIMessage(content=review_text)])
-        call.result = result
-        record["result"] = redact_text(review_text)
+        if self.spec.agent_id == "search":
+            task = SearchAllowance(context, call.search_task_key).task
+            task.state = review.state
+            task.report = review.accepted_report if deliverable(review.state) else None
+            task.current_result_id, task.report_attempt = call.current_result_id, attempt
+            task.result_run_id = context.run_id
+        if deliverable(review.state):
+            report = review.accepted_report
+            if report is None:
+                raise ValueError("Deliverable state has no reviewed report")
+            record["result"] = render_report(report)
+            if self.spec.agent_id == "search":
+                task = SearchAllowance(context, call.search_task_key).task
+                task.result = record["result"]
+            else:
+                import copy
+
+                internal = copy.deepcopy(report)
+                mapping = {f["id"]: f"{call.search_task_key}:{attempt}:{f['id']}" for f in internal["facts"]}
+                for fact in internal["facts"]:
+                    fact["id"] = mapping[fact["id"]]
+                for item in internal["analysis"]:
+                    item["fact_ids"] = [mapping[k] for k in item["fact_ids"]]
+                with context.budget_lock:
+                    context.approved_internal[call.call_id] = dict(
+                        text=record["result"],
+                        evidence=call.review_evidence,
+                        report=internal,
+                        result_id=call.current_result_id,
+                        result_run_id=context.run_id,
+                        state=review.state.model_dump(),
+                        task_id=call.search_task_key,
+                        report_attempt=attempt,
+                    )
+            content = dict(verified_report=report, state=review.state.model_dump(), coverage=review.coverage)
+        else:
+            record["result"] = ""
+            content = dict(state=review.state.model_dump(), missing=review.missing_evidence, error=review.error)
+        final = result["messages"][-1].model_copy(update={"content": json.dumps(content, ensure_ascii=False)})
+        result = dict(result, messages=[*result["messages"][:-1], final])
+        call.result, call.status = result, "completed" if review.state.judged else "failed"
         return result
 
     def _refine(self, context, call, input, review, attempt, result, evidence, record):
-        if review.verdict != "insufficient" or attempt >= self.spec.review_config.max_refinements:
+        if review.verdict == "check_incomplete" and review.error == "ReviewFormatError":
+            return None
+        report_invalid = review.verdict == "check_incomplete" and review.error == "ReportError"
+        review_only = review.verdict == "check_incomplete" and not report_invalid
+        if (
+            review.verdict != "insufficient" and not report_invalid and not review_only
+        ) or attempt >= self.spec.review_config.max_refinements:
             return None
         if context.deadline is not None and context.deadline <= datetime.now(UTC):
             return None
-        from agent.runtime.governance import near_budget
+        from agent.runtime.reservations import hold
 
-        allow_search = needs_search_refinement(review, evidence)
-        report_only = self.spec.review_config.grounded_report and not allow_search
-        if near_budget(context) and not report_only:
+        allow_search = not review_only and needs_search_refinement(review, evidence)
+        remaining = context.remaining()
+        requests = 1 if review_only else 3 if allow_search else 2
+        needed = requests * context.policy.timeouts.request_seconds
+        if allow_search:
+            needed += 2 * context.policy.timeouts.tool_seconds
+        if remaining is not None and remaining <= needed:
+            record["error"] = "time_exhausted: 未启动无法在总时限内完成的修订"
+            self._review_event(
+                context, call, review.model_copy(update={"error": "time_exhausted"}), attempt + 1, "revision_stopped"
+            )
             return None
-        if report_only:
-            remaining = context.remaining()
-            reserve = min(context.policy.timeouts.finalize_seconds, context.policy.timeouts.total_seconds * 0.2)
-            if remaining is not None and remaining <= reserve:
-                return None
-        # A report correction uses its reserved slot, not a reopened research loop.
-        # Hard model/retry/total caps still apply at the actual invocation boundary.
+        amounts = {"review": 1, "retry": 1}
+        if not review_only:
+            amounts["sub_model"] = 2 if allow_search else 1
+        if allow_search:
+            amounts.update(tool=2, search=1, read=1)
+        try:
+            hold(context, call.call_id, amounts, activate=True, task_id=call.search_task_key)
+        except BudgetExceeded:
+            record["error"] = "reserve_exhausted"
+            self._review_event(
+                context, call, review.model_copy(update={"error": "reserve_exhausted"}), attempt + 1, "revision_stopped"
+            )
+            return None
         reserve_calls("retry")
+        if review_only:
+            self._review_event(context, call, review, attempt + 1, "subagent_refinement")
+            return ReviewOnly(result, list(evidence))
         if self.spec.agent_id == "search":
             SearchAllowance(context, call.search_task_key).begin_refinement(allow_search=allow_search)
         self._review_event(context, call, review, attempt + 1, "subagent_refinement")
-        if self.spec.review_config.grounded_report and not allow_search:
+        if not allow_search:
             return ReportRevision(result["messages"][-1].text, review.revision_instruction)
         # Keep the actual tool turns as well as the draft: an exhausted quota must
         # still allow citation/wording fixes using sources already retrieved.
@@ -378,7 +433,7 @@ class DelegationRunnable(Runnable):
 
         task_id, _, _ = resolve_task(context, inputs["messages"][-1].text)
         task = context.search_tasks.get(task_id)
-        if task and task.check_status == "passed" and task.result:
+        if task and deliverable(task.state) and task.result:
             if self.spec.review_config.grounded_report:
                 if task.report is None:
                     raise HookRejected("缺少已核验的结构化事实，不能恢复该检索结果")
@@ -399,12 +454,15 @@ class DelegationRunnable(Runnable):
         token = active_call.set(call)
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
+        leases = []
         try:
             self._save(context, call, record, "queued")
             if context.business_mode == "internal_external":
                 if context.event_sink is None:
                     raise HookRejected("Workflow execution requires durable results")
                 sync_result(prepare_delegate(context, call), context.event_sink)
+            for gate in (context.scheduler.child_gate(context), context.scheduler.gate("children")):
+                leases.append(context.scheduler.acquire(gate, context, "children"))
             self._start(context, call, record)
             input = self._search_request(context, input)
             if self.spec.agent_id == "search" and context.event_sink is not None:
@@ -417,7 +475,13 @@ class DelegationRunnable(Runnable):
             )
             for attempt in range(self.spec.review_config.max_refinements + 1):
                 context.check_active()
-                evidence = search_evidence if self.spec.agent_id == "search" else []
+                evidence = (
+                    current.evidence
+                    if isinstance(current, ReviewOnly)
+                    else search_evidence
+                    if self.spec.agent_id == "search"
+                    else []
+                )
                 evidence_token = tool_evidence.set(evidence)
                 search_token = search_allowance.set(
                     SearchAllowance(context, call.search_task_key) if self.spec.agent_id == "search" else None
@@ -425,7 +489,11 @@ class DelegationRunnable(Runnable):
                 dependency = None
                 try:
                     try:
-                        result = self.executor.invoke(current, config, **kwargs)
+                        result = (
+                            current.result
+                            if isinstance(current, ReviewOnly)
+                            else self.executor.invoke(current, config, **kwargs)
+                        )
                     except Exception as exc:
                         dependency = self._dependency(exc) if self.spec.review_config.enabled else None
                         if dependency is None:
@@ -464,7 +532,7 @@ class DelegationRunnable(Runnable):
                         call,
                         record,
                         result,
-                        ReviewResult(verdict="budget_exhausted", issues=["补充查询预算耗尽"]),
+                        review,
                         attempt,
                     )
                 if current is None:
@@ -477,6 +545,10 @@ class DelegationRunnable(Runnable):
             try:
                 self._finish(context, call, record, started)
             finally:
+                for lease in reversed(leases):
+                    lease.release()
+                if context.stop_status:
+                    context.scheduler.forget_run(context.run_id)
                 skill_scope.reset(skill_token)
                 active_call.reset(token)
 
@@ -488,9 +560,12 @@ class DelegationRunnable(Runnable):
         token = active_call.set(call)
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
+        leases = []
         try:
             self._save(context, call, record, "queued")
             await prepare_delegate(context, call)
+            for gate in (context.scheduler.child_gate(context), context.scheduler.gate("children")):
+                leases.append(await context.scheduler.aacquire(gate, context, "children"))
             self._start(context, call, record)
             input = self._search_request(context, input)
             if self.spec.agent_id == "search":
@@ -502,7 +577,13 @@ class DelegationRunnable(Runnable):
                 else []
             )
             for attempt in range(self.spec.review_config.max_refinements + 1):
-                evidence = search_evidence if self.spec.agent_id == "search" else []
+                evidence = (
+                    current.evidence
+                    if isinstance(current, ReviewOnly)
+                    else search_evidence
+                    if self.spec.agent_id == "search"
+                    else []
+                )
                 evidence_token = tool_evidence.set(evidence)
                 search_token = search_allowance.set(
                     SearchAllowance(context, call.search_task_key) if self.spec.agent_id == "search" else None
@@ -513,7 +594,9 @@ class DelegationRunnable(Runnable):
                         from agent.runtime.governance import collection_timeout
 
                         seconds = collection_timeout(context)
-                        if seconds is None:
+                        if isinstance(current, ReviewOnly):
+                            result = current.result
+                        elif seconds is None:
                             result = await self.executor.ainvoke(current, config, **kwargs)
                         else:
                             import asyncio
@@ -549,7 +632,7 @@ class DelegationRunnable(Runnable):
                         call,
                         record,
                         result,
-                        ReviewResult(verdict="budget_exhausted", issues=["补充查询预算耗尽"]),
+                        review,
                         attempt,
                     )
                 if current is None:
@@ -562,5 +645,9 @@ class DelegationRunnable(Runnable):
             try:
                 self._finish(context, call, record, started)
             finally:
+                for lease in reversed(leases):
+                    lease.release()
+                if context.stop_status:
+                    context.scheduler.forget_run(context.run_id)
                 skill_scope.reset(skill_token)
                 active_call.reset(token)

@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from agent.runtime.context import get_run_context
 from agent.runtime.events import EventPersistenceError, make_event, redact_text
+from agent.runtime.review_state import ReviewState
 
 logger = logging.getLogger(__name__)
 HOOK_NAMES = ("before_run", "before_delegate", "before_tool", "after_tool", "after_subagent", "after_run", "on_error")
@@ -39,6 +40,9 @@ class HookCall:
     elapsed_ms: float = 0
     target: str | None = None
     check_status: str = "not_checked"
+    state: ReviewState = field(default_factory=ReviewState)
+    current_result_id: str | None = None
+    report_attempt: int = 0
     executed: bool = False
     attempt: int = 0
     workflow_data: dict = field(default_factory=dict, repr=False)
@@ -192,6 +196,18 @@ class HookToolMiddleware(AgentMiddleware):
     def _before(self, request, call):
         if context := get_run_context():
             context.check_active()
+        if context and context.task_contract is not None:
+            from agent.runtime.contracts import assert_contract
+
+            contract = assert_contract(context)
+            if contract.delivery_kind == "direct":
+                raise HookRejected("直接交付契约禁止业务工具调用")
+            if not contract.network_allowed and (
+                call.target == "search"
+                or request.tool_call["name"]
+                in ("research_step", "internet_search", "read_web_page", "submit_research_job")
+            ):
+                raise HookRejected("原始任务禁止联网，本轮不能调用搜索或提交研究任务")
         tool = getattr(request, "tool", None)
         context = get_run_context()
         if context and context.enforce_plan and hasattr(request, "tool") and tool is None:
@@ -229,7 +245,7 @@ class HookToolMiddleware(AgentMiddleware):
         from agent.runtime.policies import policy_for_run, request_timeout
 
         name = call.actor.rsplit(":", 1)[-1]
-        if name == "task":
+        if name in ("task", "research_step"):
             return None  # Delegations have their own collection and run deadlines.
         return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None
 

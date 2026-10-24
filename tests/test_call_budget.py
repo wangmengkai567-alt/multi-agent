@@ -21,11 +21,15 @@ def limits(**budgets):
     data = load_runtime_policy().model_dump()
     data["budgets"].update(budgets)
     data["retry"]["delay_seconds"] = 0.0
+    data["sql"]["allowed_tables"] = ["orders"]
     return RuntimePolicy.model_validate(data)
 
 
 @pytest.fixture
-def context(sandbox_dir):
+def context(sandbox_dir, monkeypatch):
+    monkeypatch.setenv("MYSQL_READONLY_USER", "test_reader")
+    monkeypatch.setenv("MYSQL_READONLY_PASSWORD", "test_password")
+    monkeypatch.setenv("MYSQL_DATABASE", "test_business")
     context = RunContext("budget", "session", sandbox_dir, policy=limits())
     token = set_run_context(context)
     try:
@@ -34,7 +38,7 @@ def context(sandbox_dir):
         reset_run_context(token)
 
 
-def request(name="internet_search"):
+def request(name="list_sql_tables"):
     return SimpleNamespace(tool_call={"name": name, "args": {"query": "test"}, "id": "tool-call"})
 
 

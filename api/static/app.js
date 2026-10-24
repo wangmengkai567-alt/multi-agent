@@ -7,11 +7,11 @@ const storageKey = 'multiagent.runs.v1';
 const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
-  pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步'};
+  pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'已完成，覆盖待确认'};
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手'};
 const skills = {'ecommerce-analysis':'运营分析', 'report-writing':'报告写作',
   'research':'信息调研', 'document-analysis':'文档分析', 'data-analysis':'数据分析'};
-const verdicts = {passed:'通过', insufficient:'信息不足', dependency_unavailable:'依赖不可用',
+const verdicts = {partial_passed:'有效事实已保留', passed_with_gap:'事实通过，仍有缺口', partial_passed_with_gap:'部分事实通过，仍有缺口', passed_coverage_unknown:'事实通过，覆盖待确认', partial_coverage_unknown:'部分事实通过，覆盖待确认', passed:'通过', insufficient:'信息不足', dependency_unavailable:'依赖不可用',
   check_incomplete:'检查未完成', tool_failed:'工具失败', budget_exhausted:'次数耗尽', not_checked:'未检查'};
 
 function escapeHtml(value) {
@@ -68,7 +68,7 @@ function applyEvent(session, event) {
   session.logs.push(event);
   session.logs.sort((a,b) => a.event_seq - b.event_seq);
   const data = event.data || {};
-  if (data.delivery_status) session.deliveryStatus = data.delivery_status;
+  if (data.coverage) session.coverage = data.coverage;
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
   if (currentState) session.statusSeq = event.event_seq;
@@ -93,24 +93,14 @@ function applyEvent(session, event) {
   if (activeSessionId === session.runId) renderLog(session);
 }
 function displayStatus(session) {
-  if (session.status==='completed' && session.deliveryStatus==='partial') return 'partial';
-  if (session.status === 'completed' && session.jobs?.some(job=>job.status==='working'||job.status==='input_required')) return 'pending';
-  if (session.status === 'completed' && session.jobs?.some(job=>job.status==='failed'||job.result?.partial)) return 'partial';
-  // Recovered failures need not make a later, checked successful result partial.
-  const latestChecks = new Map();
-  const latestTasks = new Map();
-  const latestTools = new Map();
-  for (const e of session.logs) {
-    if (['subagent_review','answer_validation'].includes(e.event)) latestChecks.set(e.call_id, e.status);
-    if (['subagent_completed','subagent_failed','subagent_rejected'].includes(e.event)) latestTasks.set(e.call_id, e.status);
-    if (e.event === 'after_tool' && !isSearchControl(e.data)) latestTools.set(e.call_id, e.status);
-  }
-  const finalCheck = session.logs.filter(e => e.event === 'answer_validation').at(-1);
-  const completeAnswer = finalCheck?.status === 'passed' && finalCheck.data?.answer_kind === 'complete';
-  const unchecked = !completeAnswer && ([...latestChecks.values()].some(v => v !== 'passed') ||
-    [...latestTasks.values()].some(v => v !== 'completed') ||
-    [...latestTools.values()].some(v => v !== 'completed'));
-  return session.status === 'completed' && (session.degraded || unchecked || session.recordingIncomplete) ? 'partial' : session.status;
+  if (session.status !== 'completed') return session.status;
+  if (session.jobs?.some(job => job.status === 'working' || job.status === 'input_required')) return 'pending';
+  const research = session.jobs?.find(job => job.kind === 'research');
+  if (research && ['failed','cancelled','timed_out','interrupted'].includes(research.status)) return research.status;
+  const coverage = research?.status === 'completed' ? research.result?.coverage : session.coverage;
+  if (coverage === 'partial') return 'partial';
+  if (coverage !== 'complete') return 'coverage_unknown';
+  return 'completed';
 }
 async function syncSession(session) {
   try {
@@ -122,6 +112,7 @@ async function syncSession(session) {
     // A live terminal event may arrive while this earlier HTTP snapshot is in flight.
     if (activeStates.has(session.status) || session.status === 'unknown' || !activeStates.has(history.run.status)) {
       session.status = history.run.status;
+      session.coverage = history.run.coverage;
       session.answer = history.run.answer;
       session.error = history.run.error;
     }
@@ -182,7 +173,10 @@ function isSearchControl(data) {
 function describeEvent(event) {
   const d = event.data || {}, who = d.assistant_name || actors[event.actor] || '助手';
   if (event.event === 'model_request') return ({research:'检索决策（模型）',report_generation:'事实报告生成（模型）',
-    report_revision:'事实报告修订（模型）',semantic_review:'证据审核（模型）',coordination:'任务协调（模型）'}[d.phase] || '模型请求');
+    report_revision:'事实报告修订（模型）',semantic_review:'证据审核（模型）',coordination:'任务协调（模型）',
+    task_contract:'任务契约（模型）',summarization:'上下文摘要（模型）',final_generation:'终稿生成（模型）',
+    final_revision:'终稿修订（模型）',final_review:'终稿审核（模型）',direct_review:'直接答复审核（模型）',
+    review_revision:'审核格式修订（模型）'}[d.phase] || '模型请求');
   if (d.error_category === 'search_prerequisite') return '此补查请求未执行：' + (d.error || '需先评估已有结果并读取关键来源');
   if (d.error_category === 'search_limit') return event.event === 'on_error'
     ? '检索额度限制：已拦截新的请求，已获准请求仍会完成'
@@ -290,7 +284,7 @@ function renderCallGroups(session, openDetails = new Set()) {
   return callGroups(session).map((group,index) => {
     const agentName = actors[group.target] || group.target || '助手';
     const terminal = group.events.filter(e=>['subagent_completed','subagent_failed','subagent_cancelled','subagent_rejected'].includes(e.event)).at(-1);
-    const outcome = terminal ? ' · ' + ({completed:'检查通过',failed:'未通过',cancelled:'已取消',rejected:'已拒绝'}[terminal.status] || terminal.status) : '';
+    const outcome = terminal ? ' · ' + (verdicts[terminal.data?.check_status] || ({completed:'处理结束',failed:'执行失败',cancelled:'已取消',rejected:'已拒绝'}[terminal.status] || terminal.status)) : '';
     const title = index === 0 && group.target === 'main' ? '主助手' : `${agentName} · ${group.label || '独立分工'} · ${group.id.slice(0,8)}${outcome}`;
     const calls = new Map();
     for (const e of group.events) {
@@ -312,8 +306,16 @@ function renderCallGroups(session, openDetails = new Set()) {
         (e.event === 'model_request' || ['after_tool','after_subagent'].includes(e.event)));
       const elapsedMs = measured?.data.elapsed_ms;
       const elapsed = Number.isFinite(elapsedMs) ? ` · ${(elapsedMs/1000).toFixed(1)} 秒` : '';
+      const requestMetrics = events.find(e => e.event === 'model_request')?.data;
+      const requestSize = Number.isFinite(requestMetrics?.request_bytes)
+        ? ` · 请求 ${(requestMetrics.request_bytes/1024).toFixed(1)} KiB` : '';
+      const queueTime = Number.isFinite(requestMetrics?.queue_wait_ms)
+        ? ` · 排队 ${(requestMetrics.queue_wait_ms/1000).toFixed(1)} 秒` : '';
+      const usage = requestMetrics ? ` · 输入/输出 Token：${Number.isFinite(requestMetrics.input_units)
+        ? requestMetrics.input_units : '未知'}/${Number.isFinite(requestMetrics.output_units)
+        ? requestMetrics.output_units : '未知'}` : '';
       return `<div class="log-entry" data-call="${escapeHtml(last.call_id)}"><div class="log-dot ${failed?'e':'a'}"></div><div class="log-body">
-        <span class="log-msg">${escapeHtml(caption + quota + elapsed)}</span>
+        <span class="log-msg">${escapeHtml(caption + quota + elapsed + requestSize + queueTime + usage)}</span>
         <div class="log-time">${escapeHtml(end.toLocaleTimeString('zh-CN',{hour12:false}))}</div>
         <details data-seq="${escapeHtml('call:'+last.call_id)}" ${openDetails.has('call:'+last.call_id)?'open':''}><summary>展开调用过程（${events.length} 条）</summary>
         ${events.map(e=>`<div>${escapeHtml(describeEvent(e))}</div>`).join('')}
@@ -333,7 +335,7 @@ async function syncJobs(session) {
     session.jobs = data.jobs || [];
     session.jobError = '';
     renderTabs();
-    renderJobs(session);
+    if (activeSessionId === session.runId) renderLog(session);
     const working = session.jobs.filter(j=>j.status === 'working');
     if (session.jobs.some(job=>job.kind==='pdf_conversion' && job.status==='completed')) refreshFiles();
     if (working.length && typeof setTimeout === 'function') {

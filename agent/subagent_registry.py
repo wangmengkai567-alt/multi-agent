@@ -98,8 +98,8 @@ def load_default_registry():
                     enabled=True,
                     model_check=True,
                     required_tools={
-                        "db": ("get_table_data", "execute_sql_query"),
-                        "search": ("internet_search",),
+                        "db": (),
+                        "search": (),
                     }[agent_id],
                     require_sources=agent_id == "search",
                     grounded_report=agent_id == "search",

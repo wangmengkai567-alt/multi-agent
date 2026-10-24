@@ -4,7 +4,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock
 from time import monotonic
 
 
@@ -41,11 +41,33 @@ class RunContext:
     search_finalization_announced: bool = False
     answer_repair_attempted: bool = False
     answer_citation_repair_attempted: bool = False
-    delivery_status: str | None = None
+    coverage: str = "unknown"
+    query_version: int = 1
+    research_scope_id: str = ""
+    resume_source_run_id: str | None = None
+    objects: dict = field(default_factory=dict, repr=False)
+    requirement_links: dict = field(default_factory=dict, repr=False)
+    requirements: dict = field(default_factory=dict, repr=False)
+    coverage_rows: dict = field(default_factory=dict, repr=False)
+    gaps: dict = field(default_factory=dict, repr=False)
+    stop_event: object = field(default_factory=Event, repr=False)
+    research_waiters: dict = field(default_factory=dict, repr=False)
+    research_cache: dict = field(default_factory=dict, repr=False)
+    evidence_snapshots: dict = field(default_factory=dict, repr=False)
+    quote_registry: dict = field(default_factory=dict, repr=False)
+    request_ledger: dict = field(default_factory=dict, repr=False)
+    attempt_ledger: dict = field(default_factory=dict, repr=False)
+    outbound: list = field(default_factory=list, repr=False)
+    review_cache: dict = field(default_factory=dict, repr=False)
+    revision_reservations: dict = field(default_factory=dict, repr=False)
+    delivery_draft: dict | None = field(default=None, repr=False)
     original_call_ids: dict = field(default_factory=dict, repr=False)
     approved_internal: dict = field(default_factory=dict, repr=False)
     internal_result_version: int = 0
     user_query: str = field(default="", repr=False)
+    task_contract: object | None = field(default=None, repr=False)
+    previous_run_id: str | None = None
+    previous_answer: str = field(default="", repr=False)
     latest_message: str = field(default="", repr=False)
     tool_turns: dict = field(default_factory=dict, repr=False)
     turn_counts: dict = field(default_factory=dict, repr=False)
@@ -60,6 +82,11 @@ class RunContext:
     resume_graph: bool = False
     partial_answer: bool = False
     accepted_plan: bool = False
+    scheduler_ticket: str | None = None
+    plan_version: int = 0
+    plan_expansions: int = 0
+    plan_closed: bool = False
+    scheduler: object | None = field(default=None, repr=False)
     enforce_plan: bool = False
     execution_mode: str = "auto"
     budget_lock: object = field(default_factory=RLock, repr=False)
@@ -68,10 +95,20 @@ class RunContext:
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
     )
 
+    def __post_init__(self):
+        if not self.research_scope_id:
+            self.research_scope_id = self.run_id
+        if self.scheduler is None:
+            from agent.runtime.policies import load_runtime_policy
+            from agent.runtime.scheduler import ServiceScheduler
+
+            self.scheduler = ServiceScheduler((self.policy or load_runtime_policy()).scheduler)
+
     def stop(self, status):
         with self.budget_lock:
             if self.stop_status is None:
                 self.stop_status = status
+                self.stop_event.set()
             return self.stop_status
 
     def remaining(self):

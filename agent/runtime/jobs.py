@@ -28,17 +28,20 @@ class JobFailed(RuntimeError):
 
 
 class JobService:
-    def __init__(self, connection, handlers, directory):
+    def __init__(self, connection, handlers, directory, scheduler):
         self.connection, self.handlers, self.directory = connection, handlers, Path(directory)
         self.lock, self.tasks, self.closing = asyncio.Lock(), {}, False
-        self.slots = asyncio.Semaphore(2)
+        self.scheduler = scheduler
+        self.tickets = {}
+        self.pending = {}
+        self.dispatch_task = asyncio.create_task(self.dispatch_pending())
         self.owner = str(uuid4())
         self.contexts = {}
         self.closed = False
         self.close_lock = asyncio.Lock()
 
     @classmethod
-    async def open(cls, path, handlers, directory):
+    async def open(cls, path, handlers, directory, *, scheduler=None):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = await aiosqlite.connect(path)
@@ -62,7 +65,12 @@ class JobService:
         if "recovery_count" not in columns:
             await connection.execute("ALTER TABLE jobs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0")
         await connection.commit()
-        return cls(connection, handlers, directory)
+        if scheduler is None:
+            from agent.runtime.policies import load_runtime_policy
+            from agent.runtime.scheduler import ServiceScheduler
+
+            scheduler = ServiceScheduler(load_runtime_policy().scheduler)
+        return cls(connection, handlers, directory, scheduler)
 
     @staticmethod
     def decode(row):
@@ -133,61 +141,122 @@ class JobService:
         if job["payload"] != payload or job["kind"] != kind:
             raise ValueError("幂等键已用于不同任务")
         if job["status"] == "working":
-            self.schedule(job)
+            try:
+                self.schedule(job, recovering=job["task_id"] != task_id)
+            except Exception as error:
+                await self.transition(job["task_id"], "failed", error=str(error))
+                raise
         return job
 
     def schedule(self, job, *, recovering=False):
         if self.closing or job["task_id"] in self.tasks:
             return
-        task = asyncio.create_task(self.run_slot(job, recovering=recovering), name="persistent-job:" + job["task_id"])
+        from agent.runtime.scheduler import QueueFull
+
+        try:
+            self.tickets[job["task_id"]] = self.scheduler.gate("runs").enqueue()
+        except QueueFull:
+            if recovering:
+                self.pending[job["task_id"]] = job
+                return
+            raise
+        self.pending.pop(job["task_id"], None)
+        from agent.runtime.scheduler import detached_context
+
+        task = asyncio.create_task(
+            self.run_slot(job, recovering=recovering),
+            name="persistent-job:" + job["task_id"],
+            context=detached_context(),
+        )
         self.tasks[job["task_id"]] = task
-        task.add_done_callback(lambda t: self.tasks.pop(job["task_id"], None))
+        task.add_done_callback(lambda t: self.finished(job["task_id"], t))
+
+    def finished(self, task_id, task):
+        self.tasks.pop(task_id, None)
+        ticket = self.tickets.pop(task_id, None)
+        if ticket:
+            self.scheduler.gate("runs").cancel(ticket)
+        if not task.cancelled():
+            task.exception()
+
+    async def dispatch_pending(self):
+        while not self.closing:
+            for job in list(self.pending.values()):
+                current = await self.get(job["task_id"], job["thread_id"])
+                if current is not None and current["status"] == "working":
+                    self.schedule(current, recovering=True)
+                else:
+                    self.pending.pop(job["task_id"], None)
+            await asyncio.sleep(0.1)
 
     async def run_slot(self, job, *, recovering=False):
-        async with self.slots:
-            while not self.closing:
-                current = await self.get(job["task_id"], job["thread_id"])
-                if current is None or current["status"] != "working":
-                    return
-                lease = current.get("lease_until")
-                if current.get("owner") and current["owner"] != self.owner and lease:
-                    wait = (datetime.fromisoformat(lease) - datetime.now(UTC)).total_seconds()
-                    if wait > 0:
-                        await asyncio.sleep(min(wait, 5))
-                        continue
-                async with self.lock:
-                    cursor = await self.connection.execute(
-                        """UPDATE jobs SET owner=?,lease_until=?
-                        WHERE task_id=? AND status='working' AND (owner IS NULL OR owner=? OR lease_until<=?)""",
-                        (
-                            self.owner,
-                            (datetime.now(UTC) + timedelta(seconds=15)).isoformat(),
-                            job["task_id"],
-                            self.owner,
-                            now(),
-                        ),
-                    )
-                    claimed = cursor.rowcount == 1
-                    await cursor.close()
-                    await self.connection.commit()
-                if not claimed:
-                    await asyncio.sleep(0.05)
-                    continue
-                if recovering:
-                    async with self.lock:
-                        await self.connection.execute(
-                            "UPDATE jobs SET recovery_count=recovery_count+1 WHERE task_id=? AND owner=?",
-                            (job["task_id"], self.owner),
-                        )
-                        await self.connection.commit()
-                    current["recovery_count"] = current.get("recovery_count", 0) + 1
-                heartbeat = asyncio.create_task(self.heartbeat(job["task_id"]))
-                try:
-                    await self.execute(current)
-                finally:
-                    heartbeat.cancel()
-                    await asyncio.gather(heartbeat, return_exceptions=True)
+        while not self.closing:
+            current = await self.get(job["task_id"], job["thread_id"])
+            if current is None or current["status"] != "working":
                 return
+            lease = current.get("lease_until")
+            if current.get("owner") and current["owner"] != self.owner and lease:
+                wait = (datetime.fromisoformat(lease) - datetime.now(UTC)).total_seconds()
+                if wait > 0:
+                    ticket = self.tickets.pop(job["task_id"], None)
+                    if ticket:
+                        self.scheduler.gate("runs").cancel(ticket)
+                    await asyncio.sleep(min(wait, 5))
+                    continue
+            async with self.lock:
+                cursor = await self.connection.execute(
+                    """UPDATE jobs SET owner=?,lease_until=?
+                    WHERE task_id=? AND status='working' AND (owner IS NULL OR owner=? OR lease_until<=?)""",
+                    (
+                        self.owner,
+                        (datetime.now(UTC) + timedelta(seconds=15)).isoformat(),
+                        job["task_id"],
+                        self.owner,
+                        now(),
+                    ),
+                )
+                claimed = cursor.rowcount == 1
+                await cursor.close()
+                await self.connection.commit()
+            if not claimed:
+                await asyncio.sleep(0.05)
+                continue
+            if recovering:
+                async with self.lock:
+                    await self.connection.execute(
+                        "UPDATE jobs SET recovery_count=recovery_count+1 WHERE task_id=? AND owner=?",
+                        (job["task_id"], self.owner),
+                    )
+                    await self.connection.commit()
+                current["recovery_count"] = current.get("recovery_count", 0) + 1
+            heartbeat = asyncio.create_task(self.heartbeat(job["task_id"]))
+            try:
+                from agent.runtime.context import RunContext
+                from agent.runtime.policies import load_runtime_policy
+
+                context = RunContext(
+                    job["task_id"],
+                    job["thread_id"],
+                    self.directory,
+                    policy=load_runtime_policy(),
+                    scheduler=self.scheduler,
+                    scheduler_ticket=self.tickets.get(job["task_id"]),
+                    deadline=datetime.fromisoformat(job["expires_at"]),
+                )
+                try:
+                    async with self.scheduler.run_slot(context):
+                        await self.execute(current)
+                except Exception as error:
+                    await self.transition(
+                        job["task_id"],
+                        "failed",
+                        expected_owner=self.owner,
+                        error="任务总时长预算耗尽（排队等待）" if context.stop_status == "timed_out" else str(error),
+                    )
+            finally:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            return
 
     async def heartbeat(self, task_id):
         while True:
@@ -308,6 +377,8 @@ class JobService:
 
     async def _close(self):
         self.closing = True
+        self.dispatch_task.cancel()
+        await asyncio.gather(self.dispatch_task, return_exceptions=True)
         for context in self.contexts.values():
             context.stop("interrupted")
         tasks = list(self.tasks.values())

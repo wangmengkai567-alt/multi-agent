@@ -266,11 +266,14 @@ async def test_timeout_store_migration_preserves_history_and_terminal_guards(san
 async def test_total_deadline_interrupts_real_retry_backoff(sandbox_dir, monkeypatch):
     import requests
 
+    monkeypatch.setenv("MYSQL_READONLY_USER", "test_reader")
+    monkeypatch.setenv("MYSQL_READONLY_PASSWORD", "test_password")
+    monkeypatch.setenv("MYSQL_DATABASE", "test_business")
     calls = []
     reached = asyncio.Event()
 
     async def body(question, session):
-        request = SimpleNamespace(tool_call={"name": "internet_search", "id": "search", "args": {"query": "q"}})
+        request = SimpleNamespace(tool_call={"name": "list_sql_tables", "id": "tables", "args": {}})
 
         async def transient(request):
             calls.append(1)
@@ -286,6 +289,7 @@ async def test_total_deadline_interrupts_real_retry_backoff(sandbox_dir, monkeyp
             update={
                 "timeouts": policy.timeouts.model_copy(update={"total_seconds": 1.5}),
                 "retry": policy.retry.model_copy(update={"delay_seconds": 4.0}),
+                "sql": policy.sql.model_copy(update={"allowed_tables": ["orders"]}),
             }
         )
         record = (await client.post("/api/task", json={"query": "retry"})).json()
@@ -311,7 +315,9 @@ async def test_total_deadline_interrupts_real_result_reviewer(sandbox_dir, monke
 
     async def body(question, session):
         reviewer = ResultReviewer(ReviewConfig(enabled=True, model_check=True), RunnableLambda(reviewing))
-        await reviewer.review("task", "evidence", [])
+        from protocol_fixtures import evidence, fact, report
+
+        await reviewer.review("Agent A", report(fact()), [evidence()])
         return "late"
 
     monkeypatch.setattr(server, "run_deep_agent", body)

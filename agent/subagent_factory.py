@@ -34,7 +34,7 @@ def build_subagents(registry, sub_model, *, review_model, models=None, hooks=Non
             + (
                 "本阶段只收集当前分工所需的真实依据。资料足够或额度用尽时结束收集，"
                 "最后只输出‘资料收集完成’，不概述资料、不编写事实报告；报告由后续独立步骤生成。"
-                if spec.review_config.grounded_report
+                if spec.review_config.enabled
                 else RESULT_PROMPT
             )
         )
@@ -63,7 +63,7 @@ def build_subagents(registry, sub_model, *, review_model, models=None, hooks=Non
             ],
             name=spec.agent_id,
         )
-        if spec.review_config.grounded_report:
+        if spec.review_config.enabled:
             executor = GroundedSearchExecutor(executor, child_model)
         result.append(
             {

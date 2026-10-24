@@ -190,10 +190,8 @@ class EventSink:
         error = redact_text(error) if error is not None else None
         kind = "task_result" if status == "completed" else "error" if status == "failed" else f"run_{status}"
         data = {"result": answer} if status == "completed" else {"error": error, "partial_result": answer}
-        if getattr(context, "delivery_status", None):
-            data["delivery_status"] = context.delivery_status
+        data["coverage"] = getattr(context, "coverage", "unknown")
         if getattr(context, "pending_jobs", None):
-            data["delivery_status"] = "pending"
             data["jobs"] = list(context.pending_jobs.values())
         if hasattr(context, "call_counts"):
             data["call_counts"] = dict(context.call_counts)
@@ -213,7 +211,14 @@ class EventSink:
         )
         # Final answers/errors are durable business output, not raw tool parameters.
         event["data"] = data
-        saved = await self.store.finish(context.run_id, status, answer=answer, error=error, event=event)
+        saved = await self.store.finish(
+            context.run_id,
+            status,
+            answer=answer,
+            error=error,
+            event=event,
+            coverage=getattr(context, "coverage", "unknown"),
+        )
         if saved:
             self._dispatch(saved)
         if recording_error:

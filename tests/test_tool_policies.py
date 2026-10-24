@@ -429,7 +429,10 @@ async def test_invalid_config_prevents_startup_before_agent_or_db(sandbox_dir, m
         MySQLError("sql syntax", errno=1064),
     ],
 )
-def test_non_transient_errors_never_retry(context, error):
+def test_non_transient_errors_never_retry(context, error, monkeypatch):
+    monkeypatch.setenv("MYSQL_READONLY_USER", "test_reader")
+    monkeypatch.setenv("MYSQL_READONLY_PASSWORD", "test_password")
+    monkeypatch.setenv("MYSQL_DATABASE", "test_business")
     data = context.policy.model_dump()
     data["retry"]["delay_seconds"] = 0.0
     context.policy = RuntimePolicy.model_validate(data)
@@ -441,7 +444,7 @@ def test_non_transient_errors_never_retry(context, error):
 
     with pytest.raises(type(error)):
         HookToolMiddleware().wrap_tool_call(
-            SimpleNamespace(tool_call={"name": "internet_search", "args": {"query": "q"}, "id": "failed"}), failed
+            SimpleNamespace(tool_call={"name": "list_sql_tables", "args": {}, "id": "failed"}), failed
         )
     assert executions == [1] and context.call_counts["retry"] == 0
 
@@ -472,7 +475,7 @@ def test_invalid_search_parameters_do_not_execute(context, args):
     assert result.status == "error" and calls == []
 
 
-def test_tavily_client_single_attempt_timeout_and_close(context, monkeypatch):
+def test_internal_tavily_client_single_attempt_timeout_and_close(context, monkeypatch):
     from tavily.errors import TimeoutError as TavilyTimeoutError
 
     from tools import tavily_tool
@@ -483,7 +486,8 @@ def test_tavily_client_single_attempt_timeout_and_close(context, monkeypatch):
 
     class Client:
         def __init__(self, **kwargs):
-            pass
+            import requests
+            self.session = requests.Session()
 
         def __enter__(self):
             return self
@@ -500,13 +504,10 @@ def test_tavily_client_single_attempt_timeout_and_close(context, monkeypatch):
     data["retry"]["delay_seconds"] = 0.0
     context.policy = RuntimePolicy.model_validate(data)
     with pytest.raises(TavilyTimeoutError):
-        HookToolMiddleware().wrap_tool_call(
-            SimpleNamespace(tool_call={"name": "internet_search", "args": {"query": "q"}, "id": "tavily"}),
-            lambda req: tavily_tool.internet_search.invoke(req.tool_call["args"]),
-        )
-    assert len(calls) == len(closed) == 2
+        tavily_tool.internet_search.func(query="q")
+    assert len(calls) == len(closed) == 1
     assert all(call["timeout"] == context.policy.search.timeout_seconds == 20 for call in calls)
-    assert context.call_counts["tool"] == 2 and context.call_counts["retry"] == 1
+    assert context.call_counts["tool"] == 0 and context.call_counts["retry"] == 0
 
 
 def test_rejected_database_grants_prevent_select_and_release_connection(context, monkeypatch):

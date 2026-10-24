@@ -14,8 +14,7 @@ from tavily import TavilyClient
 
 from agent.runtime.evidence import relevant_excerpt
 from agent.runtime.policies import MissingConfiguration, PolicyError, policy_for_run, request_timeout
-from agent.runtime.retrieval import SearchFollowUp, SearchHistory, usable_page
-from agent.runtime.search import search_allowance
+from agent.runtime.retrieval import SearchHistory, usable_page
 from api.monitor import monitor
 
 
@@ -62,8 +61,12 @@ def compact_search_response(payload, limits, query=None):
 
 def domain_array(value):
     """Accept a JSON-encoded array used by some compatible tool-call transports."""
+    if value is None or value == "" or value == []:
+        return None
     if isinstance(value, str):
         value = json.loads(value)
+    if value is None or value == []:
+        return None
     if isinstance(value, list) and (
         not 1 <= len(value) <= 20
         or any(
@@ -78,7 +81,7 @@ def domain_array(value):
 
 
 DomainList = Annotated[
-    list[str],
+    list[str] | None,
     BeforeValidator(domain_array),
     Field(description="Bare domain names only, e.g. docs.python.org. Never include https:// or a URL path."),
 ]
@@ -90,23 +93,11 @@ def internet_search(
     topic: Literal["news", "finance", "general"] = "general",
     max_results: int = 3,
     include_raw_content: bool = False,
-    include_domains: DomainList | None = None,
-    follow_up: Annotated[
-        SearchFollowUp | None,
-        Field(
-            description="First search: null. Subsequent searches: a JSON object with the declared fields, never a JSON-encoded string. Do not stringify this nested object."
-        ),
-    ] = None,
+    include_domains: DomainList = None,
+    search_depth: Literal["basic", "advanced"] = "basic",
 ):
-    """Search public sources; start with one query. Every subsequent search requires follow_up grounded in the previous call: confirmed information, a necessary missing fact, why existing sources cannot answer it, and a targeted search goal. Assess key listed source_ids; explain every source only when claiming all previous results are irrelevant; read key relevant pages before searching again. The runtime binds the previous search automatically; do not supply tool-call IDs. For official sources use include_domains, and site: plus the required version path."""
-    if include_domains is not None and (
-        not 1 <= len(include_domains) <= 20
-        or any(
-            not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", domain) or "." not in domain
-            for domain in include_domains
-        )
-    ):
-        raise ValueError("include_domains must contain domain names without URL paths")
+    """Internal provider search. Model-visible decisions use research_step."""
+    include_domains = domain_array(include_domains)
     if not query.strip() or not 1 <= max_results <= 20:
         raise ValueError("Invalid search arguments")
     load_dotenv()
@@ -115,17 +106,19 @@ def internet_search(
         raise MissingConfiguration("Tavily API key is missing")
     limits = policy_for_run().search
     monitor.report_tool("网络搜索工具", {"query": query, "topic": topic, "max_results": max_results})
-    allowance = search_allowance.get()
-    depth = "advanced" if allowance and allowance.task.refinement_open else "basic"
+
     with TavilyClient(api_key=key) as client:
         preserve_http_errors(client)
+        from agent.runtime.research import audit_transport
+
+        audit_transport(client)
         payload = client.search(
             query=query,
             **({"include_domains": include_domains} if include_domains else {}),
             topic=topic,
             max_results=max_results,
             include_raw_content=include_raw_content,
-            search_depth=depth,
+            search_depth=search_depth,
             timeout=request_timeout(limits.timeout_seconds),
         )
     return compact_search_response(payload, limits, query), payload
@@ -184,6 +177,9 @@ def read_web_page(
     monitor.report_tool("网页正文读取工具", {"url": url, "query": query})
     with TavilyClient(api_key=key) as client:
         preserve_http_errors(client)
+        from agent.runtime.research import audit_transport
+
+        audit_transport(client)
         payload = client.extract(
             urls=[url],
             query=query,
