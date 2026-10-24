@@ -1,16 +1,20 @@
 """Per-run Skill discovery, explicit body loading and auditable read-only resources."""
 
 import asyncio
+import re
 from contextvars import ContextVar
 from hashlib import sha256
 from pathlib import Path
+from typing import Annotated, NotRequired
 
-from deepagents.middleware._utils import append_to_system_message
-from deepagents.middleware.skills import SkillsMiddleware, _parse_skill_metadata
+import yaml
+from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain.agents.middleware.types import PrivateStateAttr
 
 from agent.runtime.backend import GuardedFilesystemBackend
 from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event
+from agent.runtime.experts import append_system
 from agent.runtime.policies import PROJECT_ROOT, MissingConfiguration, policy_for_run
 from utils.secure_paths import PathDenied, confined_path
 
@@ -152,12 +156,10 @@ def explicit_bodies(allowed):
             file = confined_path(f"{name}/SKILL.md", skill_root())
             authorize_skill_path(file, allowed=allowed)
             try:
-                content = file.read_text(encoding="utf-8")
+                content = file.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError) as exc:
                 raise MissingConfiguration(f"Selected Skill {name} could not be loaded") from exc
-            parsed = _parse_skill_metadata(content, f"/skills/{name}/SKILL.md", name)
-            if not parsed or parsed["name"] != name:
-                raise MissingConfiguration(f"Selected Skill {name} has invalid metadata")
+            parse_metadata(content, name)
             if not content.split("---", 2)[-1].strip():
                 raise MissingConfiguration(f"Selected Skill {name} has no body")
             record_read(file, content, reason="explicit")
@@ -172,15 +174,15 @@ class SkillBackend(GuardedFilesystemBackend):
         super().__init__(root, readonly=True)
         self.allowed = validate_skill_ids(allowed)
 
-    def _resolve_path(self, key):
-        path = super()._resolve_path(key)
+    def resolve_path(self, key):
+        path = super().resolve_path(key)
         return authorize_skill_path(path, self.cwd, directories=True, allowed=self.allowed)
 
     def ls_info(self, path):
         result = []
         for item in super().ls_info(path):
             try:
-                self._resolve_path(item["path"])
+                self.resolve_path(item["path"])
                 result.append(item)
             except PathDenied:
                 continue
@@ -195,22 +197,44 @@ class SkillBackend(GuardedFilesystemBackend):
                 continue
 
     def read(self, file_path, offset=0, limit=2000):
-        file = self._resolve_path(file_path)
+        file = self.resolve_path(file_path)
         response = super().read(file_path, offset=offset, limit=limit)
         if not response.startswith("Error"):
             record_read(file, file.read_text(encoding="utf-8"), offset=offset, limit=limit)
         return response
 
 
-class ProjectSkillsMiddleware(SkillsMiddleware):
-    """Refresh actor metadata each invocation; inject explicit bodies outside checkpoint state."""
+def parse_metadata(content, name):
+    match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)", content, re.S)
+    if match is None:
+        raise MissingConfiguration(f"Skill {name} has no YAML metadata")
+    try:
+        header = yaml.safe_load(match[1])
+    except yaml.YAMLError as exc:
+        raise MissingConfiguration(f"Skill {name} has invalid YAML metadata") from exc
+    if (
+        not isinstance(header, dict)
+        or header.get("name") != name
+        or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)
+        or len(name) > 64
+        or not isinstance(header.get("description"), str)
+        or not 1 <= len(header["description"].strip()) <= 1024
+    ):
+        raise MissingConfiguration(f"Skill {name} has invalid metadata")
+    return dict(name=name, description=header["description"].strip(), path=f"/skills/{name}/SKILL.md")
+
+
+class ProjectSkillsState(AgentState):
+    skills_metadata: NotRequired[Annotated[list[dict], PrivateStateAttr]]
+
+
+class ProjectSkillsMiddleware(AgentMiddleware):
+    """Registered local skill metadata, using only public middleware/message interfaces."""
+
+    state_schema = ProjectSkillsState
 
     def __init__(self, allowed=SKILL_IDS):
-        from agent.runtime.backend import run_backend
-
-        super().__init__(backend=run_backend, sources=["/skills/"])
         self.allowed = validate_skill_ids(allowed)
-        self.system_prompt_template = SKILL_PROMPT
 
     def checked_metadata(self, update):
         for item in update["skills_metadata"]:
@@ -220,19 +244,28 @@ class ProjectSkillsMiddleware(SkillsMiddleware):
 
     def before_agent(self, state, runtime, config):
         explicit_bodies(self.allowed)
-        return self.checked_metadata(
-            super().before_agent({k: v for k, v in state.items() if k != "skills_metadata"}, runtime, config)
-        )
+        metadata = []
+        for name in self.allowed:
+            file = confined_path(f"{name}/SKILL.md", skill_root())
+            authorize_skill_path(file, allowed=self.allowed)
+            if file.stat().st_size > 10 * 1024 * 1024:
+                raise MissingConfiguration(f"Skill {name} exceeds the metadata size limit")
+            metadata.append(parse_metadata(file.read_text(encoding="utf-8-sig"), name))
+        return self.checked_metadata(dict(skills_metadata=metadata))
 
     async def abefore_agent(self, state, runtime, config):
-        await asyncio.to_thread(explicit_bodies, self.allowed)
-        return self.checked_metadata(
-            await super().abefore_agent({k: v for k, v in state.items() if k != "skills_metadata"}, runtime, config)
-        )
+        return await asyncio.to_thread(self.before_agent, state, runtime, config)
 
     def modify_request(self, request):
-        modified = super().modify_request(request)
-        bodies = explicit_bodies(self.allowed)
-        if bodies:
-            modified = modified.override(system_message=append_to_system_message(modified.system_message, bodies))
-        return modified
+        metadata = self.checked_metadata(dict(skills_metadata=request.state["skills_metadata"]))["skills_metadata"]
+        listing = "\n".join(f"- {s['name']}: {s['description']}\n  阅读 {s['path']}" for s in metadata)
+        section = SKILL_PROMPT.format(skills_locations="/skills/", skills_list=listing)
+        return request.override(
+            system_message=append_system(request.system_message, section + explicit_bodies(self.allowed))
+        )
+
+    def wrap_model_call(self, request, handler):
+        return handler(self.modify_request(request))
+
+    async def awrap_model_call(self, request, handler):
+        return await handler(self.modify_request(request))

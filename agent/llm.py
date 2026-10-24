@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 import httpx
 from dotenv import find_dotenv, load_dotenv
@@ -23,11 +24,14 @@ def model_options(raw, field_name):
 
 
 def create_role_model(role):
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", role):
+        raise ValueError("Invalid model profile name")
     prefix = f"LLM_{role}_"
     settings = {name: os.getenv(prefix + name, "").strip() for name in ("MODEL", "BASE_URL", "API_KEY")}
     missing = [prefix + name for name, value in settings.items() if not value]
     if missing:
         raise MissingConfiguration("Missing required model configuration: " + ", ".join(missing))
+    options = model_options(os.getenv(prefix + "EXTRA_BODY"), prefix + "EXTRA_BODY")
     from agent.runtime.measurement import (
         aobserve_http_request,
         aobserve_http_response,
@@ -61,13 +65,9 @@ def create_role_model(role):
         },
         max_retries=0,
         timeout=load_runtime_policy().timeouts.request_seconds,
-        **model_options(os.getenv(prefix + "EXTRA_BODY"), prefix + "EXTRA_BODY"),
+        **options,
     )
 
 
 # This module is imported only when the application initializes its agent.
 load_dotenv(find_dotenv())
-
-main_model = create_role_model("MAIN")
-sub_model = create_role_model("SUB")
-review_model = create_role_model("REVIEW")

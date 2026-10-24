@@ -66,6 +66,7 @@ class RunContext:
     internal_result_version: int = 0
     user_query: str = field(default="", repr=False)
     task_contract: object | None = field(default=None, repr=False)
+    expert_contract: dict = field(default_factory=dict, repr=False)
     previous_run_id: str | None = None
     previous_answer: str = field(default="", repr=False)
     latest_message: str = field(default="", repr=False)

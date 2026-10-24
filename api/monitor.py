@@ -96,10 +96,12 @@ class ToolMonitor:
         )
 
     def report_assistant(self, assistant_name: str, args: dict[str, Any] = None, *, call_id=None):
-        from agent.subagent_registry import DISPLAY_NAMES
+        from agent.runtime.context import get_run_context
 
         target = assistant_name
-        assistant_name = DISPLAY_NAMES.get(target, target)
+        context = get_run_context()
+        if context is not None and target in context.expert_contract:
+            assistant_name = context.expert_contract[target]["display_name"]
         self._emit(
             "assistant_call",
             f"模型请求助手: {assistant_name}",

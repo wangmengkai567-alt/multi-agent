@@ -10,11 +10,11 @@ from test_framework_contract import ScriptedModel
 from agent.reflection import ResultReviewer
 from agent.runtime.context import RunContext, reset_run_context, set_run_context
 from agent.runtime.policies import load_runtime_policy
-from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentSpec
+from agent.subagent_registry import ReviewConfig, SubagentSpec
 
 
 def spec(settings):
-    return SubagentSpec("search", DISPLAY_NAMES["search"], "Find facts", "Return facts", (), review_config=settings)
+    return SubagentSpec("search", DEFAULT_NAMES["search"], "Find facts", "Return facts", (), review_config=settings)
 
 
 @pytest.fixture
@@ -60,3 +60,6 @@ def test_review_budget_exhaustion_keeps_the_report_unapproved(context):
         "Agent A", report(fact()), [evidence()]
     )
     assert result.verdict == "budget_exhausted" and result.accepted_report is None
+
+
+DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}

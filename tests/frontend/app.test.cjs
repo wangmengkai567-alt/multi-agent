@@ -28,7 +28,7 @@ function harness(saved) {
 }
 const response = (data,status=200) => ({ok:status<400,status,json:async()=>data});
 const ev = (n,event,status,data={}) => ({thread_id:'thread',run_id:'run',event_seq:n,event,status,data,actor:'search',call_id:'call',timestamp:'2026-10-17T00:00:00Z'});
-const history = (status='running',answer=null,events=[]) => ({run:{run_id:'run',thread_id:'thread',status,answer,error:null},events});
+const history = (status='running',answer=null,events=[]) => ({run:{run_id:'run',thread_id:'thread',status,answer,error:null,coverage:status==='completed'?'complete':'unknown'},events});
 async function main() {
   const h=harness(), {ui,element,context}=h;
   const s=ui.createSession('thread','中文问题','run');
@@ -40,13 +40,13 @@ async function main() {
   ui.applyEvent(s,ev(3,'subagent_review','insufficient',{issues:['缺少来源']}));
   ui.applyEvent(s,ev(4,'subagent_refinement','insufficient',{revision_instruction:'补查来源'}));
   ui.applyEvent(s,ev(5,'subagent_review','passed'));
-  ui.applyEvent(s,ev(6,'task_result','completed',{result:'完整答案'.repeat(500)}));
+  ui.applyEvent(s,ev(6,'task_result','completed',{result:'完整答案'.repeat(500),coverage:'complete'}));
   ui.applyEvent(s,ev(6,'task_result','completed',{result:'重复'}));
   assert.equal(s.logs.length,6); assert.equal(ui.displayStatus(s),'completed');
   assert.equal(element('#answer').textContent,'完整答案'.repeat(500));
   assert.match(element('#logArea').innerHTML,/正文已读取/); assert.match(element('#logArea').innerHTML,/补查来源/);
   assert.ok(h.streams[0].closed);
-  s.degraded=true; assert.equal(ui.displayStatus(s),'partial');
+  s.coverage='partial'; assert.equal(ui.displayStatus(s),'partial');
   for (const state of ['cancelled','timed_out','interrupted','failed']) {
     ui.applyEvent(s,ev(s.logs.length+1,state==='failed'?'error':'run_'+state,state,{error:'原因'}));
     assert.equal(ui.displayStatus(s),state); assert.match(element('#runSummary').innerHTML,/原因/);
@@ -59,23 +59,19 @@ async function main() {
   assert.match(ui.describeEvent(ev(29,'search_finalizing','partial')),/汇总已核实内容/);
   const quotaHarness = harness();
   const quota = quotaHarness.ui.createSession('thread','额度控制','quota');
-  quota.status = 'completed';
+  quota.status = 'completed'; quota.coverage = 'complete';
   quota.logs = [{...ev(1,'after_tool','completed'),actor:'search:internet_search'},
     {...ev(2,'after_tool','rejected',{error_category:'search_limit'}),actor:'search:internet_search'}];
   assert.equal(quotaHarness.ui.displayStatus(quota),'completed');
   const finalCheck = quotaHarness.ui.createSession('thread','最终检查','final-check');
   finalCheck.status='completed';
-  finalCheck.logs=[{...ev(1,'answer_validation','insufficient'),call_id:'final-check'}];
-  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'partial');
-  finalCheck.logs.push({...ev(2,'answer_validation','passed'),call_id:'final-check'});
-  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'completed');
-
-  finalCheck.logs.push({...ev(3,'subagent_review','insufficient'),call_id:'earlier-attempt'});
-  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'partial');
-  finalCheck.logs.push({...ev(4,'answer_validation','passed',{answer_kind:'complete'}),call_id:'final-check'});
-  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'completed');
-  finalCheck.logs.push({...ev(5,'answer_validation','partial',{answer_kind:'partial'}),call_id:'final-check'});
-  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'partial');
+  // A review verdict cannot assert overall coverage; only the server owns that state.
+  finalCheck.logs=[{...ev(1,'answer_validation','passed'),call_id:'final-check'}];
+  assert.equal(quotaHarness.ui.displayStatus(finalCheck),'coverage_unknown');
+  for (const [coverage,expected] of [['unknown','coverage_unknown'],['partial','partial'],['complete','completed']]) {
+    finalCheck.coverage=coverage;
+    assert.equal(quotaHarness.ui.displayStatus(finalCheck),expected);
+  }
 
   assert.match(ui.describeEvent(ev(30,'subagent_review','dependency_unavailable',{issues:['缺配置']})),/依赖不可用.*缺配置/);
   assert.match(ui.describeEvent(ev(31,'subagent_refinement','insufficient',{
@@ -108,14 +104,16 @@ async function main() {
   ui.closeSession('run'); assert.equal(Object.keys(ui.sessions).length,0);
   assert.equal(h.stored().runs.length,0);
   const reordered=ui.createSession('thread','乱序','run');
-  ui.applyEvent(reordered,ev(3,'task_result','completed',{result:'正确答案'}));
+  ui.applyEvent(reordered,ev(3,'task_result','completed',{result:'正确答案',coverage:'complete'}));
   ui.applyEvent(reordered,ev(1,'run_queued','queued'));
   ui.applyEvent(reordered,ev(2,'run_started','running'));
   assert.equal(reordered.status,'completed'); assert.equal(reordered.answer,'正确答案');
   ui.applyEvent(reordered,{...ev(4,'after_tool','failed'),actor:'main:write_file'});
-  assert.equal(ui.displayStatus(reordered),'partial');
-  ui.applyEvent(reordered,{...ev(5,'after_tool','completed'),actor:'main:write_file'});
   assert.equal(ui.displayStatus(reordered),'completed');
+  // Tool status does not rewrite authoritative coverage.
+  reordered.coverage='partial';
+  ui.applyEvent(reordered,{...ev(5,'after_tool','completed'),actor:'main:write_file'});
+  assert.equal(ui.displayStatus(reordered),'partial');
   // All new choices are present in the real page, submitted and rendered in the timeline.
   const page = fs.readFileSync(path.join(__dirname, '../../api/static/index.html'), 'utf8');
   const extra = harness(), session = extra.ui.createSession('thread','新增技能','run');

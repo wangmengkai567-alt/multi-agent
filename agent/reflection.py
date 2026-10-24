@@ -204,7 +204,7 @@ def rule_review(text, evidence, settings):
         return insufficient("结果为空")
     successful = [item for _, item in latest.values() if evidence_available(item)]
     for name in settings.required_tools:
-        if not any(item["name"] == name for item in successful):
+        if not any(item["name"] == name or item.get("via") == name for item in successful):
             return insufficient("缺少真实工具执行记录：" + name)
     for item in successful:
         if item["name"] in settings.required_tools and item["content"] in (None, "", [], {}):

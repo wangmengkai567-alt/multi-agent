@@ -4,10 +4,10 @@ import json
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
-from deepagents.middleware._utils import append_to_system_message
 from langchain.agents.middleware import AgentMiddleware, ModelResponse
 from langchain_core.messages import AIMessage
 
+from agent.runtime.experts import append_system
 from agent.runtime.policies import SearchLimitReached, calls_available, load_runtime_policy
 from agent.runtime.review_state import ReviewState, deliverable
 
@@ -235,7 +235,7 @@ class SearchExecutionMiddleware(AgentMiddleware):
         )
         allowance.task.research_turns += 1
         return request.override(
-            system_message=append_to_system_message(request.system_message, note),
+            system_message=append_system(request.system_message, note),
             model_settings={**request.model_settings, "strict": True, "parallel_tool_calls": False},
         )
 

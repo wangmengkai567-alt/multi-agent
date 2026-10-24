@@ -317,3 +317,37 @@ def apply_coverage(context, task_id, rows):
 
 def request_description(context, task_id):
     return json.dumps(task_requirements(context, task_id), ensure_ascii=False)
+
+
+def register_support(context, task_id):
+    """Task-description experts support original obligations without adding completion gates."""
+    from copy import deepcopy
+
+    current = [
+        r for r in context.requirements.values() if r["required"] and r["query_version"] == context.query_version
+    ]
+    if not current:
+        current = register(
+            context,
+            None,
+            [
+                RequirementSpec(kind="fact", anchor=anchor, label=anchor[:160])
+                for anchor in original_required_clauses(context.user_query)
+            ],
+            owner="main",
+        )
+    if not current:
+        raise ValueError("Expert work needs original user requirements")
+    with context.budget_lock:
+        for parent in current:
+            row = deepcopy(parent)
+            row.update(
+                rid=str(uuid4()),
+                parent_rid=parent["rid"],
+                task_id=task_id,
+                owner="task",
+                kind="fact",
+                required=False,
+                label="研究支持（非完成门槛）：" + parent["label"][:145],
+            )
+            _store_requirement(context, row)

@@ -23,7 +23,7 @@ from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.events import EventPersistenceError, EventSink
 from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.policies import RuntimePolicy, load_runtime_policy, policy_for_run
-from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentRegistry, SubagentSpec
+from agent.subagent_registry import ReviewConfig, SubagentRegistry, SubagentSpec
 from api.run_store import RunStore
 from utils.secure_paths import PathDenied, resolve_run_path
 
@@ -56,7 +56,7 @@ async def runtime(sandbox_dir):
 def spec(target="db", *, settings=None, tools=()):
     return SubagentSpec(
         target,
-        DISPLAY_NAMES[target],
+        DEFAULT_NAMES[target],
         "Query evidence",
         "Return evidence",
         tools,
@@ -486,3 +486,6 @@ async def test_retired_source_history_is_preserved_but_never_handed_to_search(ru
     assert HANDOFF_RULE not in await search_task()
     with pytest.raises(ValueError, match="Unsupported active result source"):
         await store.record_result({"source": "knowledge"}, {})
+
+
+DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}

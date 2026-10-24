@@ -45,7 +45,7 @@ class GroundedSearchExecutor(Runnable):
         guidance = [
             body
             for (actor, owner, _), body in context.skill_bodies.items()
-            if actor == "search" and owner == call.call_id
+            if actor == call.target and owner == call.call_id
         ]
         tools = model_evidence(
             [

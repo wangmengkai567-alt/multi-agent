@@ -39,6 +39,7 @@ class HookCall:
     error: BaseException | None = None
     elapsed_ms: float = 0
     target: str | None = None
+    source_kind: str | None = None
     check_status: str = "not_checked"
     state: ReviewState = field(default_factory=ReviewState)
     current_result_id: str | None = None
@@ -179,6 +180,9 @@ class HookToolMiddleware(AgentMiddleware):
     def __init__(self, actor="main", *, allowed_targets=(), hooks=None, managed_delegation=False):
         self.actor = actor
         self.allowed_targets = frozenset(allowed_targets)
+        self.target_specs = (
+            dict(allowed_targets) if isinstance(allowed_targets, dict) or hasattr(allowed_targets, "items") else {}
+        )
         self.hooks = hooks or pipeline
         self.managed_delegation = managed_delegation
 
@@ -191,6 +195,11 @@ class HookToolMiddleware(AgentMiddleware):
             parent_call_id=parent.call_id if parent else None,
             args=tool["args"],
             target=tool["args"].get("subagent_type") if tool["name"] == "task" else None,
+            source_kind=(
+                self.target_specs[tool["args"]["subagent_type"]].execution.source_kind
+                if tool["name"] == "task" and tool["args"].get("subagent_type") in self.target_specs
+                else None
+            ),
         )
 
     def _before(self, request, call):
@@ -203,7 +212,7 @@ class HookToolMiddleware(AgentMiddleware):
             if contract.delivery_kind == "direct":
                 raise HookRejected("直接交付契约禁止业务工具调用")
             if not contract.network_allowed and (
-                call.target == "search"
+                (call.target in self.target_specs and self.target_specs[call.target].execution.network_access)
                 or request.tool_call["name"]
                 in ("research_step", "internet_search", "read_web_page", "submit_research_job")
             ):

@@ -14,7 +14,7 @@ from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.hooks import HookCall, HookRejected
 from agent.runtime.models import ModelRequestTimeout, budget_model
 from agent.runtime.policies import load_runtime_policy
-from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentSpec
+from agent.subagent_registry import ReviewConfig, SubagentSpec
 
 
 @pytest.fixture
@@ -141,7 +141,7 @@ async def test_model_timeout_is_identified_and_does_not_restart_same_search(cont
         return {"messages": [await model.ainvoke(state["messages"])]}
 
     spec = SubagentSpec(
-        "search", DISPLAY_NAMES["search"], "Search", "Return facts", (), review_config=ReviewConfig(enabled=True)
+        "search", DEFAULT_NAMES["search"], "Search", "Return facts", (), review_config=ReviewConfig(enabled=True)
     )
     agent = DelegationRunnable(spec, RunnableLambda(execute))
     result = await agent.ainvoke({"messages": [HumanMessage(content="forecast")]})
@@ -320,7 +320,7 @@ async def test_bad_domain_argument_is_recoverable_in_same_task_without_searching
     )
     settings = ReviewConfig(enabled=True, required_tools=("internet_search",), require_sources=True)
     spec = SubagentSpec(
-        "search", DISPLAY_NAMES["search"], "Find", "Find", (tavily_tool.internet_search,), review_config=settings
+        "search", DEFAULT_NAMES["search"], "Find", "Find", (tavily_tool.internet_search,), review_config=settings
     )
     registry = SubagentRegistry([spec])
     graph = create_deep_agent(
@@ -338,3 +338,6 @@ async def test_bad_domain_argument_is_recoverable_in_same_task_without_searching
     valid = next(item for item in task.evidence if item["call_id"] == "valid-domain")
     assert not invalid["executed"] and invalid["error_category"] == "invalid_argument"
     assert valid["executed"] and valid["status"] == "completed"
+
+
+DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}

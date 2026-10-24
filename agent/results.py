@@ -168,14 +168,16 @@ class ResultService:
             return inputs
         await sink.flush(context.run_id)
         records = await sink.store.list_results(context.run_id, thread_id=context.thread_id, purpose="handoff")
-        internal = [r for r in records if r["source"] == "db"]
+        from agent.runtime.experts import source_kind
+
+        internal = [r for r in records if source_kind(context, r["source"]) == "db"]
         workflow = context.business_mode == "internal_external"
         data = call.workflow_data if workflow else {}
         if workflow:
             from agent.runtime.workflows import refusal
 
             approved = set(data.get("db_result_ids", []))
-            internal = [r for r in internal if r["source"] == "db" and r["result_id"] in approved]
+            internal = [r for r in internal if r["result_id"] in approved]
             if not internal and not data.get("degraded"):
                 raise refusal("database_required", "搜索必须关联本轮有效数据库结果，先完成数据库查询。")
         if not internal and not workflow:

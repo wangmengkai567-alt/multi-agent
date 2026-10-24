@@ -19,13 +19,13 @@ from agent.runtime.events import EventPersistenceError, EventSink
 from agent.runtime.hooks import HookPipeline, HookRejected, HookToolMiddleware, active_call, default_pipeline
 from agent.runtime.models import budget_model
 from agent.subagent_factory import build_subagents
-from agent.subagent_registry import DISPLAY_NAMES, SubagentRegistry, SubagentSpec
+from agent.subagent_registry import SubagentRegistry, SubagentSpec
 from api.monitor import monitor
 from api.run_store import RunStore
 
 
 def spec(target, tools=()):
-    return SubagentSpec(target, DISPLAY_NAMES[target], "Find evidence", "Return actual evidence", tools)
+    return SubagentSpec(target, DEFAULT_NAMES[target], "Find evidence", "Return actual evidence", tools)
 
 
 def build(registry, parent, children, *, hooks=None):
@@ -68,12 +68,12 @@ async def test_two_real_task_routes_and_durable_server_ids(runtime, asynchronous
         actual.append((target, active_call.get().parent_call_id, get_run_context().run_id))
         return f"facts:{target}"
 
-    registry = SubagentRegistry([spec(target, (probe,)) for target in DISPLAY_NAMES])
+    registry = SubagentRegistry([spec(target, (probe,)) for target in DEFAULT_NAMES])
     parent = ScriptedModel(
         responses=[
             *[
                 call("task", {"subagent_type": target, "description": f"private task {target}"}, f"model-{target}")
-                for target in DISPLAY_NAMES
+                for target in DEFAULT_NAMES
             ],
             AIMessage(content="done"),
         ]
@@ -82,7 +82,7 @@ async def test_two_real_task_routes_and_durable_server_ids(runtime, asynchronous
         target: ScriptedModel(
             responses=[call("probe", {"target": target}, f"tool-{target}"), AIMessage(content=f"answer:{target}")]
         )
-        for target in DISPLAY_NAMES
+        for target in DEFAULT_NAMES
     }
     agent = build(registry, parent, children)
     state = (
@@ -347,23 +347,23 @@ async def test_parallel_task_calls_are_linked_without_duplicate_hooks(runtime):
                 content="",
                 tool_calls=[
                     {"name": "task", "args": {"subagent_type": target, "description": target}, "id": target}
-                    for target in DISPLAY_NAMES
+                    for target in DEFAULT_NAMES
                 ],
             ),
             AIMessage(content="done"),
         ]
     )
-    children = {target: ScriptedModel(responses=[AIMessage(content=target)]) for target in DISPLAY_NAMES}
-    await build(SubagentRegistry([spec(target) for target in DISPLAY_NAMES]), parent, children).ainvoke(
+    children = {target: ScriptedModel(responses=[AIMessage(content=target)]) for target in DEFAULT_NAMES}
+    await build(SubagentRegistry([spec(target) for target in DEFAULT_NAMES]), parent, children).ainvoke(
         {"messages": [("user", "query")]}
     )
     await sink.flush(context.run_id)
     tasks = await store.list_subtasks(context.run_id)
-    assert len(tasks) == len(DISPLAY_NAMES) and {task["request_call_id"] for task in tasks} == set(DISPLAY_NAMES)
-    assert context.call_counts["tool"] == len(DISPLAY_NAMES) and context.call_counts["sub_model"] == len(DISPLAY_NAMES)
+    assert len(tasks) == len(DEFAULT_NAMES) and {task["request_call_id"] for task in tasks} == set(DEFAULT_NAMES)
+    assert context.call_counts["tool"] == len(DEFAULT_NAMES) and context.call_counts["sub_model"] == len(DEFAULT_NAMES)
     events = await store.list_events(context.run_id)
-    assert len([event for event in events if event["event"] == "before_delegate"]) == len(DISPLAY_NAMES)
-    assert len([event for event in events if event["event"] == "after_subagent"]) == len(DISPLAY_NAMES)
+    assert len([event for event in events if event["event"] == "before_delegate"]) == len(DEFAULT_NAMES)
+    assert len([event for event in events if event["event"] == "after_subagent"]) == len(DEFAULT_NAMES)
 
 
 @pytest.mark.asyncio
@@ -449,8 +449,8 @@ async def test_http_history_contains_subtasks_and_chinese_display_names(runtime,
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
         response = await client.get(f"/api/runs/{context.run_id}/history")
     assert response.status_code == 200
-    assert response.json()["subtasks"][0]["display_name"] == DISPLAY_NAMES["search"]
-    assert any(DISPLAY_NAMES["search"] in event["message"] for event in response.json()["events"])
+    assert response.json()["subtasks"][0]["display_name"] == DEFAULT_NAMES["search"]
+    assert any(DEFAULT_NAMES["search"] in event["message"] for event in response.json()["events"])
 
 
 @pytest.mark.asyncio
@@ -511,3 +511,6 @@ async def test_factory_child_cannot_delegate_to_unregistered_generic_agent(runti
     await sink.flush(context.run_id)
     assert context.call_counts["tool"] == 1 and len(await store.list_subtasks(context.run_id)) == 1
     assert "task" not in child.tool_names
+
+
+DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}

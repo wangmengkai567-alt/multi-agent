@@ -33,14 +33,26 @@ def loader(monkeypatch):
         return SimpleNamespace(**kwargs)
 
     monkeypatch.setattr(langchain.chat_models, "init_chat_model", create)
-    return lambda: runpy.run_path(str(LOADER)), calls
+
+    def load():
+        module = runpy.run_path(str(LOADER))
+        assert not calls
+        module["models"] = {role: module["create_role_model"](role) for role in ROLES}
+        return module
+
+    yield load, calls
+    for options in calls:
+        options["http_client"].close()
+        import asyncio
+
+        asyncio.run(options["http_async_client"].aclose())
 
 
 def test_clients_use_separate_models_endpoints_and_keys(loader):
     load, calls = loader
     module = load()
     assert len(calls) == 3
-    assert len({id(module[name]) for name in ("main_model", "sub_model", "review_model")}) == 3
+    assert len({id(model) for model in module["models"].values()}) == 3
     for role, options in zip(ROLES, calls, strict=True):
         assert options["model"] == f"model-{role.lower()}"
         assert options["base_url"] == f"https://{role.lower()}.example.test/v1"
@@ -84,3 +96,9 @@ def test_invalid_extra_body_reports_role_without_echoing_value(loader, monkeypat
     with pytest.raises(ValueError, match=variable) as error:
         load()
     assert value not in str(error.value)
+
+
+def test_import_does_not_create_clients(loader):
+    _, calls = loader
+    module = runpy.run_path(str(LOADER))
+    assert calls == [] and callable(module["create_role_model"])

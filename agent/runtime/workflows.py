@@ -115,13 +115,19 @@ async def snapshot(context):
         await ResultService().read_raw(context, row["result_id"])
     all_rows = await sink.store.list_results(context.run_id, thread_id=context.thread_id)
     tasks = await sink.store.list_subtasks(context.run_id)
-    active_db = any(t["target"] == "db" and t["status"] in ("queued", "running") for t in tasks)
+    from agent.runtime.experts import source_kind
+
+    active_db = any(source_kind(context, t["target"]) == "db" and t["status"] in ("queued", "running") for t in tasks)
     ended = {t["call_id"] for t in tasks if t["status"] in ("completed", "failed")}
-    source_ids = {source: [r["result_id"] for r in usable if r["source"] == source] for source in SOURCES}
+    source_ids = {
+        source: [r["result_id"] for r in usable if source_kind(context, r["source"]) == source] for source in SOURCES
+    }
     failures = [
         r["result_id"]
         for r in all_rows
-        if r["source"] == "db" and r["check_status"] == "dependency_unavailable" and r["call_id"] in ended
+        if source_kind(context, r["source"]) == "db"
+        and r["check_status"] == "dependency_unavailable"
+        and r["call_id"] in ended
     ]
     degraded = (
         context.business_mode == "internal_external" and not source_ids["db"] and bool(failures) and not active_db
@@ -136,7 +142,7 @@ async def snapshot(context):
             source_ids["db"] and set(data.get("result_ids", [])) & set(source_ids["db"])
         ):
             linked.add(event["call_id"])
-    searches = [r for r in usable if r["source"] == "search" and r["call_id"] in linked]
+    searches = [r for r in usable if source_kind(context, r["source"]) == "search" and r["call_id"] in linked]
     missing = [s for s in required_sources(context) if not source_ids[s] and not (s == "db" and degraded)]
     if context.business_mode == "internal_external" and not searches and "search" not in missing:
         missing.append("search")
@@ -160,13 +166,13 @@ async def snapshot(context):
 
 async def prepare_delegate(context, call):
     initialize_workflow(context)
-    if context.business_mode == "internal_external" and call.target == "search":
+    if context.business_mode == "internal_external" and call.source_kind == "search":
         call.workflow_data = await snapshot(context)
 
 
 def before_delegate_workflow(call):
     context = get_run_context()
-    if context is None or context.business_mode != "internal_external" or call.target != "search":
+    if context is None or context.business_mode != "internal_external" or call.source_kind != "search":
         return
     data = call.workflow_data
     if not data or not (data.get("db_result_ids") or data.get("degraded")):

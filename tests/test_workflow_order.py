@@ -23,7 +23,7 @@ from agent.runtime.models import budget_model
 from agent.runtime.policies import BudgetExceeded, MissingConfiguration, RuntimePolicy, policy_for_run
 from agent.runtime.workflows import DEGRADED_NOTICE, finalize_answer
 from agent.subagent_factory import build_subagents
-from agent.subagent_registry import DISPLAY_NAMES, ReviewConfig, SubagentRegistry, SubagentSpec
+from agent.subagent_registry import ReviewConfig, SubagentRegistry, SubagentSpec
 from api.run_store import RunStore
 from tools.markdown_tools import generate_markdown
 from tools.upload_file_read_tool import read_file_content
@@ -43,7 +43,7 @@ def report(name="report"):
 def expert(target, tools=(), enabled=True, required=()):
     return SubagentSpec(
         target,
-        DISPLAY_NAMES[target],
+        DEFAULT_NAMES[target],
         "Query",
         "Use real tool evidence",
         tools,
@@ -531,3 +531,6 @@ async def test_workflow_without_durable_store_does_not_execute_expert(runtime):
         assert not executed
     finally:
         context.event_sink = sink
+
+
+DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}

@@ -66,6 +66,7 @@ def save_job_checkpoint(context):
             "turn_counts",
             "original_call_ids",
             "task_scopes",
+            "expert_contract",
             "accepted_plan",
             "plan_version",
             "plan_expansions",

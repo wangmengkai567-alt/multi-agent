@@ -11,8 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from agent.runtime.context import get_run_context
 
 CONTRACT_VERSION = 1
-CHECKPOINT_VERSION = 14
-REVIEW_CONTRACT_VERSION = "review-v11-registered-quotes"
+CHECKPOINT_VERSION = 15
+REVIEW_CONTRACT_VERSION = "review-v12-expert-contract"
 NO_NETWORK = re.compile(
     r"不(?:需要|再|要|用|必)?(?:重新)?(?:联网|搜索|检索)|无需(?:再|重新)?(?:联网|搜索|检索)|"
     r"(?:do not|don't|without|no longer).{0,24}(?:brows|search|internet|network)",

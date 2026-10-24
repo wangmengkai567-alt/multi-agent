@@ -86,10 +86,10 @@ class SchedulerLimits(StrictConfig):
 
     @model_validator(mode="after")
     def valid_accounts(self):
-        if set(self.model_accounts) - {"MAIN", "SUB", "REVIEW"} or any(
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", key) for key in self.model_accounts) or any(
             not value.strip() for value in self.model_accounts.values()
         ):
-            raise ValueError("Model account groups must name MAIN/SUB/REVIEW with nonempty account IDs")
+            raise ValueError("Model account groups must name explicit model profiles with nonempty account IDs")
         return self
 
     runs: PoolLimits = Field(default_factory=lambda: PoolLimits(concurrency=2, queue_capacity=16))

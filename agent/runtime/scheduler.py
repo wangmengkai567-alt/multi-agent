@@ -10,11 +10,13 @@ from time import monotonic, sleep
 from uuid import uuid4
 
 _run_owner = ContextVar("scheduler_run_owner", default=None)
+child_owner = ContextVar("expert_execution_branch", default=None)
 
 
 def detached_context():
     context = copy_context()
     context.run(_run_owner.set, None)
+    context.run(child_owner.set, None)
     from agent.runtime.context import set_run_context
 
     context.run(set_run_context, None)
@@ -93,6 +95,22 @@ class ServiceScheduler:
         with self.lock:
             if key not in self.gates:
                 self.gates[key] = Gate(getattr(self.limits, kind))
+            return self.gates[key]
+
+    def expert_gate(self, resources):
+        from agent.runtime.policies import PoolLimits
+
+        key = "expert:" + resources.group
+        limits = PoolLimits(concurrency=resources.concurrency, queue_capacity=resources.queue_capacity)
+        with self.lock:
+            if key in self.gates and self.gates[key].limits != limits:
+                previous = self.gates[key]
+                with previous.lock:
+                    if previous.active or previous.waiters:
+                        raise ValueError("Expert resource group limits changed during execution")
+                    self.gates[key] = Gate(limits)
+            if key not in self.gates:
+                self.gates[key] = Gate(limits)
             return self.gates[key]
 
     def child_gate(self, context):

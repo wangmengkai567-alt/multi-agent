@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -44,7 +45,7 @@ class RunStore:
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7):
                 raise RuntimeError(f"Unsupported run database schema version: {version}")
             if version == 0:
                 try:
@@ -198,6 +199,8 @@ class RunStore:
 
             if version < 6:
                 await self._migrate_v6()
+            if version < 7:
+                await self._migrate_v7()
             await self.connection.execute("PRAGMA foreign_keys=ON")
 
     async def _migrate_v6(self):
@@ -279,6 +282,42 @@ class RunStore:
             await self.connection.rollback()
             raise
 
+    async def _migrate_v7(self):
+        """Allow registered producer IDs; preserve rows, indexes and ownership constraints."""
+        try:
+            await self.connection.execute("BEGIN IMMEDIATE")
+            async with self.connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='table' AND name='results'"
+            ) as cursor:
+                original = (await cursor.fetchone())[0]
+            async with self.connection.execute(
+                "SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='results' AND sql IS NOT NULL"
+            ) as cursor:
+                indexes = [r[0] for r in await cursor.fetchall()]
+            enum = "CHECK(source IN ('db','knowledge','search'))"
+            if original.count(enum) != 1:
+                raise ValueError("Unexpected version-six result schema")
+            definition, replacements = re.subn(
+                r'^CREATE TABLE ["\']?results["\']?', "CREATE TABLE results_v7", original, count=1
+            )
+            if replacements != 1:
+                raise ValueError("Unexpected result table declaration")
+            definition = definition.replace(enum, "")
+            await self.connection.execute(definition)
+            await self.connection.execute("INSERT INTO results_v7 SELECT * FROM results")
+            await self.connection.execute("DROP TABLE results")
+            await self.connection.execute("ALTER TABLE results_v7 RENAME TO results")
+            for statement in indexes:
+                await self.connection.execute(statement)
+            async with self.connection.execute("PRAGMA foreign_key_check") as cursor:
+                if await cursor.fetchone():
+                    raise ValueError("Expert result migration violates foreign key integrity")
+            await self.connection.execute("PRAGMA user_version=7")
+            await self.connection.commit()
+        except BaseException:
+            await self.connection.rollback()
+            raise
+
     @staticmethod
     def _decode_result(row):
         if row is None:
@@ -291,8 +330,8 @@ class RunStore:
 
     async def record_result(self, record, event):
         """Append an immutable attempt and event atomically; late output stays unpublished."""
-        if record.get("source") not in ("db", "search"):
-            raise ValueError("Unsupported active result source")
+        if not isinstance(record.get("source"), str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", record["source"]):
+            raise ValueError("Invalid expert result producer")
         async with self._lock:
             try:
                 await self.connection.execute("BEGIN IMMEDIATE")

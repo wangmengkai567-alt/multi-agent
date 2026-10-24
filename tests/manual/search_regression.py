@@ -34,7 +34,7 @@ async def main(case="weather"):
     server.output_dir = directory / "files"
     server.updated_dir = directory / "updated"
     # Record request controls only: never persist prompts, tool bodies, headers or credentials.
-    from agent.llm import main_model, review_model, sub_model
+    from agent import llm
     from agent.runtime.search import search_allowance
 
     request_controls = []
@@ -54,10 +54,14 @@ async def main(case="weather"):
             )
         )
 
-    for role, client in {"main": main_model, "sub": sub_model, "review": review_model}.items():
-        client.root_async_client._client.event_hooks.setdefault("request", []).append(
-            partial(record_controls, role=role)
-        )
+    original_factory = llm.create_role_model
+
+    def observed_model(role):
+        model = original_factory(role)
+        model.http_async_client.event_hooks.setdefault("request", []).append(partial(record_controls, role=role))
+        return model
+
+    llm.create_role_model = observed_model
     question = {
         "weather": "明天武汉适合穿什么衣服？请写明预报日期并提供来源链接。",
         "arithmetic": "计算17乘以23，直接给出结果。",

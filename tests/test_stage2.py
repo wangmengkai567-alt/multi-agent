@@ -28,9 +28,9 @@ QUERY = "比较 Deep Agents、Open Deep Research、smolagents 和 GPT Researcher
 
 def runtime_policy(**pools):
     policy = load_runtime_policy()
-    scheduler = policy.scheduler.model_copy(update={
-        name: getattr(policy.scheduler, name).model_copy(update=value) for name, value in pools.items()
-    })
+    scheduler = policy.scheduler.model_copy(
+        update={name: getattr(policy.scheduler, name).model_copy(update=value) for name, value in pools.items()}
+    )
     return policy.model_copy(update={"scheduler": scheduler})
 
 
@@ -46,14 +46,21 @@ def context(sandbox_dir):
 
 
 def scope(name, **extra):
-    return ResearchScope(object_name=name, label=name, description=name + " 工具调用源码",
-                         requirements=[PlanRequirement(anchor="工具调用", label="工具调用", kind="fact")],
-                         investigations=[], **extra)
+    return ResearchScope(
+        object_name=name,
+        label=name,
+        description=name + " 工具调用源码",
+        requirements=[PlanRequirement(anchor="工具调用", label="工具调用", kind="fact")],
+        investigations=[],
+        **extra,
+    )
 
 
 def initialize(context, names=("Deep Agents", "Open Deep Research", "smolagents", "GPT Researcher")):
-    value = plan_research.func(tasks=[scope(name) for name in names],
-        main_requirements=[PlanRequirement(anchor="提出建议", label="提出建议", kind="recommendation")])
+    value = plan_research.func(
+        tasks=[scope(name) for name in names],
+        main_requirements=[PlanRequirement(anchor="提出建议", label="提出建议", kind="recommendation")],
+    )
     return json.loads(value)
 
 
@@ -73,8 +80,9 @@ def test_four_objects_and_append_preserve_requirement_ids_and_budget(context):
     addition = scope("Deep Agents", object_id=task["object_id"], depends_on=[task["task_id"]])
     addition.requirements = []
     addition.description = "核实真实源码中发现的取消路径"
-    updated = json.loads(plan_research.func(tasks=[addition], main_requirements=[], operation="append",
-                                           expected_version=plan["version"]))
+    updated = json.loads(
+        plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=plan["version"])
+    )
     new = updated["tasks"][-1]
     assert updated["version"] == 2 and len(updated["tasks"]) == 5
     assert all(context.task_scopes[key] == row for key, row in original.items())
@@ -107,12 +115,18 @@ def test_append_version_conflicts_and_scope_expansion_are_atomic(context):
 def test_discovered_objects_require_verified_quotes_and_inherit_budget(context, monkeypatch):
     plan = initialize(context, ("Deep Agents",))
     obj = plan["tasks"][0]["object_id"]
-    proof = {"id": "verified-fact", "object_id": obj,
-             "evidence": [{"quote": "Deep Agents delegates to Specialized Worker"}], "identity_evidence": []}
+    proof = {
+        "id": "verified-fact",
+        "object_id": obj,
+        "evidence": [{"quote": "Deep Agents delegates to Specialized Worker"}],
+        "identity_evidence": [],
+    }
     monkeypatch.setattr("agent.runtime.delivery.fact_pool", lambda ctx: {"facts": {"verified-fact": proof}})
     addition = scope("Specialized Worker", discovery_fact_id="verified-fact")
     addition.requirements = []
-    updated = json.loads(plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=1))
+    updated = json.loads(
+        plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=1)
+    )
     discovered = updated["tasks"][-1]
     assert context.objects[discovered["object_id"]]["budget_owner_id"] == obj
     assert not any(r["required"] for r in context.requirements.values() if r["task_id"] == discovered["task_id"])
@@ -124,7 +138,9 @@ def test_dependencies_consume_no_slots_and_checkpoint_retains_pending_plan(conte
     addition = scope("Deep Agents", object_id=parent["object_id"], depends_on=[parent["task_id"]])
     addition.requirements = []
     addition.description = "依据父任务的事实核查异常路径"
-    updated = json.loads(plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=1))
+    updated = json.loads(
+        plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=1)
+    )
     child = updated["tasks"][-1]
     assert child["status"] == "waiting"
     with pytest.raises(HookRejected, match="dependencies"):
@@ -132,8 +148,15 @@ def test_dependencies_consume_no_slots_and_checkpoint_retains_pending_plan(conte
     assert context.scheduler.snapshot()["children"] == {"active": 0, "queued": 0}
     context.job_checkpoint_path = context.work_dir / "checkpoint.json"
     save_job_checkpoint(context)
-    restored = RunContext("new-execution", context.thread_id, context.work_dir, policy=context.policy,
-        user_query=QUERY, research_scope_id=context.research_scope_id, job_checkpoint_path=context.job_checkpoint_path)
+    restored = RunContext(
+        "new-execution",
+        context.thread_id,
+        context.work_dir,
+        policy=context.policy,
+        user_query=QUERY,
+        research_scope_id=context.research_scope_id,
+        job_checkpoint_path=context.job_checkpoint_path,
+    )
     restore_job_checkpoint(restored)
     assert restored.plan_version == 2 and restored.task_scopes == context.task_scopes
     context.search_tasks[parent["task_id"]] = SearchTaskBudget(closed_reason="finished", state=passed())
@@ -151,31 +174,56 @@ def test_plan_seal_and_expansion_limit_are_explicit(context):
         plan_research.func(tasks=[], main_requirements=[], operation="append", expected_version=2)
 
 
-@pytest.mark.parametrize("url", [
-    "https://docs.vendor.example/manual", "https://vendor.example/",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://docs.vendor.example/manual",
+        "https://vendor.example/",
+    ],
+)
 def test_publisher_mapping_is_configurable_and_auditable(context, url):
-    rule = PublisherIdentity(publisher="Vendor", host="vendor.example", include_subdomains=True,
-                             tier="official", verification="Operator-confirmed publisher site")
+    rule = PublisherIdentity(
+        publisher="Vendor",
+        host="vendor.example",
+        include_subdomains=True,
+        tier="official",
+        verification="Operator-confirmed publisher site",
+    )
     context.policy = context.policy.model_copy(update={"sources": SourcePolicy(identities=[rule])})
     value = page_tier({"url": url, "content": "source"})
     assert value["tier"] == "official" and value["publisher"] == "Vendor"
     assert value["identity_basis"] == rule.verification
 
 
-@pytest.mark.parametrize("url", [
-    "https://python.org.evil.example/", "https://evilpython.org/", "https://github.com/attacker/deepagents",
-    "https://github.com/langchain-ai/deepagents-malicious",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://python.org.evil.example/",
+        "https://evilpython.org/",
+        "https://github.com/attacker/deepagents",
+        "https://github.com/langchain-ai/deepagents-malicious",
+    ],
+)
 def test_lookalike_hosts_and_repository_paths_are_not_official(context, url):
     assert page_tier({"url": url, "publisher": "official", "content": "source"})["tier"] == "unknown"
 
 
 def test_unknown_identity_is_distinct_from_a_confirmed_disallowed_source(context):
-    context.policy = context.policy.model_copy(update={"sources": SourcePolicy(identities=[
-        PublisherIdentity(publisher="News", host="news.example", tier="media", verification="confirmed newsroom")])})
+    context.policy = context.policy.model_copy(
+        update={
+            "sources": SourcePolicy(
+                identities=[
+                    PublisherIdentity(
+                        publisher="News", host="news.example", tier="media", verification="confirmed newsroom"
+                    )
+                ]
+            )
+        }
+    )
     req = {"task_id": "task", "required_tier": ["official"]}
-    assert source_assessment(req, {"url": "https://unknown.example/"}, context)["constraint_status"] == "unknown_identity"
+    assert (
+        source_assessment(req, {"url": "https://unknown.example/"}, context)["constraint_status"] == "unknown_identity"
+    )
     assert source_assessment(req, {"url": "https://news.example/"}, context)["constraint_status"] == "disallowed_tier"
 
 
@@ -218,8 +266,14 @@ async def test_queued_expiry_does_not_execute_or_leak_a_slot(context):
     scheduler = ServiceScheduler(policy.scheduler)
     gate = scheduler.gate("models", "account")
     lease = await scheduler.aacquire(gate, context, "models")
-    expired = RunContext("expiry", "t", context.work_dir, policy=policy,
-                         deadline=datetime.now(UTC) + timedelta(seconds=0.05), scheduler=scheduler)
+    expired = RunContext(
+        "expiry",
+        "t",
+        context.work_dir,
+        policy=policy,
+        deadline=datetime.now(UTC) + timedelta(seconds=0.05),
+        scheduler=scheduler,
+    )
     with pytest.raises(RunStopped):
         await scheduler.aacquire(gate, expired, "models")
     assert not gate.waiters and gate.active == 1
@@ -256,8 +310,9 @@ async def test_foreground_and_durable_job_share_the_same_service_slot(sandbox_di
 
         async def handler(job):
             entered.set()
-            async with server.app.state.scheduler.run_slot(RunContext(
-                "nested", "job", sandbox_dir, policy=policy, scheduler=server.app.state.scheduler)):
+            async with server.app.state.scheduler.run_slot(
+                RunContext("nested", "job", sandbox_dir, policy=policy, scheduler=server.app.state.scheduler)
+            ):
                 assert server.app.state.scheduler.snapshot()["runs"]["active"] == 1
                 await release.wait()
             return {"reviewed": True}
@@ -274,13 +329,14 @@ async def test_foreground_and_durable_job_share_the_same_service_slot(sandbox_di
         await asyncio.wait_for(service.tasks[job["task_id"]], 2)
         assert (await service.get(job["task_id"], "job"))["status"] == "completed"
 
+
 @pytest.mark.asyncio
 async def test_four_real_delegations_queue_without_dropping_results(context):
     from langchain_core.messages import HumanMessage
 
     from agent.runtime.delegation import DelegationRunnable
     from agent.runtime.hooks import active_call
-    from agent.subagent_registry import DISPLAY_NAMES, SubagentSpec
+    from agent.subagent_registry import SubagentSpec
 
     plan = initialize(context)
     active = peak = 0
@@ -302,10 +358,14 @@ async def test_four_real_delegations_queue_without_dropping_results(context):
         finally:
             active -= 1
 
-    spec = SubagentSpec("search", DISPLAY_NAMES["search"], "Controlled executor", "Return execution marker", ())
+    spec = SubagentSpec("search", DEFAULT_NAMES["search"], "Controlled executor", "Return execution marker", ())
     worker = DelegationRunnable(spec, RunnableLambda(execute))
-    tasks = [asyncio.create_task(worker.ainvoke(
-        {"messages": [HumanMessage(content=json.dumps({"task_id": task["task_id"]}))]})) for task in plan["tasks"]]
+    tasks = [
+        asyncio.create_task(
+            worker.ainvoke({"messages": [HumanMessage(content=json.dumps({"task_id": task["task_id"]}))]})
+        )
+        for task in plan["tasks"]
+    ]
     await asyncio.wait_for(first_batch.wait(), 2)
     assert len(started) == 2 and len(tasks) == 4
     release.set()
@@ -324,8 +384,11 @@ def test_search_scope_reaches_provider_and_rejects_outside_results_without_losin
 
     context.user_query += "；仅搜索 vendor.example"
     item = scope("Deep Agents", search_domains=["vendor.example"])
-    plan = json.loads(plan_research.func(tasks=[item],
-        main_requirements=[PlanRequirement(anchor="提出建议", label="建议", kind="recommendation")]))
+    plan = json.loads(
+        plan_research.func(
+            tasks=[item], main_requirements=[PlanRequirement(anchor="提出建议", label="建议", kind="recommendation")]
+        )
+    )
     task_id = plan["tasks"][0]["task_id"]
     allowance = SearchAllowance(context, task_id)
     gap_id = next(gid for gid, g in context.gaps.items() if g["task_id"] == task_id)
@@ -342,11 +405,13 @@ def test_search_scope_reaches_provider_and_rejects_outside_results_without_losin
         with requests.Session() as session:
             audit_transport(SimpleNamespace(session=session))
             session.get("https://api.tavily.com/search")
-        return "", {"results": [
-            {"url": "https://docs.vendor.example/source", "content": "actual approved scope"},
-            {"url": "https://vendor.example.evil.test/", "content": "outside source text"},
-            {"url": "https://[malformed", "content": "invalid source"},
-        ]}
+        return "", {
+            "results": [
+                {"url": "https://docs.vendor.example/source", "content": "actual approved scope"},
+                {"url": "https://vendor.example.evil.test/", "content": "outside source text"},
+                {"url": "https://[malformed", "content": "invalid source"},
+            ]
+        }
 
     monkeypatch.setattr(HTTPAdapter, "send", transport)
     monkeypatch.setattr("tools.tavily_tool.internet_search.func", provider)
@@ -395,8 +460,15 @@ def test_changed_source_identity_policy_cannot_reuse_a_checkpoint(context):
     save_job_checkpoint(context)
     raw = context.job_checkpoint_path.read_bytes()
     changed = context.policy.model_copy(update={"sources": SourcePolicy(identities=[])})
-    restored = RunContext("resume", "thread", context.work_dir, policy=changed, user_query=QUERY,
-        research_scope_id=context.research_scope_id, job_checkpoint_path=context.job_checkpoint_path)
+    restored = RunContext(
+        "resume",
+        "thread",
+        context.work_dir,
+        policy=changed,
+        user_query=QUERY,
+        research_scope_id=context.research_scope_id,
+        job_checkpoint_path=context.job_checkpoint_path,
+    )
     with pytest.raises(RunStopped, match="Source policy changed"):
         restore_job_checkpoint(restored)
     assert context.job_checkpoint_path.read_bytes() == raw
@@ -425,9 +497,12 @@ def test_failed_dependency_is_sealed_as_unexecuted_instead_of_restarted(context)
     addition = scope("Deep Agents", object_id=parent["object_id"], depends_on=[parent["task_id"]])
     addition.requirements = []
     addition.description = "基于已有结果继续核查异常"
-    updated = json.loads(plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=1))
+    updated = json.loads(
+        plan_research.func(tasks=[addition], main_requirements=[], operation="append", expected_version=1)
+    )
     context.search_tasks[parent["task_id"]] = SearchTaskBudget(
-        closed_reason="provider failed", state=ReviewState(check_status="tool_failed"))
+        closed_reason="provider failed", state=ReviewState(check_status="tool_failed")
+    )
     closed = json.loads(plan_research.func(tasks=[], main_requirements=[], operation="seal", expected_version=2))
     child_id = updated["tasks"][-1]["task_id"]
     assert closed["closed"] and closed["tasks"][-1]["status"] == "blocked"
@@ -479,8 +554,9 @@ def test_rate_limited_transport_attempts_are_charged_once_each(context, monkeypa
 
 
 def test_source_tiers_come_from_original_scope_not_from_plan_output(context):
-    from agent.runtime.source_policy import requested_tiers
     from pydantic import ValidationError
+
+    from agent.runtime.source_policy import requested_tiers
 
     assert requested_tiers("从官方源码核实") == ("official",)
     assert requested_tiers("核实源码，不要使用官方材料") == ()
@@ -491,3 +567,6 @@ def test_source_tiers_come_from_original_scope_not_from_plan_output(context):
     plan = initialize(context, ("Deep Agents",))
     rows = [r for r in context.requirements.values() if r["task_id"] == plan["tasks"][0]["task_id"]]
     assert rows and all(r["required_tier"] == ["official"] for r in rows)
+
+
+DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}

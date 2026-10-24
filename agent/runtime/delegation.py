@@ -11,7 +11,7 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
-from agent.reflection import ResultReviewer, ReviewResult, normalize_source_citations, source_urls, tool_evidence
+from agent.reflection import ResultReviewer, ReviewResult, source_urls, tool_evidence
 from agent.results import ResultService, sync_result
 from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event, redact_text
@@ -19,7 +19,7 @@ from agent.runtime.hooks import HookCall, HookRejected, active_call, error_messa
 from agent.runtime.models import ModelRequestTimeout
 from agent.runtime.policies import BudgetExceeded, SearchLimitReached, classify_tool_error, reserve_calls
 from agent.runtime.reporting import ReportRevision, ResearchOutputError
-from agent.runtime.requirements import RequirementSpec, apply_coverage, ensure_task, original_required_clauses, register
+from agent.runtime.requirements import apply_coverage, ensure_task
 from agent.runtime.review_state import ReviewState, deliverable
 from agent.runtime.search import SearchAllowance, needs_search_refinement, search_allowance
 from agent.runtime.skills import skill_scope
@@ -33,11 +33,9 @@ class ReviewOnly:
 
 
 class DelegationRunnable(Runnable):
-    def __init__(self, spec, executor, *, hooks=None, reviewer=None, results=None):
-        from agent.subagent_registry import DISPLAY_NAMES
-
-        if spec.agent_id not in DISPLAY_NAMES:
-            raise ValueError("Invalid expert executor target")
+    def __init__(self, spec, executor, *, hooks=None, reviewer=None, results=None, registry=None):
+        spec.validate()
+        self.registry = registry
         self.spec, self.executor, self.hooks = spec, executor, hooks or pipeline
         self.reviewer = reviewer or ResultReviewer(spec.review_config)
         self.results = results or ResultService()
@@ -46,6 +44,20 @@ class DelegationRunnable(Runnable):
         context = get_run_context()
         if context is None:
             raise HookRejected("Expert execution requires a run context")
+        if self.registry is not None:
+            from agent.runtime.experts import bind_registry
+
+            bind_registry(context, self.registry)
+        if context.task_contract is not None:
+            from agent.runtime.contracts import assert_contract
+
+            contract = assert_contract(context)
+            if (
+                contract.delivery_kind == "direct"
+                or not contract.network_allowed
+                and self.spec.execution.network_access
+            ):
+                raise HookRejected("Expert execution contradicts the locked task contract")
         with context.budget_lock:
             unavailable = context.unavailable_agents.get(self.spec.agent_id)
         if unavailable:
@@ -55,7 +67,7 @@ class DelegationRunnable(Runnable):
             raise HookRejected("Expert execution requires a non-empty task description")
         description = messages[-1].text
         task_id, description, label = None, description, ""
-        if self.spec.agent_id == "search":
+        if self.spec.execution.planned:
             from agent.runtime.task_plan import resolve_task
 
             task_id, description, label = resolve_task(context, description)
@@ -68,6 +80,7 @@ class DelegationRunnable(Runnable):
             request_id or context.run_id,
             args={"description": description},
             target=self.spec.agent_id,
+            source_kind=self.spec.execution.source_kind,
         )
         if label:
             context.call_labels[call.call_id] = label
@@ -91,7 +104,7 @@ class DelegationRunnable(Runnable):
             error=None,
             check_status="not_checked",
         )
-        if self.spec.agent_id == "search":
+        if self.spec.execution.planned:
             try:
                 call.search_task_key = (
                     task_id
@@ -106,17 +119,11 @@ class DelegationRunnable(Runnable):
                 allowance.task.description = description
             except SearchLimitReached as exc:
                 raise HookRejected(str(exc)) from exc
-        if self.spec.agent_id == "db":
-            call.search_task_key = "db:" + call.call_id
-            register(
-                context,
-                call.search_task_key,
-                [
-                    RequirementSpec(anchor=anchor, label=anchor[:160], kind="fact")
-                    for anchor in original_required_clauses(context.user_query)
-                ],
-                object_id=None,
-            )
+        if not self.spec.execution.planned:
+            from agent.runtime.requirements import register_support
+
+            call.search_task_key = self.spec.agent_id + ":" + call.call_id
+            register_support(context, call.search_task_key)
         else:
             ensure_task(context, call.search_task_key, description)
         from agent.runtime.reservations import hold
@@ -127,10 +134,10 @@ class DelegationRunnable(Runnable):
                 call.call_id,
                 {"sub_model": 1, "review": 1},
                 task_id=call.search_task_key,
-                protect_revision=self.spec.review_config.enabled and self.spec.review_config.max_refinements > 0,
+                protect_revision=self.spec.review_config.max_refinements > 0,
             )
         except BudgetExceeded as exc:
-            if self.spec.agent_id == "search":
+            if self.spec.execution.planned:
                 from agent.runtime.reservations import release
 
                 with context.budget_lock:
@@ -195,15 +202,10 @@ class DelegationRunnable(Runnable):
         final = messages[-1] if messages else None
         if not isinstance(final, AIMessage) or final.tool_calls:
             raise RuntimeError("Expert executor did not return a final assistant message")
-        if self.spec.agent_id == "search" and not self.spec.review_config.grounded_report:
-            text = normalize_source_citations(final.text, evidence)
-            if text != final.text:
-                final = final.model_copy(update={"content": text})
-                result = dict(result, messages=[*messages[:-1], final])
         call.review_evidence = list(evidence)
         call.result, call.status = result, "completed"
         record["result"] = redact_text(final.text)
-        if self.spec.agent_id == "search":
+        if self.spec.execution.planned:
             task = SearchAllowance(get_run_context(), call.search_task_key).task
             task.sources = source_urls(evidence)
             task.evidence = list(evidence)
@@ -225,10 +227,10 @@ class DelegationRunnable(Runnable):
         from agent.runtime.reservations import release
 
         release(context, call.call_id)
-        if self.spec.agent_id == "db" and call.status == "completed" and deliverable(record["state"]):
+        if self.spec.execution.source_kind == "db" and call.status == "completed" and deliverable(record["state"]):
             with context.budget_lock:
                 context.internal_result_version += 1
-        if self.spec.agent_id == "search":
+        if self.spec.execution.planned:
             allowance = SearchAllowance(context, call.search_task_key)
             allowance.task.failure_reason = record["error"] or ""
             allowance.finish(
@@ -287,7 +289,7 @@ class DelegationRunnable(Runnable):
                     for r in task_requirements(context, call.search_task_key)
                 },
             )
-        if self.spec.agent_id == "search":
+        if self.spec.execution.planned:
             task = SearchAllowance(context, call.search_task_key).task
             task.state = review.state
             task.report = review.accepted_report if deliverable(review.state) else None
@@ -298,7 +300,7 @@ class DelegationRunnable(Runnable):
             if report is None:
                 raise ValueError("Deliverable state has no reviewed report")
             record["result"] = render_report(report)
-            if self.spec.agent_id == "search":
+            if self.spec.execution.planned:
                 task = SearchAllowance(context, call.search_task_key).task
                 task.result = record["result"]
             else:
@@ -321,6 +323,16 @@ class DelegationRunnable(Runnable):
                         task_id=call.search_task_key,
                         report_attempt=attempt,
                     )
+            parent_evidence = tool_evidence.get()
+            if parent_evidence is not None:
+                import copy
+
+                known = {(e["name"], e["call_id"], e.get("attempt", 0)) for e in parent_evidence}
+                for item in call.review_evidence:
+                    identity = (item["name"], item["call_id"], item.get("attempt", 0))
+                    if identity not in known:
+                        parent_evidence.append(dict(copy.deepcopy(item), delegated_from=call.search_task_key))
+                        known.add(identity)
             content = dict(verified_report=report, state=review.state.model_dump(), coverage=review.coverage)
         else:
             record["result"] = ""
@@ -372,7 +384,7 @@ class DelegationRunnable(Runnable):
         if review_only:
             self._review_event(context, call, review, attempt + 1, "subagent_refinement")
             return ReviewOnly(result, list(evidence))
-        if self.spec.agent_id == "search":
+        if self.spec.execution.planned:
             SearchAllowance(context, call.search_task_key).begin_refinement(allow_search=allow_search)
         self._review_event(context, call, review, attempt + 1, "subagent_refinement")
         if not allow_search:
@@ -393,7 +405,7 @@ class DelegationRunnable(Runnable):
         return dict(input, messages=[*messages, HumanMessage(content=correction)])
 
     def _search_request(self, context, inputs):
-        if self.spec.agent_id != "search" or not context.user_query:
+        if not self.spec.execution.planned or not context.user_query:
             return inputs
         messages = inputs["messages"]
         content = (
@@ -427,20 +439,20 @@ class DelegationRunnable(Runnable):
 
     def _recovered_result(self, inputs):
         context = get_run_context()
-        if not context or not context.background_job or not context.resume_graph or self.spec.agent_id != "search":
+        if context is not None and self.registry is not None:
+            from agent.runtime.experts import bind_registry
+
+            bind_registry(context, self.registry)
+        if not context or not context.background_job or not context.resume_graph or not self.spec.execution.planned:
             return None
         from agent.runtime.task_plan import resolve_task
 
         task_id, _, _ = resolve_task(context, inputs["messages"][-1].text)
         task = context.search_tasks.get(task_id)
         if task and deliverable(task.state) and task.result:
-            if self.spec.review_config.grounded_report:
-                if task.report is None:
-                    raise HookRejected("缺少已核验的结构化事实，不能恢复该检索结果")
-                return {
-                    "messages": [AIMessage(content=json.dumps({"verified_report": task.report}, ensure_ascii=False))]
-                }
-            return {"messages": [AIMessage(content=task.result)]}
+            if task.report is None:
+                raise HookRejected("缺少已核验的结构化事实，不能恢复该检索结果")
+            return {"messages": [AIMessage(content=json.dumps({"verified_report": task.report}, ensure_ascii=False))]}
         return None
 
     def invoke(self, input, config=None, **kwargs):
@@ -455,22 +467,37 @@ class DelegationRunnable(Runnable):
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
         leases = []
+        slot_token = None
+        parent_slot, branch_slot = None, None
         try:
             self._save(context, call, record, "queued")
             if context.business_mode == "internal_external":
                 if context.event_sink is None:
                     raise HookRejected("Workflow execution requires durable results")
                 sync_result(prepare_delegate(context, call), context.event_sink)
-            for gate in (context.scheduler.child_gate(context), context.scheduler.gate("children")):
-                leases.append(context.scheduler.acquire(gate, context, "children"))
+            from agent.runtime.scheduler import child_owner
+
+            inherited_slot = child_owner.get()
+            if inherited_slot is not None and inherited_slot["run_id"] == context.run_id:
+                parent_slot = inherited_slot
+                parent_slot["lease"].release()
+            else:
+                for gate in (context.scheduler.child_gate(context), context.scheduler.gate("children")):
+                    leases.append(context.scheduler.acquire(gate, context, "children"))
+            branch_slot = dict(
+                run_id=context.run_id,
+                resources=self.spec.resources,
+                lease=context.scheduler.acquire(context.scheduler.expert_gate(self.spec.resources), context, "expert"),
+            )
+            slot_token = child_owner.set(branch_slot)
             self._start(context, call, record)
             input = self._search_request(context, input)
-            if self.spec.agent_id == "search" and context.event_sink is not None:
+            if self.spec.execution.receive_internal_results and context.event_sink is not None:
                 input = sync_result(self.results.search_input(context, call, input), context.event_sink)
             current = input
             search_evidence = (
                 list(SearchAllowance(context, call.search_task_key).task.evidence)
-                if self.spec.agent_id == "search"
+                if self.spec.execution.planned
                 else []
             )
             for attempt in range(self.spec.review_config.max_refinements + 1):
@@ -479,12 +506,12 @@ class DelegationRunnable(Runnable):
                     current.evidence
                     if isinstance(current, ReviewOnly)
                     else search_evidence
-                    if self.spec.agent_id == "search"
+                    if self.spec.execution.planned
                     else []
                 )
                 evidence_token = tool_evidence.set(evidence)
                 search_token = search_allowance.set(
-                    SearchAllowance(context, call.search_task_key) if self.spec.agent_id == "search" else None
+                    SearchAllowance(context, call.search_task_key) if self.spec.execution.planned else None
                 )
                 dependency = None
                 try:
@@ -495,9 +522,7 @@ class DelegationRunnable(Runnable):
                             else self.executor.invoke(current, config, **kwargs)
                         )
                     except Exception as exc:
-                        dependency = self._dependency(exc) if self.spec.review_config.enabled else None
-                        if dependency is None:
-                            raise
+                        dependency = self._dependency(exc)
                         result = (
                             exc.result
                             if isinstance(exc, ResearchOutputError)
@@ -508,13 +533,6 @@ class DelegationRunnable(Runnable):
                     tool_evidence.reset(evidence_token)
                 context.check_active()
                 result = self._returned(call, record, result, evidence)
-                if not self.spec.review_config.enabled:
-                    if context.event_sink is not None:
-                        sync_result(
-                            self.results.save(context, call, record["result"], evidence, None, attempt),
-                            context.event_sink,
-                        )
-                    return result
                 review = dependency or self.reviewer.review_sync(
                     input["messages"][-1].text, record["result"], evidence, config
                 )
@@ -545,12 +563,20 @@ class DelegationRunnable(Runnable):
             try:
                 self._finish(context, call, record, started)
             finally:
+                if branch_slot is not None:
+                    branch_slot["lease"].release()
+                if slot_token is not None:
+                    child_owner.reset(slot_token)
                 for lease in reversed(leases):
                     lease.release()
                 if context.stop_status:
                     context.scheduler.forget_run(context.run_id)
                 skill_scope.reset(skill_token)
                 active_call.reset(token)
+                if parent_slot is not None and not context.stop_status:
+                    parent_slot["lease"] = context.scheduler.acquire(
+                        context.scheduler.expert_gate(parent_slot["resources"]), context, "expert"
+                    )
 
     async def ainvoke(self, input, config=None, **kwargs):
         recovered = self._recovered_result(input)
@@ -561,19 +587,36 @@ class DelegationRunnable(Runnable):
         skill_token = skill_scope.set((self.spec.agent_id, self.spec.allowed_skill_ids))
         started = monotonic()
         leases = []
+        slot_token = None
+        parent_slot, branch_slot = None, None
         try:
             self._save(context, call, record, "queued")
             await prepare_delegate(context, call)
-            for gate in (context.scheduler.child_gate(context), context.scheduler.gate("children")):
-                leases.append(await context.scheduler.aacquire(gate, context, "children"))
+            from agent.runtime.scheduler import child_owner
+
+            inherited_slot = child_owner.get()
+            if inherited_slot is not None and inherited_slot["run_id"] == context.run_id:
+                parent_slot = inherited_slot
+                parent_slot["lease"].release()
+            else:
+                for gate in (context.scheduler.child_gate(context), context.scheduler.gate("children")):
+                    leases.append(await context.scheduler.aacquire(gate, context, "children"))
+            branch_slot = dict(
+                run_id=context.run_id,
+                resources=self.spec.resources,
+                lease=await context.scheduler.aacquire(
+                    context.scheduler.expert_gate(self.spec.resources), context, "expert"
+                ),
+            )
+            slot_token = child_owner.set(branch_slot)
             self._start(context, call, record)
             input = self._search_request(context, input)
-            if self.spec.agent_id == "search":
+            if self.spec.execution.receive_internal_results:
                 input = await self.results.search_input(context, call, input)
             current = input
             search_evidence = (
                 list(SearchAllowance(context, call.search_task_key).task.evidence)
-                if self.spec.agent_id == "search"
+                if self.spec.execution.planned
                 else []
             )
             for attempt in range(self.spec.review_config.max_refinements + 1):
@@ -581,12 +624,12 @@ class DelegationRunnable(Runnable):
                     current.evidence
                     if isinstance(current, ReviewOnly)
                     else search_evidence
-                    if self.spec.agent_id == "search"
+                    if self.spec.execution.planned
                     else []
                 )
                 evidence_token = tool_evidence.set(evidence)
                 search_token = search_allowance.set(
-                    SearchAllowance(context, call.search_task_key) if self.spec.agent_id == "search" else None
+                    SearchAllowance(context, call.search_task_key) if self.spec.execution.planned else None
                 )
                 dependency = None
                 try:
@@ -604,9 +647,7 @@ class DelegationRunnable(Runnable):
                             async with asyncio.timeout(seconds):
                                 result = await self.executor.ainvoke(current, config, **kwargs)
                     except Exception as exc:
-                        dependency = self._dependency(exc) if self.spec.review_config.enabled else None
-                        if dependency is None:
-                            raise
+                        dependency = self._dependency(exc)
                         result = (
                             exc.result
                             if isinstance(exc, ResearchOutputError)
@@ -616,9 +657,6 @@ class DelegationRunnable(Runnable):
                     search_allowance.reset(search_token)
                     tool_evidence.reset(evidence_token)
                 result = self._returned(call, record, result, evidence)
-                if not self.spec.review_config.enabled:
-                    await self.results.save(context, call, record["result"], evidence, None, attempt)
-                    return result
                 review = dependency or await self.reviewer.review(
                     input["messages"][-1].text, record["result"], evidence, config
                 )
@@ -645,9 +683,17 @@ class DelegationRunnable(Runnable):
             try:
                 self._finish(context, call, record, started)
             finally:
+                if branch_slot is not None:
+                    branch_slot["lease"].release()
+                if slot_token is not None:
+                    child_owner.reset(slot_token)
                 for lease in reversed(leases):
                     lease.release()
                 if context.stop_status:
                     context.scheduler.forget_run(context.run_id)
                 skill_scope.reset(skill_token)
                 active_call.reset(token)
+                if parent_slot is not None and not context.stop_status:
+                    parent_slot["lease"] = await context.scheduler.aacquire(
+                        context.scheduler.expert_gate(parent_slot["resources"]), context, "expert"
+                    )

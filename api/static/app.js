@@ -282,7 +282,7 @@ function callGroups(session) {
 }
 function renderCallGroups(session, openDetails = new Set()) {
   return callGroups(session).map((group,index) => {
-    const agentName = actors[group.target] || group.target || '助手';
+    const agentName = group.events.find(e => e.data?.assistant_name)?.data.assistant_name || actors[group.target] || group.target || '助手';
     const terminal = group.events.filter(e=>['subagent_completed','subagent_failed','subagent_cancelled','subagent_rejected'].includes(e.event)).at(-1);
     const outcome = terminal ? ' · ' + (verdicts[terminal.data?.check_status] || ({completed:'处理结束',failed:'执行失败',cancelled:'已取消',rejected:'已拒绝'}[terminal.status] || terminal.status)) : '';
     const title = index === 0 && group.target === 'main' ? '主助手' : `${agentName} · ${group.label || '独立分工'} · ${group.id.slice(0,8)}${outcome}`;
