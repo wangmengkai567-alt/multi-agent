@@ -199,7 +199,7 @@ def parse_report(text, evidence, quote_chars):
     quotes = {(ref.source_id, ref.quote) for ref in report.references()}
     if sum(len(quote) + 16 for _, quote in quotes) > quote_chars:
         raise ReportError("引用摘录过长，请仅保留支持必要事实的短句")
-    from agent.runtime.source_policy import page_tier
+    from agent.runtime.evidence_protocol import source_identity
 
     # Date/source failures belong to individual facts. Resolve conflicts only
     # after complete per-fact judgments, so a bad sibling cannot hide a good one.
@@ -212,7 +212,12 @@ def parse_report(text, evidence, quote_chars):
                 "source_id": key,
                 "url": sources[key][0]["url"],
                 "origin_source_id": sources[key][0]["origin_source_id"],
-                **page_tier(sources[key][0]),
+                "kind": sources[key][0]["kind"],
+                "title": sources[key][0]["title"],
+                "locator": sources[key][0]["locator"],
+                "provenance": sources[key][0]["provenance"],
+                "inputs": sources[key][0]["inputs"],
+                **source_identity(sources[key][0]),
             }
             for key in dict.fromkeys(ref.source_id for ref in report.references())
             if key in sources
@@ -297,14 +302,12 @@ def approved_reports(context):
 
 
 def render_report(report):
-    urls = {source["source_id"]: source["url"] for source in report["sources"]}
-    origins = {source["source_id"]: source["origin_source_id"] for source in report["sources"]}
+    from agent.runtime.evidence_protocol import source_citation
+
+    sources_by_id = {source["source_id"]: source for source in report["sources"]}
     lines = []
     for fact in report["facts"]:
-        sources = " ".join(
-            f"[来源]({urls[ref['source_id']]})" if urls[ref["source_id"]] else f"[SQL执行：{origins[ref['source_id']]}]"
-            for ref in fact["evidence"]
-        )
+        sources = " ".join(source_citation(sources_by_id[ref["source_id"]]) for ref in fact["evidence"])
         lines.append(
             f"- {fact['subject']} · {fact['aspect']}：{fact['value']}（{fact['scope']}；生效日期：{fact['as_of'] or '未核实'}）{sources}"
         )

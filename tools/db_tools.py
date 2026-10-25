@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 from mysql.connector import connect
 
+from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.policies import (
     PolicyError,
     policy_for_run,
@@ -103,6 +104,7 @@ def run_select(query):
         return output.getvalue()
 
 
+@evidence_tool("sql.v1")
 @tool
 def list_sql_tables() -> str:
     """List only configured allowed tables in the current read-only database."""
@@ -118,6 +120,7 @@ def list_sql_tables() -> str:
         return "可用的表有：" + ", ".join(names) if names else "没有可用的表"
 
 
+@evidence_tool("sql.v1")
 @tool
 def get_table_data(table_name: str) -> str:
     """Read columns and a bounded sample from a configured allowed table."""
@@ -126,6 +129,7 @@ def get_table_data(table_name: str) -> str:
     return run_select(f"SELECT * FROM `{table_name}`")
 
 
+@evidence_tool("sql.v1")
 @tool
 def execute_sql_query(query: str) -> str:
     """Execute one validated SELECT, with allowed tables, row limit and timeout."""

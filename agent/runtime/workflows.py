@@ -253,7 +253,10 @@ def before_tool_workflow(call):
             ):
                 raise refusal("degraded_source", "先生成注明数据库不可用的降级 Markdown，再转换 PDF。")
         else:
-            call.args["content"] = degraded_content(data)
+            from agent.runtime.delivery_actions import action_authorized
+
+            if not action_authorized(call):
+                call.args["content"] = degraded_content(data)
     emit(context, "report_allowed", call, source_ids=data["source_ids"], degraded=data["degraded"])
 
 
@@ -269,7 +272,7 @@ def after_tool_workflow(call):
     if not any(isinstance(m, ToolMessage) and m.content and not str(m.content).startswith("Error") for m in messages):
         return
     name = call.actor.rsplit(":", 1)[-1]
-    if name in ("read_file", "read_file_content"):
+    if name in ("read_file", "read_file_content", "read_document"):
         value = call.args.get("file_path" if name == "read_file" else "filename")
         file = resolve_run_path(value, virtual=name == "read_file")
         if not file.is_relative_to((context.work_dir / "uploads").resolve()) or not file.is_file():
@@ -304,6 +307,18 @@ def after_tool_workflow(call):
 
 
 async def finalize_answer(context, answer):
+    if context.task_contract is not None:
+        from agent.runtime.contracts import assert_contract
+
+        contract = assert_contract(context)
+        if contract.delivery_kind == "clarification":
+            if context.search_tasks or context.approved_internal or answer != contract.clarification:
+                raise ValueError("Clarification cannot carry business results")
+            return answer
+        if any(job["kind"] == "research" for job in context.pending_jobs.values()):
+            if contract.delivery_kind != "grounded" or not contract.network_allowed:
+                raise ValueError("Pending research contradicts the locked contract")
+            return answer
     if not guarded(context):
         return answer
     initialize_workflow(context)

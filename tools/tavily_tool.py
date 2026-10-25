@@ -13,9 +13,19 @@ from pydantic import BeforeValidator, Field
 from tavily import TavilyClient
 
 from agent.runtime.evidence import relevant_excerpt
+from agent.runtime.evidence_protocol import evidence_tool, web_result_error, web_results
 from agent.runtime.policies import MissingConfiguration, PolicyError, policy_for_run, request_timeout
-from agent.runtime.retrieval import SearchHistory, usable_page
+from agent.runtime.retrieval import SearchHistory
 from api.monitor import monitor
+
+
+def require_network_permission():
+    from agent.runtime.context import get_run_context
+    from agent.runtime.contracts import assert_contract
+
+    context = get_run_context()
+    if context is None or context.network_policy == "forbidden" or not assert_contract(context).network_allowed:
+        raise PolicyError("当前契约禁止取得新公开网络证据")
 
 
 def preserve_http_errors(client):
@@ -35,9 +45,14 @@ def preserve_http_errors(client):
 def compact_search_response(payload, limits, query=None):
     """Keep actual URLs and explicit excerpts without loading full pages into the model context."""
     remaining = limits.content_chars
-    rows = []
-    for result in payload.get("results", []):
-        text = str(result.get("raw_content") or result.get("content") or "")
+    rows, excluded = [], []
+    retrieval = "page" if "read_status" in payload else "search"
+    for index, result in enumerate(web_results(payload)):
+        error = web_result_error(result, retrieval)
+        if error:
+            excluded.append(dict(result_index=index, error=error))
+            continue
+        text = result.get("raw_content") or result.get("content")
         excerpt = relevant_excerpt(text, min(limits.result_chars, remaining), query or str(payload.get("query") or ""))
         remaining -= len(excerpt)
         rows.append(
@@ -53,6 +68,7 @@ def compact_search_response(payload, limits, query=None):
         dict(
             query=payload.get("query"),
             results=rows,
+            excluded_results=excluded,
             evidence_note="完整检索响应已保存为原始证据；content 为可能截断的片段。",
         ),
         ensure_ascii=False,
@@ -87,6 +103,7 @@ DomainList = Annotated[
 ]
 
 
+@evidence_tool("web-search.v1")
 @tool(response_format="content_and_artifact")
 def internet_search(
     query: str,
@@ -97,6 +114,7 @@ def internet_search(
     search_depth: Literal["basic", "advanced"] = "basic",
 ):
     """Internal provider search. Model-visible decisions use research_step."""
+    require_network_permission()
     include_domains = domain_array(include_domains)
     if not query.strip() or not 1 <= max_results <= 20:
         raise ValueError("Invalid search arguments")
@@ -151,12 +169,13 @@ def validate_page_request(url, query):
         raise PolicyError("只允许读取公开域名")
     context = get_run_context()
     allowed = source_urls(tool_evidence.get() or [])
-    allowed += list(cited_urls(context.user_query)) if context else []
+    allowed += list(cited_urls(context.task_instruction)) if context else []
     if host not in {urlsplit(value).hostname for value in allowed}:
         raise PolicyError("只能读取当前子任务实际搜索取得的域名或用户提供的 URL；不能借用其他子任务来源")
     return url
 
 
+@evidence_tool("web-page.v1")
 @tool(response_format="content_and_artifact")
 def read_web_page(
     url: Annotated[
@@ -168,6 +187,7 @@ def read_web_page(
     query: Annotated[str, Field(description="The specific missing facts to read from this page.")],
 ):
     """Read only sections needed for query. Pass a returned source_id as url to preserve the exact discovered address. A full URL is used for user-provided pages or a specific new version path on an observed origin. This returns relevant excerpts, not a guarantee of full-page reading. Error/login pages are unavailable evidence."""
+    require_network_permission()
     url = validate_page_request(url, query)
     load_dotenv()
     key = os.getenv("TAVILY_API_KEY")
@@ -189,16 +209,23 @@ def read_web_page(
             timeout=request_timeout(limits.timeout_seconds),
         )
     # Keep rejected rows as failure evidence, never as readable/citable page results.
-    results = payload.get("results", [])
+    results = web_results(payload)
     rejected = [
-        {**row, "error": "未取得有效正文：错误页、登录/验证页或空正文"} for row in results if not usable_page(row)
+        dict(
+            url=row.get("url", "") if isinstance(row, dict) else "",
+            result_index=index,
+            error=error,
+            original_result=row,
+        )
+        for index, row in enumerate(results)
+        if (error := web_result_error(row, "page"))
     ]
     payload = {
         **payload,
         "query": query,
-        "results": [row for row in results if usable_page(row)],
+        "results": [row for row in results if not web_result_error(row, "page")],
         "failed_results": [*payload.get("failed_results", []), *rejected],
-        "read_status": "read" if any(usable_page(row) for row in results) else "unavailable",
+        "read_status": "read" if any(not web_result_error(row, "page") for row in results) else "unavailable",
     }
     compact = json.loads(compact_search_response(payload, limits.model_copy(update={"result_chars": 5000}), query))
     compact["failed_results"] = [

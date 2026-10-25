@@ -42,6 +42,7 @@ def _build_agent(saver):
     from agent.results import RESULT_DISPLAY_PROMPT
     from agent.runtime.answer_review import AnswerReviewMiddleware
     from agent.runtime.contracts import TaskContractMiddleware
+    from agent.runtime.evidence_protocol import adapter_for_tool, bind_framework_tools
     from agent.runtime.experts import ExpertRegistryMiddleware
     from agent.runtime.finalization import SearchFinalizationMiddleware
     from agent.runtime.skills import ProjectSkillsMiddleware
@@ -49,8 +50,6 @@ def _build_agent(saver):
     from agent.subagent_factory import build_subagents, validate_model
     from agent.subagent_registry import SummaryConfig, load_default_registry
     from tools.job_tools import get_research_job, submit_research_job
-    from tools.markdown_tools import generate_markdown
-    from tools.pdf_tools import convert_md_to_pdf
     from tools.upload_file_read_tool import read_file_content
 
     registry = load_default_registry()
@@ -62,23 +61,24 @@ def _build_agent(saver):
     main_model, review_model = models["MAIN"], models["REVIEW"]
     validate_model(main_model, needs_tools=True)
     root_model = budget_model(main_model, "main_model")
+    tools = [
+        read_file_content,
+        plan_research,
+        submit_research_job,
+        get_research_job,
+    ]
+    for tool in tools:
+        adapter_for_tool(tool)
     return create_agent(
         model=root_model,
         system_prompt=main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT,
-        tools=[
-            generate_markdown,
-            convert_md_to_pdf,
-            read_file_content,
-            plan_research,
-            submit_research_job,
-            get_research_job,
-        ],
+        tools=tools,
         checkpointer=saver,
         middleware=[
             ExpertRegistryMiddleware(registry),
-            TodoListMiddleware(),
-            FilesystemMiddleware(backend=run_backend),
-            SubAgentMiddleware(backend=run_backend, subagents=subagents),
+            bind_framework_tools(TodoListMiddleware()),
+            bind_framework_tools(FilesystemMiddleware(backend=run_backend)),
+            bind_framework_tools(SubAgentMiddleware(backend=run_backend, subagents=subagents)),
             SummarizationMiddleware(model=root_model, backend=run_backend, **SummaryConfig().kwargs()),
             PatchToolCallsMiddleware(),
             TaskContractMiddleware(),
@@ -135,6 +135,7 @@ async def run_deep_agent(task_query, session_id, *, resume=False):
             session_id,
             project_root_path / "output" / f"session_{session_id}" / f"run_{run_id}",
             user_query=task_query,
+            enforce_plan=True,
         )
     if context.thread_id != session_id:
         raise ValueError("Run context belongs to another session")
@@ -168,9 +169,9 @@ async def run_deep_agent(task_query, session_id, *, resume=False):
         【工作环境指令】
         本轮虚拟文件系统根目录为 /，工具已自动绑定本轮工作目录。
         {upload_prompt}
-        生成 Markdown 时 filename 只传文件名（如 report.md），path 留空或传相对子目录（如 reports）。
+        文件由程序在内容终审后生成，不调用写文件或转换工具。
         不要重复拼接 output/、session_ 或 run_ 目录，也不要传本机绝对路径。
-        读取上传文件时传 uploads/文件名；存在上传文件时请先读取并分析内容。
+        读取已绑定上传材料时传 uploads/文件名；仅按本轮契约处理所需材料。
         业务文件工具使用相对路径。框架文件工具使用本轮虚拟路径，如 /report.md、/uploads/文件名。
         /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。
         禁止访问本机真实绝对路径或其他轮次目录。
@@ -178,13 +179,30 @@ async def run_deep_agent(task_query, session_id, *, resume=False):
         if context.execution_mode == "foreground":
             path_instruction += "\n当前明确前台执行：不要提交后台任务；直接登记研究对象并完成查询和交付。"
         path_instruction += instruction(context)
-        config = {"configurable": {"thread_id": session_id}}
+        config = {"configurable": {"thread_id": context.research_scope_id}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))
-        stream_input = {"messages": [{"role": "user", "content": task_query + path_instruction}]}
+        stream_input = {
+            "messages": Overwrite(
+                [
+                    HumanMessage(
+                        content=task_query + path_instruction, additional_kwargs={"task_input_run_id": context.run_id}
+                    )
+                ]
+            )
+        }
         if context.background_job:
             path_instruction += "\n当前是持久化后台执行：不得创建嵌套后台任务；直接登记分工、查询并完成最终答复。"
-            stream_input = {"messages": [{"role": "user", "content": task_query + path_instruction}]}
+            stream_input = {
+                "messages": Overwrite(
+                    [
+                        HumanMessage(
+                            content=task_query + path_instruction,
+                            additional_kwargs={"task_input_run_id": context.run_id},
+                        )
+                    ]
+                )
+            }
         if resume:
             previous = await agent.aget_state(config)
             if previous.values:

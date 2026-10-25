@@ -511,8 +511,10 @@ def validate_tool_call(call):
             else str(source.with_suffix(".pdf")),
             write=True,
         )
-    elif name == "read_file_content":
-        resolve_run_path(args.get("filename", ""))
+    elif name in ("read_file_content", "read_document"):
+        file = resolve_run_path(args.get("filename", ""))
+        if name == "read_document" and not file.is_relative_to((context.work_dir / "uploads").resolve()):
+            raise PolicyError("Document evidence accepts original uploads only")
     elif name in ("read_file", "write_file", "edit_file", "ls", "glob", "grep"):
         value = args.get("file_path") if name in ("read_file", "write_file", "edit_file") else args.get("path") or "/"
         resolve_run_path(value, write=name in ("write_file", "edit_file"), virtual=True)

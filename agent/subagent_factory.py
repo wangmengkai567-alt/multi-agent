@@ -11,6 +11,7 @@ from agent.reflection import ResultReviewer
 from agent.results import ResultService
 from agent.runtime.backend import run_backend
 from agent.runtime.delegation import DelegationRunnable
+from agent.runtime.evidence_protocol import bind_framework_tools
 from agent.runtime.experts import SerialDelegationMiddleware
 from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.models import budget_model
@@ -66,14 +67,16 @@ def build_subagents(registry, models, *, hooks=None):
             ),
             *(
                 [
-                    SubAgentMiddleware(backend=run_backend, subagents=[build(t) for t in spec.delegate_targets]),
+                    bind_framework_tools(
+                        SubAgentMiddleware(backend=run_backend, subagents=[build(t) for t in spec.delegate_targets])
+                    ),
                     SerialDelegationMiddleware(),
                 ]
                 if spec.delegate_targets
                 else []
             ),
             *([ProjectSkillsMiddleware(spec.allowed_skill_ids)] if spec.allowed_skill_ids else []),
-            FilesystemMiddleware(backend=run_backend),
+            bind_framework_tools(FilesystemMiddleware(backend=run_backend)),
             SummarizationMiddleware(model=child_model, backend=run_backend, **spec.summary.kwargs()),
             PatchToolCallsMiddleware(),
             HookToolMiddleware(

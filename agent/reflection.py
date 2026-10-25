@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from agent.runtime.context import get_run_context
 from agent.runtime.contracts import REVIEW_CONTRACT_VERSION
+from agent.runtime.evidence_protocol import is_web_evidence
 from agent.runtime.hooks import active_call, error_category
 from agent.runtime.models import budget_model
 from agent.runtime.output import cited_urls, source_page, visible_model_text
@@ -68,44 +69,36 @@ def capture_tool(call):
     collector = tool_evidence.get()
     if collector is None:
         return
-    if call.actor.rsplit(":", 1)[-1] == "research_step":
+    from agent.runtime.evidence_protocol import adapter_by_id, make_record
+
+    if call.evidence_adapter is not None and not adapter_by_id(call.evidence_adapter).capture:
         return
-    value = call.result
-    messages = [value] if isinstance(value, ToolMessage) else []
-    if isinstance(value, Command) and isinstance(value.update, dict):
-        messages = value.update.get("messages", [])
-        if isinstance(messages, ToolMessage):
-            messages = [messages]
-    message = next((m for m in messages if isinstance(m, ToolMessage)), None)
-    content = message.content if message else None
-    name = call.actor.rsplit(":", 1)[-1]
-    collector.append(
-        dict(
-            name=name,
-            call_id=call.call_id,
-            executed=call.executed,
-            status=call.status,
-            error_category=error_category(call.error) if call.error else None,
-            content=content,
-            query_reference={key: value for key, value in call.args.items() if key in ("table_name", "query")}
-            if name in ("get_table_data", "execute_sql_query")
-            else {},
-        )
-    )
+    messages = [call.result] if isinstance(call.result, ToolMessage) else []
+    if isinstance(call.result, Command) and isinstance(call.result.update, dict):
+        value = call.result.update.get("messages", [])
+        messages = [value] if isinstance(value, ToolMessage) else value if isinstance(value, list) else []
+    matches = [
+        message for message in messages if isinstance(message, ToolMessage) and message.tool_call_id == call.call_id
+    ]
+    if call.status == "completed" and len(matches) != 1:
+        from agent.runtime.evidence_protocol import EvidenceError
 
+        raise EvidenceError("Successful tool must return exactly one owned ToolMessage")
+    message = matches[0] if matches else None
+    item = make_record(call, message.content if message else None, message.artifact if message else None)
+    item["error_category"] = error_category(call.error) if call.error else None
+    collector.append(item)
     context = get_run_context()
-    if context:
-        from agent.runtime.checkpoints import save_job_checkpoint, write_json
+    from agent.runtime.checkpoints import save_job_checkpoint, write_json
+    from agent.runtime.search import search_allowance
 
-        if context.work_dir.is_dir():
-            key = re.sub(r"[^A-Za-z0-9_-]", "_", call.call_id)
-            write_json(context.work_dir / "results" / "tools" / f"{key}-{call.attempt}.json", collector[-1])
-        from agent.runtime.search import search_allowance
-
-        allowance = search_allowance.get()
-        if allowance:
-            allowance.task.evidence = list(collector)
-        save_job_checkpoint(context)
+    if context.work_dir.is_dir():
+        key = re.sub(r"[^A-Za-z0-9_-]", "_", call.call_id)
+        write_json(context.work_dir / "results" / "tools" / f"{key}-{call.attempt}.json", item)
+    allowance = search_allowance.get()
+    if allowance:
+        allowance.task.evidence = list(collector)
+    save_job_checkpoint(context)
 
 
 def insufficient(issue):
@@ -118,25 +111,9 @@ def insufficient(issue):
 
 
 def source_urls(evidence):
-    urls = []
-    for item in evidence:
-        if item.get("name") not in ("internet_search", "read_web_page") or not evidence_available(item):
-            continue
-        content = item.get("content")
-        if isinstance(content, str):
-            try:
-                content = json.loads(content)
-            except ValueError:
-                continue
-        if isinstance(content, dict):
-            urls.extend(
-                row["url"]
-                for row in content.get("results", [])
-                if isinstance(row, dict)
-                and isinstance(row.get("url"), str)
-                and row["url"].startswith(("https://", "http://"))
-            )
-    return list(dict.fromkeys(urls))
+    from agent.runtime.evidence_protocol import source_rows
+
+    return list(dict.fromkeys(row["url"] for _, row, _ in source_rows(evidence) if row["kind"] == "web"))
 
 
 def source_id(url):
@@ -176,15 +153,11 @@ def rule_review(text, evidence, settings):
             and item.get("error_category") == "invalid_argument"
             and (
                 last_success.get(item["name"], -1) > index
-                or (
-                    item["name"] not in settings.required_tools
-                    or settings.grounded_report
-                    and item["name"] in ("internet_search", "read_web_page")
-                )
+                or (item["name"] not in settings.required_tools or settings.grounded_report and is_web_evidence(item))
                 and (
                     any(name in last_success for name in settings.required_tools)
                     or not settings.required_tools
-                    and item["name"] in ("internet_search", "read_web_page")
+                    and is_web_evidence(item)
                     and bool(source_urls(evidence))
                 )
             )
@@ -301,9 +274,9 @@ class ResultReviewer:
         else:
             limits = context.policy.search
             report = parse_report(text, evidence, limits.model_context_chars // (2 * limits.max_concurrent_tasks))
-        delegated = context.user_query if self.final_answer else call.args["description"] if call else task
+        delegated = context.task_instruction if self.final_answer else call.args["description"] if call else task
         return ReviewContract.create(
-            context.user_query,
+            context.task_instruction,
             delegated,
             text,
             evidence,
@@ -349,6 +322,10 @@ class ResultReviewer:
             "missing_requirement/unsupported_claim/contradicted_claim/bundled_assertion/expression_issue。"
             "优先/可选/如有等不升级为必需。没有通过事实时保留具体缺口，不声称资料不存在。"
             "analysis 不得增加事实或依赖拒绝/过时/冲突事实。正文摘录不足以确认金额、型号或条件就不通过。"
+            "source.kind区分web/sql/document/calculation/record。文档必须遵守文件及页表行定位和实际提取范围；"
+            "calculation只证明程序在其inputs与参数下的输出，不能说成原文记载或扩大到未读工作表。"
+            "无URL的有效文件/SQL/程序来源不因缺网页链接而自动拒绝；本地材料不能升级成官方网页。"
+            "read_bound_material的record只证明用户材料或上一轮交付的实际记载，不独立核实外部事实；保留其来源性质和未知条件。"
         )
         if self.final_answer:
             note = (
@@ -554,7 +531,11 @@ class ResultReviewer:
         draft = json.loads(contract.draft) if not self.final_answer else contract.draft
         evidence = sorted(
             {
-                json.dumps((e["name"], e.get("content")), ensure_ascii=False, sort_keys=True)
+                json.dumps(
+                    (e["adapter"], e["scope_id"], e["task_id"], e["call_id"], e["attempt"], e["integrity"]),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
                 for e in contract.evidence
                 if evidence_available(e)
             }

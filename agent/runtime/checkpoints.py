@@ -78,6 +78,8 @@ def save_job_checkpoint(context):
             execution_run_id=context.run_id,
             research_scope_id=context.research_scope_id,
             user_query=context.user_query,
+            input_text=context.input_text,
+            network_policy=context.network_policy,
             task_contract=context.task_contract.model_dump(mode="json") if context.task_contract else None,
             checkpoint_schema_version=CHECKPOINT_VERSION,
             source_policy_version=sha256(context.policy.sources.model_dump_json().encode()).hexdigest(),
@@ -101,8 +103,13 @@ def restore_job_checkpoint(context):
     data = json.loads(Path(path).read_text("utf-8"))
     if data.get("checkpoint_schema_version") != CHECKPOINT_VERSION:
         context.stop("interrupted")
-        raise RunStopped("旧 checkpoint 与当前引文/请求计量协议不一致，保留原文件并中断；不按新协议自动续跑")
-    if data["research_scope_id"] != context.research_scope_id or data["user_query"] != context.user_query:
+        raise RunStopped("旧 checkpoint 与当前意图及交付契约不一致，保留原文件并中断；不按新协议自动续跑")
+    if (
+        data["research_scope_id"] != context.research_scope_id
+        or data["user_query"] != context.user_query
+        or data["network_policy"] != context.network_policy
+        or data["input_text"] != context.input_text
+    ):
         context.stop("interrupted")
         raise RunStopped("Checkpoint logical task/query mismatch")
     if data["source_policy_version"] != sha256(context.policy.sources.model_dump_json().encode()).hexdigest():
@@ -111,10 +118,15 @@ def restore_job_checkpoint(context):
     from agent.runtime.contracts import TaskContract, assert_contract
 
     saved_contract = data["task_contract"]
-    context.task_contract = TaskContract.model_validate_json(json.dumps(saved_contract)) if saved_contract else None
+    restored_contract = TaskContract.model_validate_json(json.dumps(saved_contract)) if saved_contract else None
+    if context.task_contract is not None and context.task_contract != restored_contract:
+        context.stop("interrupted")
+        raise RunStopped("Checkpoint changed the originally authorized task contract")
+    context.task_contract = restored_contract
     if context.task_contract is not None:
-        context.previous_run_id = context.task_contract.source_run_id
-        context.previous_answer = context.task_contract.source_text or ""
+        for material in context.task_contract.materials:
+            if material.kind == "previous":
+                context.previous_run_id, context.previous_answer = material.reference, material.text
         assert_contract(context)
     context.resume_source_run_id = data["execution_run_id"]
     special = {
@@ -131,13 +143,17 @@ def restore_job_checkpoint(context):
     for key, value in data.items():
         if key not in special:
             setattr(context, key, value)
-    from agent.runtime.quotes import QuoteError, validate_registry
+    from agent.runtime.evidence_protocol import validate_record
+    from agent.runtime.quotes import validate_registry
 
     try:
+        for record in [*data["tasks"].values(), *context.approved_internal.values()]:
+            for item in record["evidence"]:
+                validate_record(item, context)
         validate_registry(context)
-    except QuoteError as exc:
+    except (ValueError, KeyError, TypeError, OSError) as exc:
         context.stop("interrupted")
-        raise RunStopped("Saved quote registry failed integrity checks") from exc
+        raise RunStopped("Saved evidence/quote registry failed integrity checks") from exc
     from agent.runtime.measurement import restore_measurements
 
     restore_measurements(context)

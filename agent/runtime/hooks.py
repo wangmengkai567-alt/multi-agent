@@ -40,6 +40,7 @@ class HookCall:
     elapsed_ms: float = 0
     target: str | None = None
     source_kind: str | None = None
+    evidence_adapter: str | None = None
     check_status: str = "not_checked"
     state: ReviewState = field(default_factory=ReviewState)
     current_result_id: str | None = None
@@ -194,6 +195,7 @@ class HookToolMiddleware(AgentMiddleware):
             call_id=tool["id"],
             parent_call_id=parent.call_id if parent else None,
             args=tool["args"],
+            search_task_key=parent.search_task_key if parent else None,
             target=tool["args"].get("subagent_type") if tool["name"] == "task" else None,
             source_kind=(
                 self.target_specs[tool["args"]["subagent_type"]].execution.source_kind
@@ -209,8 +211,21 @@ class HookToolMiddleware(AgentMiddleware):
             from agent.runtime.contracts import assert_contract
 
             contract = assert_contract(context)
-            if contract.delivery_kind == "direct":
-                raise HookRejected("直接交付契约禁止业务工具调用")
+            from agent.runtime.delivery_actions import action_authorized
+
+            if (
+                contract.delivery_kind == "clarification"
+                or contract.delivery_kind == "direct"
+                and not action_authorized(call)
+            ):
+                raise HookRejected("当前契约禁止模型业务工具调用")
+            if request.tool_call["name"] in (
+                "generate_markdown",
+                "convert_md_to_pdf",
+                "write_file",
+                "edit_file",
+            ) and not action_authorized(call):
+                raise HookRejected("文件仅由程序在内容终审通过后生成")
             if not contract.network_allowed and (
                 (call.target in self.target_specs and self.target_specs[call.target].execution.network_access)
                 or request.tool_call["name"]
@@ -223,6 +238,23 @@ class HookToolMiddleware(AgentMiddleware):
             error = ValueError("模型请求了未注册的工具，请选择实际提供的工具")
             raise HookRejected(str(error)) from error
         if tool is not None:
+            from agent.runtime.evidence_protocol import EvidenceError, adapter_for_tool
+
+            try:
+                adapter = adapter_for_tool(tool)
+            except EvidenceError as exc:
+                raise HookRejected(str(exc)) from exc
+            call.evidence_adapter = adapter.adapter_id
+            if (
+                context
+                and adapter.network
+                and (
+                    context.network_policy == "forbidden"
+                    or context.task_contract is not None
+                    and not context.task_contract.network_allowed
+                )
+            ):
+                raise HookRejected("本轮联网权限不允许执行该工具")
             try:
                 parsed_args = tool.tool_call_schema.model_validate(call.args).model_dump(exclude_unset=True)
                 # Validate policy against the same values the tool will actually use
@@ -287,8 +319,13 @@ class HookToolMiddleware(AgentMiddleware):
         call.elapsed_ms = (monotonic() - started) * 1000
         from agent.reflection import capture_tool
 
-        capture_tool(call)
-        self.hooks.emit("after_tool", call)
+        try:
+            capture_tool(call)
+        except Exception as exc:
+            self._error(call, exc)
+            raise
+        finally:
+            self.hooks.emit("after_tool", call)
         if request.tool_call["name"] == "task" and call.executed and not self.managed_delegation:
             self.hooks.emit("after_subagent", call)
 

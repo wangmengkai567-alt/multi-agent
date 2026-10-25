@@ -107,7 +107,7 @@ def parse_delivery(text, context):
             context.delivery_draft = {
                 "answer": direct.answer,
                 "delivery_kind": "direct",
-                "source_run_id": contract.source_run_id,
+                "material_refs": [m.reference for m in contract.materials],
             }
             return direct.answer
     draft = DeliveryDraft.model_validate_json(text)
@@ -183,7 +183,16 @@ def parse_delivery(text, context):
         }
         if claim.kind != "limitation" and cited_urls(claim.text) - allowed:
             raise ValueError("Delivery cites a URL outside its supporting facts")
-        citations = " ".join(f"[来源]({url})" for url in sorted(allowed) if url not in claim.text)
+        from agent.runtime.evidence_protocol import source_citation
+
+        selected_sources = {
+            ref["source_id"]: sources[ref["source_id"]] for key in claim.fact_ids for ref in facts[key]["evidence"]
+        }
+        citations = " ".join(
+            source_citation(source)
+            for source in selected_sources.values()
+            if not source["url"] or source["url"] not in claim.text
+        )
         rendered.append(claim.text + (" " + citations if citations else ""))
         used.update(claim.fact_ids)
     if (

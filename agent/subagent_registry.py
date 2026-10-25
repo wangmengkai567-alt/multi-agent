@@ -191,16 +191,28 @@ class SubagentSpec:
         from agent.runtime.skills import validate_skill_ids
 
         validate_skill_ids(self.allowed_skill_ids)
+        from agent.runtime.evidence_protocol import adapter_for_tool
+
         for t in self.tools:
+            adapter = adapter_for_tool(t)
+            if t.name in self.review_config.required_tools and adapter.kind == "control" and adapter.capture:
+                raise ValueError("A required evidence tool cannot be declared as workflow control")
+            if adapter.network and not self.execution.network_access:
+                raise ValueError("Tool evidence binding contradicts the expert network permission")
             convert_to_openai_tool(t)
 
     def contract(self):
+        from agent.runtime.evidence_protocol import adapter_for_tool
+
         return dict(
             agent_id=self.agent_id,
             display_name=self.display_name,
             description=self.description,
             system_prompt=self.system_prompt,
-            tools=[convert_to_openai_tool(t) for t in self.tools],
+            tools=[
+                dict(schema=convert_to_openai_tool(t), evidence_adapter=adapter_for_tool(t).adapter_id)
+                for t in self.tools
+            ],
             model_config=asdict(self.model_config),
             review_config=asdict(self.review_config),
             allowed_skill_ids=list(self.allowed_skill_ids),

@@ -216,8 +216,13 @@
   <button class="btn btn-ghost" onclick="closeAllSessions()">移除全部视图</button>
 </div>
 
+<details class="options">
+  <summary>待加工原文（可选）</summary>
+  <textarea id="inputText" aria-label="待加工原文" rows="4" style="width:100%" placeholder="粘贴需要改写、整理或核对的原文；操作要求写在上方问题栏。"></textarea>
+</details>
 <div class="options">
   <label>发送到 <select id="threadSelect" aria-label="发送到"><option value="">新会话</option></select></label>
+  <label><input id="forbidNetwork" type="checkbox" /> 禁止本轮联网</label>
   <label>执行方式 <select id="executionSelect"><option value="auto">自动</option><option value="foreground">前台执行</option><option value="background">后台公开调研</option></select></label>
   <label>业务模式 <select id="modeSelect" aria-label="业务模式"><option value="ordinary">普通任务</option><option value="internal_external">内部数据与市场对照</option></select></label>
   <div id="skillChoices" class="skill-choices" role="group" aria-label="业务技能" aria-busy="true">正在加载技能目录…</div>
@@ -246,6 +251,6 @@
 <script src="/static/run-events.js"></script>
 <script src="/static/vendor/marked.umd.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/app.js?v=skills-catalog-v1"></script>
+<script src="/static/app.js?v=intent-material-v2"></script>
 </body>
 </html>

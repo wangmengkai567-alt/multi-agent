@@ -4,6 +4,7 @@ import copy
 import json
 import re
 from contextvars import ContextVar
+from dataclasses import replace
 from threading import Event
 from time import monotonic
 from typing import Literal
@@ -14,6 +15,7 @@ from requests.adapters import HTTPAdapter
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
+from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import (
     BudgetExceeded,
@@ -201,24 +203,26 @@ def _evidence(
     from agent.reflection import tool_evidence
     from agent.runtime.checkpoints import write_json
     from agent.runtime.events import redact_text
+    from agent.runtime.evidence_protocol import make_record
 
-    item = dict(
-        name="internet_search" if kind == "search" else "read_web_page",
-        via="research_step",
-        call_id=call.call_id,
+    evidence_call = replace(
+        call,
+        actor=call.actor.rsplit(":", 1)[0] + (":internet_search" if kind == "search" else ":read_web_page"),
+        evidence_adapter="web-search.v1" if kind == "search" else "web-page.v1",
         attempt=attempt,
+        search_task_key=allowance.task_key,
         executed=cache is None
         and context.attempt_ledger.get(f"{kind}:{call.call_id}:{attempt}", {}).get("status") == "spent",
         status=status,
+    )
+    item = make_record(evidence_call, content, content, cache=cache, parameters=copy.deepcopy(params))
+    item.update(
+        via="research_step",
         error_category="decision_rejected" if status == "rejected" else classify_tool_error(error) if error else None,
         error=redact_text(str(error)) if error else None,
-        request_parameters=copy.deepcopy(params),
-        query_reference={},
-        content=copy.deepcopy(content),
         model_intent=dict(call.args),
         gap_id=gap["gid"] if gap else "",
         rid=gap["rid"] if gap else "",
-        cache_hit=cache is not None,
     )
     if content is not None:
         from agent.runtime.source_policy import source_assessment
@@ -227,9 +231,8 @@ def _evidence(
         item["source_assessments"] = [
             {"url": row.get("url", ""), **source_assessment(requirement, row, context)}
             for row in (*content.get("results", []), *content.get("scope_rejected_results", []))
+            if isinstance(row, dict)
         ]
-    if cache:
-        item.update(origin_call_id=cache["call_id"], origin_attempt=cache["attempt"])
     collector = tool_evidence.get()
     if collector is not None:
         collector.append(item)
@@ -243,6 +246,7 @@ def _evidence(
 
 
 def _progress(context, allowance, gap, payload, *, technical=False, logical=False, kind="search"):
+    from agent.runtime.evidence_protocol import web_result_error
     from agent.runtime.source_policy import page_tier
 
     with context.budget_lock:
@@ -256,7 +260,7 @@ def _progress(context, allowance, gap, payload, *, technical=False, logical=Fals
         versions = {
             source_key(row["url"]) + ":" + page_tier(row)["content_version"]
             for row in payload.get("results", [])
-            if row.get("url")
+            if not web_result_error(row, "page" if kind == "read" else "search")
         }
         known = set(gap["seen_sources"])
         if versions - known:
@@ -276,6 +280,7 @@ def _progress(context, allowance, gap, payload, *, technical=False, logical=Fals
 
 
 def _perform(action, gap_id, query, source_id, reason):
+    from agent.runtime.evidence_protocol import web_result_error, web_results
     from agent.runtime.recovery import http_status, retry_after
     from agent.runtime.source_policy import task_domains
     from tools.tavily_tool import compact_search_response, internet_search, read_web_page
@@ -379,12 +384,19 @@ def _perform(action, gap_id, query, source_id, reason):
                         content, payload = provider(**params)
                     finally:
                         provider_attempt.reset(token)
-                accepted, rejected = [], []
-                for row in payload.get("results", []):
-                    (
-                        accepted if within_task_domains(context, allowance.task_key, row.get("url", "")) else rejected
-                    ).append(row)
-                payload = {**payload, "results": accepted, "scope_rejected_results": rejected}
+                accepted, rejected, invalid = [], [], []
+                for index, row in enumerate(web_results(payload)):
+                    error = web_result_error(row, "page" if kind == "read" else "search")
+                    if error:
+                        invalid.append(dict(result_index=index, error=error, original_result=row))
+                        continue
+                    (accepted if within_task_domains(context, allowance.task_key, row["url"]) else rejected).append(row)
+                payload = {
+                    **payload,
+                    "results": accepted,
+                    "scope_rejected_results": rejected,
+                    "invalid_results": invalid,
+                }
                 content = compact_search_response(payload, context.policy.search, params["query"])
                 context.check_active()
                 with context.budget_lock:
@@ -448,6 +460,7 @@ def _perform(action, gap_id, query, source_id, reason):
             _checkpoint(context)
 
 
+@evidence_tool("research.v1")
 @tool
 def research_step(
     action: Literal["search", "read", "report"],

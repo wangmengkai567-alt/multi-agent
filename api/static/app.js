@@ -7,8 +7,8 @@ const storageKey = 'multiagent.runs.v1';
 const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
-  pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'已完成，覆盖待确认'};
-const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手'};
+  input_required:'等待补充任务范围', pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'已完成，覆盖待确认'};
+const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手', document:'材料分析助手', delivery:'文件交付'};
 const skills = Object.create(null);
 let skillCatalog = null;
 const verdicts = {partial_passed:'有效事实已保留', passed_with_gap:'事实通过，仍有缺口', partial_passed_with_gap:'部分事实通过，仍有缺口', passed_coverage_unknown:'事实通过，覆盖待确认', partial_coverage_unknown:'部分事实通过，覆盖待确认', passed:'通过', insufficient:'信息不足', dependency_unavailable:'依赖不可用',
@@ -113,7 +113,7 @@ async function loadSkillCatalog() {
 function createSession(threadId, query, runId, select = true) {
   if (sessions[runId]) { if (select) switchSession(runId); return sessions[runId]; }
   const session = {id:threadId, runId, query, logs:[], seen:new Set(), stream:null, ws:null,
-    status:'unknown', statusSeq:0, answer:null, error:null, degraded:false, recordingIncomplete:false};
+    status:'unknown', statusSeq:0, answer:null, error:null, degraded:false, recordingIncomplete:false, clarification:false};
   sessions[runId] = session;
   if (select) switchSession(runId);
   persist();
@@ -127,6 +127,7 @@ function applyEvent(session, event) {
   session.logs.sort((a,b) => a.event_seq - b.event_seq);
   const data = event.data || {};
   if (data.coverage) session.coverage = data.coverage;
+  if (event.event === 'clarification_requested') session.clarification = true;
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
   if (currentState) session.statusSeq = event.event_seq;
@@ -152,6 +153,7 @@ function applyEvent(session, event) {
 }
 function displayStatus(session) {
   if (session.status !== 'completed') return session.status;
+  if (session.clarification) return 'input_required';
   if (session.jobs?.some(job => job.status === 'working' || job.status === 'input_required')) return 'pending';
   const research = session.jobs?.find(job => job.kind === 'research');
   if (research && ['failed','cancelled','timed_out','interrupted'].includes(research.status)) return research.status;
@@ -242,6 +244,7 @@ function describeEvent(event) {
   if (event.event === 'review_repair') return '检查输出格式不符合约定：仅重试检查，复用已有依据';
   if (event.event === 'skill_state') return `Skill ${skills[d.skill_id] || d.skill_id}：` +
     ({selected:'已选择', loaded:'正文已读取', resource_loaded:'参考资源已读取'}[event.status] || event.status);
+  if (event.event === 'clarification_requested') return '需要补充任务范围：' + event.message;
   if (event.event === 'answer_validation') return '最终答复检查：' + (event.status === 'partial' ? '有限结果' : verdicts[event.status] || event.status) + (d.issues?.length ? '；' + d.issues.join('；') : '');
   if (event.event === 'subagent_review') return `${who}结果检查：${verdicts[event.status] || event.status}` +
     (d.issues?.length ? '；' + d.issues.join('；') : '');
@@ -290,6 +293,7 @@ function renderLog(session) {
     ${session.error ? `<p>${escapeHtml(session.error)}</p>` : ''}
     ${session.syncError ? `<p>${escapeHtml(session.syncError)}</p>` : ''}
     ${session.recordingIncomplete ? '<p>部分执行记录未保存，详情见最终事件。</p>' : ''}
+    ${session.clarification ? '<p>请在问题栏补充完整任务后重新提交。</p>' : ''}
     <details><summary>运行详情</summary><pre>${escapeHtml(JSON.stringify({thread_id:session.id,run_id:session.runId,status:session.status},null,2))}</pre></details>`;
   renderJobs(session);
   answer.hidden = session.answer === null || session.answer === undefined;
@@ -437,9 +441,11 @@ async function sendTask() {
         skillIds.some(id => !Object.hasOwn(skills, id))) throw new Error('技能选择不符合服务端目录');
     const mode = $('#modeSelect').value;
     const data = await request('/api/task', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query, execution_mode:$('#executionSelect').value || 'auto', skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
+      body:JSON.stringify({query, input_text:$('#inputText').value || null,
+        network_policy:$('#forbidNetwork').checked ? 'forbidden' : 'allowed',
+        execution_mode:$('#executionSelect').value || 'auto', skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
     const session = createSession(data.thread_id, query, data.run_id);
-    session.status = 'queued'; input.value = ''; notify('任务已接收');
+    session.status = 'queued'; input.value = ''; $('#inputText').value = ''; notify('任务已接收');
     await syncSession(session);
   } catch (error) {
     if (error.status === 409) {

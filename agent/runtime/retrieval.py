@@ -1,6 +1,5 @@
 """Task-local source catalog, including verified cache-consumption references."""
 
-import json
 import re
 from dataclasses import dataclass
 
@@ -8,29 +7,26 @@ from dataclasses import dataclass
 def evidence_available(item):
     if item.get("status") != "completed":
         return False
-    if item.get("executed"):
-        return True
-    if not item.get("cache_hit") or not item.get("origin_call_id"):
-        return False
     from agent.runtime.context import get_run_context
+    from agent.runtime.evidence_protocol import validate_record
 
     context = get_run_context()
-    if context is None:
+    validate_record(item, context)
+    if not item["sources"]:
         return False
+    if item["executed"]:
+        return True
+    if not item["cache_hit"] or not item["origin_call_id"]:
+        return False
+    from agent.results import clean
+
     return any(
         entry.get("status") == "served"
         and entry.get("call_id") == item["origin_call_id"]
-        and entry.get("attempt") == item.get("origin_attempt")
-        and entry.get("payload") == item.get("content")
+        and entry.get("attempt") == item["origin_attempt"]
+        and clean(entry.get("payload")) == item["artifact"]
         for entry in context.research_cache.values()
     )
-
-
-def payload(item):
-    if not evidence_available(item):
-        return {}
-    content = item.get("content") or {}
-    return json.loads(content) if isinstance(content, str) else content
 
 
 def source_key(url):
@@ -57,13 +53,9 @@ class SearchHistory:
 
     @property
     def sources(self):
-        return {
-            source_key(row["url"]): row
-            for item in self.evidence
-            if item["name"] in ("internet_search", "read_web_page") and evidence_available(item)
-            for row in payload(item).get("results", [])
-            if row.get("url")
-        }
+        from agent.runtime.evidence_protocol import source_rows
+
+        return {source_key(row["url"]): row for _, row, _ in source_rows(self.evidence) if row["kind"] == "web"}
 
     def resolve_url(self, value):
         key = value.removeprefix("[source:").removesuffix("]")

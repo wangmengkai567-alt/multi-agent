@@ -1,13 +1,10 @@
 """Task-owned immutable evidence snapshots and server-issued quote references."""
 
-import json
 import re
 from hashlib import sha256
 
 from agent.runtime.context import get_run_context
-from agent.runtime.retrieval import evidence_available, payload, source_key, usable_page
-
-SQL_TOOLS = ("execute_sql_query", "get_table_data", "list_sql_tables")
+from agent.runtime.evidence_protocol import adapter_by_id, source_rows, validate_input, validate_source
 
 
 class QuoteError(ValueError):
@@ -23,28 +20,8 @@ def task_owner():
     return call.search_task_key
 
 
-def source_rows(evidence):
-    """Only genuine completed tool results, including verified cache consumption."""
-    from agent.results import clean
-
-    for item in evidence:
-        if not evidence_available(item):
-            continue
-        if item["name"] in SQL_TOOLS:
-            content = item.get("content")
-            body = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-            yield item, clean(dict(url="", content=body, kind="sql", origin_source_id=item["call_id"])), body
-        elif item["name"] in ("internet_search", "read_web_page"):
-            data = payload(item)
-            if item["name"] == "read_web_page" and data.get("read_status") == "unavailable":
-                continue
-            for row in data.get("results", []):
-                if row.get("url") and (item["name"] != "read_web_page" or usable_page(row)):
-                    yield item, clean(dict(row, origin_source_id=source_key(row["url"]))), _body(row)
-
-
 def _body(row):
-    return str(row.get("raw_content") or row.get("content") or "")
+    return row["content"]
 
 
 def _persist(context):
@@ -66,34 +43,26 @@ def register_options(evidence, visible):
         originals = list(source_rows(evidence))
         for shown in visible:
             candidates = [
-                (item, row, raw_body)
-                for item, row, raw_body in originals
+                (item, row, body)
+                for item, row, body in originals
                 if item["call_id"] == shown["call_id"]
-                and item.get("attempt", 0) == shown.get("attempt", 0)
+                and item["attempt"] == shown["attempt"]
                 and item["name"] == shown["name"]
+                and row["key"] == shown["source_key"]
             ]
-            if shown["name"] in SQL_TOOLS:
-                value = shown.get("content")
-                body = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-                excerpts = [(row, body) for _, row, _ in candidates]
-            else:
-                content = shown.get("content")
-                excerpts = (
-                    [
-                        (row, source["content"])
-                        for source in content.get("results", [])
-                        for _, row, _ in candidates
-                        if row["url"] == source["url"]
-                    ]
-                    if isinstance(content, dict)
-                    else []
-                )
-            for row, excerpt in excerpts:
+            if len(candidates) != 1:
+                raise QuoteError("Visible source does not identify exactly one normalized result")
+            for item, row, raw_body in candidates:
+                excerpt = shown["content"]
                 original = _body(row)
                 digest = sha256(original.encode("utf-8")).hexdigest()
-                item, _, raw_body = next(candidate for candidate in candidates if candidate[1] is row)
                 identity = dict(
                     task_id=owner,
+                    evidence_task_id=item["task_id"],
+                    scope_id=item["scope_id"],
+                    adapter=item["adapter"],
+                    run_id=item["run_id"],
+                    thread_id=item["thread_id"],
                     call_id=item["call_id"],
                     attempt=item.get("attempt", 0),
                     origin_call_id=item.get("origin_call_id"),
@@ -111,7 +80,13 @@ def register_options(evidence, visible):
                     context.evidence_snapshots[sid] = snapshot
                 sid = snapshot["snapshot_id"]
                 sources[sid] = dict(
-                    source_id=sid, url=row["url"], title=row.get("title", ""), kind=row.get("kind", "web")
+                    source_id=sid,
+                    url=row["url"],
+                    title=row["title"],
+                    kind=row["kind"],
+                    locator=row["locator"],
+                    provenance=row["provenance"],
+                    inputs=row["inputs"],
                 )
                 for section in re.split(r"\s*\[…(?:片段省略|独立摘录)…\]\s*", excerpt):
                     for line in re.split(r"(?<=[。！？])|\n", section):
@@ -170,7 +145,12 @@ def resolve_quote(quote_id, evidence, *, owner=None):
         raise QuoteError("Quote snapshot content changed")
     if not any(
         item["call_id"] == snapshot["call_id"]
-        and item.get("attempt", 0) == snapshot["attempt"]
+        and item["adapter"] == snapshot["adapter"]
+        and item["scope_id"] == snapshot["scope_id"]
+        and item["task_id"] == snapshot["evidence_task_id"]
+        and item["run_id"] == snapshot["run_id"]
+        and item["thread_id"] == snapshot["thread_id"]
+        and item["attempt"] == snapshot["attempt"]
         and item.get("origin_call_id") == snapshot["origin_call_id"]
         and item.get("origin_attempt") == snapshot["origin_attempt"]
         and row == snapshot["row"]
@@ -202,6 +182,21 @@ def validate_fact(fact, evidence):
 
 def validate_registry(context):
     """Validate checkpoint contents without granting new evidence ownership."""
+    inputs = {}
+    for sid, snapshot in context.evidence_snapshots.items():
+        if snapshot["scope_id"] != context.research_scope_id or snapshot["thread_id"] != context.thread_id:
+            raise QuoteError("Saved source belongs to another logical task")
+        source = validate_source(snapshot["row"], adapter_by_id(snapshot["adapter"]))
+        if (
+            sid != snapshot["snapshot_id"]
+            or source.digest != snapshot["digest"]
+            or source.origin_source_id != snapshot["origin_source_id"]
+        ):
+            raise QuoteError("Saved source snapshot changed")
+        for reference in source.inputs:
+            inputs[(reference.path, reference.sha256)] = reference
+    for reference in inputs.values():
+        validate_input(reference, context)
     for qid, quote in context.quote_registry.items():
         snapshot = context.evidence_snapshots.get(quote["snapshot_id"])
         if (

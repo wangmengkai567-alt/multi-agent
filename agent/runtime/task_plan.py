@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agent.runtime.context import get_run_context
 from agent.runtime.events import make_event, redact_text
+from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import HookRejected
 from agent.runtime.requirements import (
     RequirementSpec,
@@ -18,7 +19,7 @@ from agent.runtime.requirements import (
     register,
     task_requirements,
 )
-from agent.runtime.source_policy import normalize_domain, query_domains, requested_tiers
+from agent.runtime.source_policy import normalize_domain, query_domains
 
 
 class ExplicitCondition(BaseModel):
@@ -44,11 +45,7 @@ class PlanRequirement(BaseModel):
             anchor=self.anchor,
             label=self.label,
             kind=self.kind,
-            required_tier=list(
-                context.task_contract.required_source_tiers
-                if context.task_contract
-                else requested_tiers(context.user_query)
-            ),
+            required_tier=list(context.task_contract.required_source_tiers) if context.task_contract else [],
             **values,
         )
 
@@ -105,7 +102,7 @@ def _add(context, items, *, initial):
         ):
             raise HookRejected("Dependencies must be unique existing task IDs; append cannot create cycles")
         domains = sorted({normalize_domain(domain) for domain in item.search_domains})
-        if domains and not set(domains).issubset(query_domains(context.user_query)):
+        if domains and not set(domains).issubset(query_domains(context.task_instruction)):
             raise HookRejected("Search domains must be explicitly specified by the original user")
         object_id = item.object_id
         if object_id is not None:
@@ -125,7 +122,16 @@ def _add(context, items, *, initial):
             if name in names:
                 raise HookRejected("Object already registered; reuse its object_id without refreshing its budget")
             proof = None
-            if item.object_name not in context.user_query:
+            material_refs = (
+                [
+                    m.reference
+                    for m in context.task_contract.materials
+                    if m.text is not None and item.object_name in m.text
+                ]
+                if context.task_contract is not None
+                else []
+            )
+            if item.object_name not in context.task_instruction and not material_refs:
                 proof = facts.get(item.discovery_fact_id)
                 if initial or proof is None or proof.get("object_id") not in context.objects:
                     raise HookRejected("A discovered object requires a current approved fact and an original scope")
@@ -151,6 +157,7 @@ def _add(context, items, *, initial):
                 budget_owner_id=budget_owner,
                 discovery_fact_id=item.discovery_fact_id,
                 parent_object_id=parent_id,
+                input_material_refs=material_refs,
             )
             names.add(name)
         duplicates = [
@@ -188,6 +195,7 @@ def _add(context, items, *, initial):
     return pending
 
 
+@evidence_tool("control.v1")
 @tool
 def plan_research(
     tasks: list[ResearchScope],

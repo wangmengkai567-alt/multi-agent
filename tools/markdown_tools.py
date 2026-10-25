@@ -7,12 +7,14 @@ except ImportError:
     from typing import Annotated
 from langchain_core.tools import tool
 
+from agent.runtime.evidence_protocol import evidence_tool
 from api.context import get_session_context
 from api.monitor import monitor
 from utils.path_utils import resolve_path
 
 
 # Markdown生成工具
+@evidence_tool("control.v1")
 @tool
 def generate_markdown(
     content: Annotated[str, "要写入Markdown文档的文本内容"],

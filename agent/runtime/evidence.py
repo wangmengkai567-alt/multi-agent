@@ -1,6 +1,5 @@
 """Bound model-visible search excerpts across a task without changing stored originals."""
 
-import json
 import math
 import re
 from itertools import islice
@@ -47,91 +46,54 @@ def relevant_excerpt(text, size, query=""):
 
 
 def model_evidence(evidence, content_chars, per_source_chars=1000):
-    # Keep actual call IDs/parameters/URLs and explicit truncation markers.
-    result, bodies = [], []
-    for item in evidence:
-        row = {key: value for key, value in item.items() if key != "model_content"}
-        content = (
-            item.get("content")
-            if item["name"] in ("internet_search", "read_web_page")
-            else item.get("model_content", item.get("content"))
+    """Bound normalized source text; original records and provenance remain unchanged."""
+    from agent.runtime.evidence_protocol import source_rows
+
+    bodies = [
+        dict(
+            item=item,
+            source=source,
+            content=body,
+            full_read=source["retrieval"] == "page" or source["kind"] == "document",
+            query=str(item["request_parameters"].get("query") or ""),
         )
-        if item["name"] in ("internet_search", "read_web_page"):
-            if isinstance(content, str):
-                try:
-                    content = json.loads(content)
-                except ValueError:
-                    pass
-            if isinstance(content, dict):
-                content = dict(
-                    query=content.get("query"),
-                    results=[
-                        dict(
-                            source_id=__import__("hashlib")
-                            .sha256(str(source.get("url", "")).encode())
-                            .hexdigest()[:12],
-                            title=source.get("title", ""),
-                            url=source.get("url", ""),
-                            content=str(source.get("raw_content") or source.get("content") or ""),
-                            excerpt_truncated=bool(source.get("excerpt_truncated", False)),
-                        )
-                        for source in content.get("results", [])
-                        if isinstance(source, dict)
-                    ],
-                    evidence_note="真实工具响应；搜索片段与定向正文摘录均不保证网页全文，原始响应另行保存。",
-                    read_status=content.get("read_status"),
-                    failed_results=[
-                        {"url": failure.get("url", ""), "error": failure.get("error", "正文不可用")}
-                        for failure in content.get("failed_results", [])
-                    ],
-                )
-                for source in content.get("results", []):
-                    if isinstance(source, dict) and isinstance(source.get("content"), str):
-                        bodies.append(source)
-                        source["_page"] = item["name"] == "read_web_page"
-                        source["_query"] = item.get("request_parameters", {}).get(
-                            "query", str(content.get("query") or "")
-                        )
-        row["content"] = content
-        if item["name"] in ("execute_sql_query", "get_table_data", "list_sql_tables"):
-            body = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
-            bodies.append(dict(content=body, _page=False, _query="", _sql_row=row))
-        result.append(row)
-    allowances = {}
-    remaining = content_chars
-    capacities = {
-        id(source): min(len(source["content"]), 5000 if source["_page"] else per_source_chars) for source in bodies
-    }
-    pending = list(bodies)
-    # Targeted page extracts carry the sections the worker actually read. Keep
-    # those before spending the remainder on discovery snippets.
-    pages = [source for source in pending if source["_page"]]
-    if pages:
-        share = min(5000, remaining // len(pages))
-        for source in pages:
-            allowances[id(source)] = min(capacities[id(source)], share)
-            remaining -= allowances[id(source)]
-        pending = [source for source in pending if not source["_page"]]
+        for item, source, body in source_rows(evidence)
+    ]
+    capacities = {id(row): min(len(row["content"]), 5000 if row["full_read"] else per_source_chars) for row in bodies}
+    allowances, remaining = {}, content_chars
+    pending = [row for row in bodies if row["full_read"]]
+    if pending:
+        share = min(5000, remaining // len(pending))
+        for row in pending:
+            allowances[id(row)] = min(capacities[id(row)], share)
+            remaining -= allowances[id(row)]
+    pending = [row for row in bodies if id(row) not in allowances]
     while pending:
         share = remaining // len(pending)
-        short = [source for source in pending if capacities[id(source)] <= share]
+        short = [row for row in pending if capacities[id(row)] <= share]
         if not short:
-            for source in pending:
-                allowances[id(source)] = share
+            for row in pending:
+                allowances[id(row)] = share
             break
-        for source in short:
-            allowances[id(source)] = capacities[id(source)]
-            remaining -= capacities[id(source)]
-        pending = [source for source in pending if id(source) not in allowances]
-    for source in bodies:
-        text = source["content"]
-        size = allowances[id(source)]
-        source.pop("_page", None)
-        query = source.pop("_query", "")
-        if size < len(text):
-            source["content"] = relevant_excerpt(text, size, query)
-            source["excerpt_truncated"] = True
-        sql_row = source.pop("_sql_row", None)
-        if sql_row is not None:
-            sql_row["content"] = source["content"]
-    return result
+        for row in short:
+            allowances[id(row)] = capacities[id(row)]
+            remaining -= allowances[id(row)]
+        pending = [row for row in pending if id(row) not in allowances]
+    visible = []
+    for row in bodies:
+        size = allowances[id(row)]
+        if size <= 0:
+            continue
+        item, source, body = row["item"], row["source"], row["content"]
+        excerpt = relevant_excerpt(body, size, row["query"])
+        visible.append(
+            dict(
+                name=item["name"],
+                call_id=item["call_id"],
+                attempt=item["attempt"],
+                source_key=source["key"],
+                content=excerpt,
+                excerpt_truncated=len(excerpt) < len(body),
+            )
+        )
+    return visible

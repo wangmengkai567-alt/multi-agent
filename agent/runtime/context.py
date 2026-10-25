@@ -65,6 +65,8 @@ class RunContext:
     approved_internal: dict = field(default_factory=dict, repr=False)
     internal_result_version: int = 0
     user_query: str = field(default="", repr=False)
+    input_text: str | None = field(default=None, repr=False)
+    network_policy: str = "allowed"
     task_contract: object | None = field(default=None, repr=False)
     expert_contract: dict = field(default_factory=dict, repr=False)
     previous_run_id: str | None = None
@@ -104,6 +106,10 @@ class RunContext:
             from agent.runtime.scheduler import ServiceScheduler
 
             self.scheduler = ServiceScheduler((self.policy or load_runtime_policy()).scheduler)
+
+    @property
+    def task_instruction(self):
+        return self.task_contract.instruction_text if self.task_contract is not None else self.user_query
 
     def stop(self, status):
         with self.budget_lock:

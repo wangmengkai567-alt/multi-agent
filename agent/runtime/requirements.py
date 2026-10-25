@@ -68,14 +68,14 @@ def register(context, task_id, specs, *, owner="task", object_id=None):
             )
         ):
             raise DecisionRejected("Comparison/recommendation actions cannot be registered as task facts")
-        if not _required_quote(spec.anchor, context.user_query):
+        if not _required_quote(spec.anchor, context.task_instruction):
             raise DecisionRejected(
                 f"Requirement {spec.label!r}: anchor must be an exact required span from user_query; do not rewrite it"
             )
         # Structured conditions must themselves be anchored; do not invent capacity/region/channel.
         for key in DIMENSIONS:
             value = getattr(spec, key)
-            if value is not None and (not value.strip() or value not in context.user_query):
+            if value is not None and (not value.strip() or value not in context.task_instruction):
                 raise DecisionRejected(
                     f"Requirement {spec.label!r}: {key}={value!r} is not an exact user_query span. "
                     "Use an exact original value, or null when unspecified; never infer region/year/price kind. "
@@ -83,19 +83,10 @@ def register(context, task_id, specs, *, owner="task", object_id=None):
                 )
         if set(spec.required_tier) - {"official", "authorized", "marketplace_self", "third_party", "media", "unknown"}:
             raise ValueError("Unknown required source tier")
-        tier_terms = {
-            "official": ("官方", "official"),
-            "authorized": ("授权", "authorized"),
-            "marketplace_self": ("自营",),
-            "third_party": ("第三方", "third-party"),
-            "media": ("媒体", "media"),
-            "unknown": ("未知", "unknown"),
-        }
-        if any(
-            not any(_required_quote(term, context.user_query) for term in tier_terms[tier])
-            for tier in spec.required_tier
+        if context.task_contract is not None and set(spec.required_tier) - set(
+            context.task_contract.required_source_tiers
         ):
-            raise DecisionRejected("Source requirement is not anchored in the original mandatory scope")
+            raise DecisionRejected("Source tier was not required by the locked instruction")
         row_object_id = object_id
         if object_id is not None and spec.model not in (None, context.objects[object_id]["user_name"]):
             raise DecisionRejected("A task model must match its registered original object_name or be null")
@@ -228,7 +219,7 @@ def _clause_residual(clause, spans):
 
 def ensure_original_requirements(context):
     """Map every original clause to obligations/objects, preserving all unmatched semantics."""
-    for clause in original_required_clauses(context.user_query):
+    for clause in original_required_clauses(context.task_instruction):
         current = [
             r for r in context.requirements.values() if r["query_version"] == context.query_version and r["required"]
         ]
@@ -269,8 +260,8 @@ def ensure_task(context, task_id, description):
         raise ValueError("Planned task has no registered requirements")
     anchors = (
         [description]
-        if description in original_required_clauses(context.user_query)
-        else original_required_clauses(context.user_query)
+        if description in original_required_clauses(context.task_instruction)
+        else original_required_clauses(context.task_instruction)
     )
     if not anchors:
         raise ValueError("A task needs an original user requirement")
@@ -332,7 +323,7 @@ def register_support(context, task_id):
             None,
             [
                 RequirementSpec(kind="fact", anchor=anchor, label=anchor[:160])
-                for anchor in original_required_clauses(context.user_query)
+                for anchor in original_required_clauses(context.task_instruction)
             ],
             owner="main",
         )

@@ -122,30 +122,6 @@ def page_tier(row):
     )
 
 
-def requested_tiers(query):
-    from agent.runtime.review_contract import _required_quote
-
-    words = {
-        "official": ("官方", "official"),
-        "authorized": ("授权", "authorized"),
-        "marketplace_self": ("自营",),
-        "third_party": ("第三方", "third-party"),
-        "media": ("媒体", "media"),
-        "unknown": ("未知", "unknown"),
-    }
-    return tuple(
-        tier
-        for tier, terms in words.items()
-        if any(
-            _required_quote(term, query)
-            and not re.search(
-                r"(?:不要|禁止|不采用|不使用)\s*(?:引用|参考|使用|采用)?\s*" + re.escape(term), query, re.I
-            )
-            for term in terms
-        )
-    )
-
-
 def task_domains(context, task_id):
     scope = context.task_scopes.get(task_id, {})
     explicit = scope.get("search_domains", [])
@@ -214,11 +190,9 @@ def source_satisfies(requirement, fact, evidence):
     context = get_run_context()
     required = requirement.get("required_tier", [])
     return any(
-        (not required or page_tier(row)["tier"] in required)
+        (not required or row["kind"] == "web" and page_tier(row)["tier"] in required)
         and (
-            row.get("kind") == "sql"
-            or context is None
-            or within_task_domains(context, requirement["task_id"], row.get("url", ""))
+            row["kind"] != "web" or context is None or within_task_domains(context, requirement["task_id"], row["url"])
         )
         for row in verified_sources(fact, evidence)
     )

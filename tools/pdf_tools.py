@@ -8,12 +8,14 @@ except ImportError:
 
 from langchain_core.tools import tool
 
+from agent.runtime.evidence_protocol import evidence_tool
 from api.context import get_session_context
 from api.monitor import monitor
 from utils.path_utils import resolve_path
 from utils.word_converter import convert_md_to_pdf_via_word
 
 
+@evidence_tool("control.v1")
 @tool
 def convert_md_to_pdf(
     md_filename: Annotated[str, "要转换的Markdown文档路径（包含.md后缀）"],

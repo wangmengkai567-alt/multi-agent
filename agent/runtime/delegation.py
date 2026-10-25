@@ -44,6 +44,8 @@ class DelegationRunnable(Runnable):
         context = get_run_context()
         if context is None:
             raise HookRejected("Expert execution requires a run context")
+        if self.spec.execution.network_access and context.network_policy == "forbidden":
+            raise HookRejected("显式联网限制禁止执行联网专家")
         if self.registry is not None:
             from agent.runtime.experts import bind_registry
 
@@ -53,7 +55,7 @@ class DelegationRunnable(Runnable):
 
             contract = assert_contract(context)
             if (
-                contract.delivery_kind == "direct"
+                contract.delivery_kind != "grounded"
                 or not contract.network_allowed
                 and self.spec.execution.network_access
             ):
@@ -405,14 +407,14 @@ class DelegationRunnable(Runnable):
         return dict(input, messages=[*messages, HumanMessage(content=correction)])
 
     def _search_request(self, context, inputs):
-        if not self.spec.execution.planned or not context.user_query:
+        if not self.spec.execution.planned or not context.task_instruction:
             return inputs
         messages = inputs["messages"]
         content = (
             "以下 JSON 是本轮需求数据，user_query 是原始用户需求，task 是分派子任务。"
             "仅完成 task 指定的当前对象与分工，user_query 同时约束验收条件的上限；其他并行助手负责的对象不要重复调查。"
             "不要替主助手生成完整对比或推荐。不把附加调查项一律当作必需；缺失的可选项明确披露。\n"
-            + json.dumps(dict(user_query=context.user_query, task=messages[-1].text), ensure_ascii=False)
+            + json.dumps(dict(user_query=context.task_instruction, task=messages[-1].text), ensure_ascii=False)
         )
         return dict(inputs, messages=[*messages[:-1], HumanMessage(content=content)])
 

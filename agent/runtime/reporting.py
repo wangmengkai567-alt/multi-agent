@@ -12,7 +12,6 @@ from agent.runtime.evidence import model_evidence
 from agent.runtime.facts import REPORT_PROMPT, report_response_format
 from agent.runtime.hooks import active_call
 from agent.runtime.models import model_phase
-from agent.runtime.retrieval import evidence_available
 
 
 @dataclass(frozen=True)
@@ -47,17 +46,7 @@ class GroundedSearchExecutor(Runnable):
             for (actor, owner, _), body in context.skill_bodies.items()
             if actor == call.target and owner == call.call_id
         ]
-        tools = model_evidence(
-            [
-                item
-                for item in tool_evidence.get() or []
-                if evidence_available(item)
-                and item["name"]
-                in ("internet_search", "read_web_page", "execute_sql_query", "get_table_data", "list_sql_tables")
-            ],
-            report_chars,
-            limits.result_chars,
-        )
+        tools = model_evidence(tool_evidence.get() or [], report_chars, limits.result_chars)
         from agent.runtime.quotes import register_options
 
         citations, sources = register_options(tool_evidence.get() or [], tools)
@@ -69,12 +58,20 @@ class GroundedSearchExecutor(Runnable):
                 if o["object_id"]
                 in {r["object_id"] for r in context.requirements.values() if r["task_id"] == call.search_task_key}
             ],
-            user_query=context.user_query,
+            user_query=context.task_instruction,
+            input_materials=[
+                dict(kind=m.kind, reference=m.reference, digest=m.digest) for m in context.task_contract.materials
+            ]
+            if context.task_contract
+            else [],
             delegated_task=call.args["description"],
             reference_time=context.reference_time.isoformat(),
             skill_guidance=guidance,
             sources=sources,
             citation_options=citations,
+            collection_notes=[item["evidence_note"] for item in tool_evidence.get() or [] if item["evidence_note"]][
+                :20
+            ],
         )
         if revision is not None:
             data.update(
@@ -93,6 +90,8 @@ class GroundedSearchExecutor(Runnable):
                 "有 correction 时只修正定位的问题；不得照抄草稿中没有依据的事实。"
                 "value 可用中文概述，引用只返回{quote_id}，不抄写原文或source_id。"
                 "citation_options每项原文只出现一次；sources按source_id给出不可变证据快照的来源。"
+                "文档来源保留文件摘要及页/表/行定位；calculation是程序输出，inputs给出原始输入，不得说成原文直接记载。"
+                "没有可用证据的工具说明不是事实依据；不因工具执行成功就推断业务结论。"
                 "as_of和time_evidence默认均为null；reference_time是检索时间，不能当作事实生效日期。"
                 "每项事实只写一个维度，选择支持它的短引文ID；不能跨越片段省略标记拼接。"
                 "dimensions.model 与 subject 保留来源中的实际名称，不为字面匹配改写。objects 给出原始对象和程序ID；身份由独立审核确认。"

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sys
 import tempfile
@@ -14,7 +15,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSo
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
-from pydantic import BaseModel, Field, StrictStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
 
 # Add project root to sys.path
 current_dir = Path(__file__).resolve().parent
@@ -278,13 +279,23 @@ async def get_skills():
 
 
 class TaskRequest(BaseModel):
-    query: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid")
+    query: StrictStr = Field(min_length=1)
+    input_text: StrictStr | None = Field(default=None, min_length=1, max_length=100000)
+    network_policy: Literal["allowed", "forbidden"] = "allowed"
     skill_ids: list[StrictStr] | None = Field(default=None, max_length=len(SKILL_IDS))
     business_mode: Literal["ordinary", "internal_external"] = "ordinary"
     execution_mode: Literal["auto", "foreground", "background"] = "auto"
     required_sources: list[Literal["db", "search"]] = Field(default_factory=list, max_length=2)
     required_uploads: list[StrictStr] = Field(default_factory=list, max_length=20)
     thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
+
+    @field_validator("query", "input_text")
+    @classmethod
+    def nonblank_text(cls, value):
+        if value is not None and not value.strip():
+            raise ValueError("任务指令和原文不能仅包含空白")
+        return value
 
     @field_validator("skill_ids")
     @classmethod
@@ -307,6 +318,12 @@ class TaskRequest(BaseModel):
 
     @model_validator(mode="after")
     def explicit_workflow(self):
+        if self.network_policy == "forbidden" and (
+            self.execution_mode == "background"
+            or "search" in self.required_sources
+            or self.business_mode == "internal_external"
+        ):
+            raise ValueError("禁止联网与公开研究要求冲突；请调整显式执行约束")
         if self.execution_mode == "background" and (self.business_mode != "ordinary" or self.required_uploads):
             raise ValueError("后台公开调研不接收内部业务流程或上传文件；请使用前台执行")
         missing = set(required_skill_ids(self.business_mode)) - set(self.skill_ids or ())
@@ -350,7 +367,11 @@ async def run_task(request: TaskRequest):
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
             scheduler=app.state.scheduler,
-            user_query=await resolve_user_goal(thread_id, request.query),
+            user_query=request.query
+            if request.input_text is not None
+            else await resolve_user_goal(thread_id, request.query),
+            input_text=request.input_text,
+            network_policy=request.network_policy,
             latest_message=request.query,
             job_service=getattr(app.state, "job_service", None),
             enforce_plan=True,
@@ -389,29 +410,6 @@ async def run_task(request: TaskRequest):
                 "run_id": run_id,
                 "task_id": job["task_id"],
                 "poll_after_seconds": job["poll_after_seconds"],
-            }
-        if request.execution_mode == "background":
-            from tools.job_tools import public_job
-
-            await context.event_sink.start(context)
-            job = await app.state.job_service.submit(
-                thread_id,
-                run_id,
-                "research",
-                {"description": context.user_query, "user_query": context.user_query},
-                run_id + ":research",
-                context.policy.timeouts.job_seconds,
-            )
-            context.pending_jobs[job["task_id"]] = public_job(job)
-            await context.event_sink.finish(
-                context, "completed", answer="研究任务已受理，正在后台执行。本页会自动更新状态和最终结果。"
-            )
-            return {
-                "status": "working",
-                "thread_id": thread_id,
-                "run_id": run_id,
-                "task_id": job["task_id"],
-                "poll_after_seconds": 3,
             }
         app.state.run_contexts[run_id] = context
         record = dict(record, question=context.user_query)
@@ -459,7 +457,14 @@ async def _conversion_job(job):
 
 async def _research_job(job):
     from agent.runtime.checkpoints import save_job_checkpoint
+    from agent.runtime.contracts import CONTRACT_VERSION, TaskContract, background_eligible
+    from agent.runtime.jobs import JobFailed
 
+    if job["payload"].get("contract_version") != CONTRACT_VERSION:
+        raise JobFailed("旧后台任务缺少当前执行契约，保留记录并停止；请新建任务")
+    saved_contract = TaskContract.model_validate_json(json.dumps(job["payload"]["task_contract"]))
+    if not background_eligible(saved_contract):
+        raise JobFailed("后台研究契约不允许执行")
     run_id = str(uuid.uuid4())
     record = await app.state.event_sink.create(job["task_id"], job["payload"]["user_query"], run_id)
     async with app.state.job_service.lock:
@@ -485,6 +490,10 @@ async def _research_job(job):
         event_sink=app.state.event_sink,
         policy=policy,
         user_query=job["payload"]["user_query"],
+        input_text=job["payload"]["input_text"],
+        network_policy=job["payload"]["network_policy"],
+        required_sources=tuple(job["payload"]["required_sources"]),
+        task_contract=saved_contract,
         background_job=True,
         scheduler=app.state.scheduler,
         research_scope_id=job["task_id"],
