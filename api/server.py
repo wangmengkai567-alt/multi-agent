@@ -11,8 +11,7 @@ from time import monotonic
 from typing import Literal
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
@@ -34,8 +33,9 @@ from agent.runtime.skills import SKILL_IDS, required_skill_ids, skill_catalog, v
 from agent.runtime.workflows import finalize_answer  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
+from api.security import COOKIE, AuthService, DataLease, SecurityMiddleware, SecuritySettings  # noqa: E402
 from utils.path_utils import PathDenied, confined_path, validate_filename, validate_identifier  # noqa: E402
-from utils.secure_paths import iter_confined_files  # noqa: E402
+from utils.secure_paths import iter_confined_files, resource_path  # noqa: E402
 
 logger = logging.getLogger(__name__)
 run_db_path = project_root / "data" / "runs.db"
@@ -152,6 +152,17 @@ async def _execute_run_inner(record, context):
 
 @asynccontextmanager
 async def lifespan(app):
+    app.state.security_settings = SecuritySettings.load()
+    lease = DataLease(run_db_path.parent)
+    try:
+        async with runtime_lifespan(app):
+            yield
+    finally:
+        lease.close()
+
+
+@asynccontextmanager
+async def runtime_lifespan(app):
     app.state.agent_tasks = set()
     app.state.run_tasks = {}
     app.state.run_contexts = {}
@@ -172,19 +183,21 @@ async def lifespan(app):
                 raise RuntimeError("Cannot change scheduling limits while previous calls are still in flight")
             scheduler = None
         app.state.scheduler = scheduler if scheduler is not None else ServiceScheduler(limits)
-        await initialize_agent()
         store = await RunStore.open(run_db_path)
+        app.state.auth = await AuthService.open(store, app.state.security_settings)
         app.state.run_store = store
         sink = EventSink(store, manager.schedule_delivery)
         app.state.event_sink = sink
-        await sink.interrupt_active("Service restarted; previous execution was interrupted")
         output_dir.mkdir(exist_ok=True)
         app.state.job_service = await JobService.open(
             run_db_path.with_name("jobs.db"),
             {"research": _research_job, "pdf_conversion": _conversion_job},
             output_dir / "background-jobs",
             scheduler=app.state.scheduler,
+            run_store=store,
         )
+        await initialize_agent()
+        await sink.interrupt_active("Service restarted; previous execution was interrupted")
         await app.state.job_service.recover()
         updated_dir.mkdir(exist_ok=True)
         manager.set_loop(asyncio.get_running_loop())
@@ -225,7 +238,8 @@ async def lifespan(app):
                     await shutdown_agent()
 
 
-app = FastAPI(title="DeepAgents API", lifespan=lifespan)
+app = FastAPI(title="DeepAgents API", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(SecurityMiddleware)
 
 
 from agent.runtime.scheduler import QueueFull  # noqa: E402
@@ -236,8 +250,7 @@ async def scheduling_backpressure(request, error):
     return JSONResponse(status_code=503, content={"status": "busy", "detail": str(error)})
 
 
-# 挂载输出目录，以便前端访问生成的静态文件
-# 假设输出目录位于项目根目录下的 output
+# Artifact roots are private; downloads always resolve through an owned run.
 output_dir = project_root / "output"
 
 
@@ -250,9 +263,6 @@ static_dir = current_dir / "static"
 
 app.mount("/static", FastAPIStaticFiles(directory=str(static_dir)), name="static")
 
-# 挂载输出目录 (前端可直接访问生成的文件)
-# Output files are served through the guarded route below.
-
 
 # 首页
 @app.get("/", response_class=HTMLResponse)
@@ -260,17 +270,85 @@ async def root():
     index_path = static_dir / "index.html"
     if index_path.exists():
         return index_path.read_text(encoding="utf-8")
-    return "<h1>MultiAgent-Search API</h1><p>访问 <a href='/docs'>/docs</a> 查看 API 文档</p>"
+    raise HTTPException(status_code=503, detail="Login page unavailable")
 
 
-# 配置 CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def auth_view(session):
+    return {"csrf_token": session["csrf"], "expires_at": session["expires_at"]}
+
+
+@app.post("/api/auth/login")
+async def login(request: Request):
+    # Keep password validation outside Pydantic errors, which echo invalid inputs.
+    if request.url.query:
+        raise HTTPException(status_code=400, detail="Login does not accept URL parameters")
+    if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
+        raise HTTPException(status_code=400, detail="JSON login required")
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 8192:
+            raise HTTPException(status_code=413, detail="Login request too large")
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeError):
+        raise HTTPException(status_code=400, detail="Invalid login request") from None
+    if (
+        not isinstance(body, dict)
+        or set(body) != {"password"}
+        or not isinstance(body["password"], str)
+        or not 1 <= len(body["password"]) <= 1024
+    ):
+        raise HTTPException(status_code=400, detail="Invalid login request")
+    try:
+        body["password"].encode("utf-8")
+    except UnicodeError:
+        raise HTTPException(status_code=400, detail="Invalid login request") from None
+    result, status = await app.state.auth.login(body["password"])
+    if result is None:
+        return JSONResponse(
+            {"detail": "登录失败，请检查口令" if status == 401 else "尝试过多，请一分钟后再试"},
+            status_code=status,
+            headers={"Cache-Control": "no-store"},
+        )
+    token, session = result
+    # Replace a prior cookie without changing the persistent resource owner.
+    from api.security import session_cookie
+
+    previous = session_cookie(request.headers)
+    if previous:
+        await app.state.auth.revoke(app.state.auth.digest(previous))
+    response = JSONResponse(auth_view(session), headers={"Cache-Control": "no-store"})
+    response.set_cookie(
+        COOKIE,
+        token,
+        max_age=app.state.security_settings.session_seconds,
+        secure=app.state.security_settings.secure,
+        httponly=True,
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.get("/api/auth/session")
+async def get_auth_session(request: Request):
+    return auth_view(request.state.auth_session)
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    await app.state.auth.revoke(request.state.auth_session["token_hash"])
+    response = JSONResponse({"status": "logged_out"})
+    response.delete_cookie(
+        COOKIE, path="/", secure=app.state.security_settings.secure, httponly=True, samesite="strict"
+    )
+    return response
+
+
+@app.post("/api/threads")
+async def create_thread():
+    return {"thread_id": await app.state.run_store.create_thread()}
 
 
 @app.get("/api/skills")
@@ -334,7 +412,12 @@ class TaskRequest(BaseModel):
 
 @app.post("/api/task")
 async def run_task(request: TaskRequest):
-    thread_id = request.thread_id or str(uuid.uuid4())
+    if request.thread_id is not None:
+        if not await app.state.run_store.owns_thread(request.thread_id):
+            raise HTTPException(status_code=404, detail="Thread not found")
+        thread_id = request.thread_id
+    else:
+        thread_id = await app.state.run_store.create_thread()
     async with app.state.submission_lock:
         if app.state.stopping:
             raise HTTPException(status_code=503, detail="Service is shutting down")
@@ -345,7 +428,9 @@ async def run_task(request: TaskRequest):
             # A cancelled await can race a committed insert in the DB worker.
             # The server-generated ID lets us settle precisely that reservation.
             await app.state.event_sink.finish(
-                RunContext(run_id, thread_id, output_dir), "cancelled", error="Task submission cancelled"
+                RunContext(run_id, thread_id, output_dir, owner_id=app.state.run_store.owner_id),
+                "cancelled",
+                error="Task submission cancelled",
             )
             raise
         except RunConflict as exc:
@@ -362,6 +447,7 @@ async def run_task(request: TaskRequest):
             run_id,
             thread_id,
             output_dir / f"session_{thread_id}" / f"run_{run_id}",
+            owner_id=app.state.run_store.owner_id,
             deadline=datetime.now(UTC) + timedelta(seconds=app.state.runtime_policy.timeouts.total_seconds),
             deadline_clock=monotonic() + app.state.runtime_policy.timeouts.total_seconds,
             event_sink=app.state.event_sink,
@@ -466,7 +552,12 @@ async def _research_job(job):
     if not background_eligible(saved_contract):
         raise JobFailed("后台研究契约不允许执行")
     run_id = str(uuid.uuid4())
-    record = await app.state.event_sink.create(job["task_id"], job["payload"]["user_query"], run_id)
+    if job["resource_owner_id"] != app.state.run_store.owner_id:
+        raise JobFailed("Background task resource owner mismatch")
+    await app.state.run_store.create_thread(job["task_id"])
+    record = await app.state.event_sink.create(
+        job["task_id"], job["payload"]["user_query"], run_id, job_id=job["task_id"]
+    )
     async with app.state.job_service.lock:
         await app.state.job_service.connection.execute(
             "UPDATE jobs SET execution_run_id=? WHERE task_id=?", (run_id, job["task_id"])
@@ -485,6 +576,7 @@ async def _research_job(job):
         run_id,
         job["task_id"],
         directory,
+        owner_id=job["resource_owner_id"],
         deadline=datetime.now(UTC) + timedelta(seconds=seconds),
         deadline_clock=monotonic() + seconds,
         event_sink=app.state.event_sink,
@@ -505,6 +597,10 @@ async def _research_job(job):
     checkpoint_loaded = False
     try:
         restore_job_checkpoint(context)
+        if context.resume_source_run_id:
+            previous = await app.state.run_store.get(context.resume_source_run_id)
+            if not previous or previous["thread_id"] != context.thread_id:
+                raise RunStopped("Checkpoint source run does not belong to the owned execution thread")
         checkpoint_loaded = True
         from agent.runtime.review_state import ReviewState
 
@@ -602,8 +698,9 @@ async def cancel_job(task_id: str, thread_id: str):
 
 
 class JobResume(BaseModel):
-    thread_id: str
-    user_input: str = Field(min_length=1, max_length=8000)
+    model_config = ConfigDict(extra="forbid")
+    thread_id: StrictStr = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
+    user_input: StrictStr = Field(min_length=1, max_length=8000)
 
 
 @app.post("/api/jobs/{task_id}/resume")
@@ -632,7 +729,9 @@ async def cancel_run(run_id: str):
             raise HTTPException(status_code=404, detail="Run not found")
         context = app.state.run_contexts.get(run_id)
         if record["status"] in ("queued", "running"):
-            context = context or RunContext(run_id, record["thread_id"], output_dir)
+            context = context or RunContext(
+                run_id, record["thread_id"], output_dir, owner_id=app.state.run_store.owner_id
+            )
             status = context.stop("cancelled")
             if status in ("cancelled", "timed_out", "interrupted"):
                 await app.state.event_sink.finish(context, status, error="Cancelled by user")
@@ -669,6 +768,8 @@ async def get_run_history(run_id: str):
 
 @app.post("/api/upload")
 async def upload_files(files: list[UploadFile] = File(...), thread_id: str = Form(...)):
+    if not await app.state.run_store.owns_thread(thread_id):
+        raise HTTPException(status_code=404, detail="Thread not found")
     try:
         validate_identifier(thread_id)
         names = [validate_filename(file.filename) for file in files]
@@ -699,40 +800,47 @@ async def upload_files(files: list[UploadFile] = File(...), thread_id: str = For
     return {"status": "uploaded", "files": names}
 
 
-def output_file(value, *, virtual=False):
+async def run_workspace(run_id):
+    record = await app.state.run_store.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run not found")
     try:
-        path = confined_path(value, output_dir, virtual=virtual)
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="File not found")
-        return path
+        return resource_path(record["workspace"], output_dir)
     except PathDenied as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail="Run workspace rejected") from exc
 
 
-@app.get("/api/download")
-async def download_file(path: str):
-    file = output_file(path)
-    return FileResponse(file, filename=file.name)
-
-
-@app.get("/output/{path:path}")
-async def static_output(path: str):
-    return FileResponse(output_file(path, virtual=True))
-
-
-@app.get("/api/files")
-async def list_files(path: str | None = None):
+@app.get("/api/runs/{run_id}/files/download")
+async def download_file(run_id: str, path: str):
+    base = await run_workspace(run_id)
     try:
-        base = confined_path(path or ".", output_dir)
+        file = resource_path(path, base)
     except PathDenied as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=403, detail="Relative file path rejected") from exc
+    if not file.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file, filename=file.name, media_type="application/octet-stream")
+
+
+@app.get("/api/runs/{run_id}/files")
+async def list_files(run_id: str):
+    from utils.artifact_links import artifact_url
+
+    base = await run_workspace(run_id)
     if not base.is_dir():
-        raise HTTPException(status_code=404, detail="Directory not found")
+        return {"files": []}
     files = []
     for file in iter_confined_files(base):
         info = file.stat()
+        relative = file.relative_to(base).as_posix()
         files.append(
-            {"name": file.name, "type": "file", "path": str(file), "size": info.st_size, "mtime": info.st_mtime}
+            {
+                "name": file.name,
+                "relative_path": relative,
+                "url": artifact_url(run_id, relative),
+                "size": info.st_size,
+                "mtime": info.st_mtime,
+            }
         )
     files.sort(key=lambda item: item["mtime"], reverse=True)
     return {"files": files}
@@ -747,7 +855,7 @@ async def websocket_endpoint(
     except PathDenied:
         await websocket.close(code=1008)
         return
-    if after_seq and run_id is None:
+    if not await app.state.run_store.owns_thread(thread_id) or run_id is None:
         await websocket.close(code=1008)
         return
     if run_id is not None:
@@ -755,8 +863,8 @@ async def websocket_endpoint(
         if record is None or record["thread_id"] != thread_id:
             await websocket.close(code=1008)
             return
-    await manager.connect(websocket, thread_id, run_id=run_id, after_seq=after_seq)
     try:
+        await manager.connect(websocket, thread_id, run_id=run_id, after_seq=after_seq)
         while True:
             data = await websocket.receive_text()
             await manager.pong(websocket, {"type": "pong", "message": f"服务端已收到: {data}"})
@@ -767,4 +875,5 @@ async def websocket_endpoint(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
+    settings = SecuritySettings.load()
+    uvicorn.run(app, host=settings.host, port=settings.port, reload=False, proxy_headers=False, access_log=False)

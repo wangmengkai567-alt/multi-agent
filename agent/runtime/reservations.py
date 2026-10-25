@@ -24,7 +24,7 @@ def held_counts(context):
 
 
 def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revision=False):
-    from agent.runtime.policies import KINDS, BudgetExceeded
+    from agent.runtime.policies import KINDS, ReservationUnavailable
 
     with context.budget_lock:
         context.check_active()
@@ -74,17 +74,17 @@ def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revis
                 len(context.search_calls) + held["search"] + add.get("search", 0) + allowance.minimum_run_reserve()
                 > allowance.run_limit()
             ):
-                raise BudgetExceeded("reserve_exhausted: run search capacity")
+                raise ReservationUnavailable("reserve_exhausted: run search capacity")
             if (
                 allowance.used("search") + task_held["search"] + add.get("search", 0)
                 > allowance.initial_limit() + context.policy.search.refinement_calls_per_task
             ):
-                raise BudgetExceeded("reserve_exhausted: task search capacity")
+                raise ReservationUnavailable("reserve_exhausted: task search capacity")
             if (
                 allowance.used("read") + task_held["read"] + add.get("read", 0)
                 > context.policy.search.page_reads_per_task
             ):
-                raise BudgetExceeded("reserve_exhausted: task read capacity")
+                raise ReservationUnavailable("reserve_exhausted: task read capacity")
         from agent.runtime.governance import delivery_reserve
 
         held.update(delivery_reserve(context))
@@ -95,10 +95,10 @@ def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revis
             + sum(v for k, v in add.items() if k in KINDS)
             > kinds.total
         ):
-            raise BudgetExceeded("reserve_exhausted: revision total capacity unavailable")
+            raise ReservationUnavailable("reserve_exhausted: revision total capacity unavailable")
         for key, value in add.items():
             if key in KINDS and context.call_counts[key] + held[key] + value > getattr(kinds, key):
-                raise BudgetExceeded("reserve_exhausted: " + key)
+                raise ReservationUnavailable("reserve_exhausted: " + key)
         row["remaining"] = dict(remaining)
         row["active"] = activate
         if previous_owner:

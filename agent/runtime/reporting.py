@@ -1,5 +1,6 @@
 """Generate grounded reports without research tools or conversation history."""
 
+import asyncio
 import json
 from dataclasses import dataclass
 
@@ -7,7 +8,9 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 
 from agent.reflection import tool_evidence
+from agent.runtime.collection import collection_result, collection_scope, open_collection
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import CollectionFinished
 from agent.runtime.evidence import model_evidence
 from agent.runtime.facts import REPORT_PROMPT, report_response_format
 from agent.runtime.hooks import active_call
@@ -39,6 +42,7 @@ class GroundedSearchExecutor(Runnable):
 
     def _messages(self, revision=None):
         context, call = get_run_context(), active_call.get()
+        context.check_active()
         limits = context.policy.search
         report_chars = limits.model_context_chars // limits.max_concurrent_tasks
         guidance = [
@@ -67,6 +71,7 @@ class GroundedSearchExecutor(Runnable):
             delegated_task=call.args["description"],
             reference_time=context.reference_time.isoformat(),
             skill_guidance=guidance,
+            collection_status=context.collection_states.get(call.search_task_key),
             sources=sources,
             citation_options=citations,
             collection_notes=[item["evidence_note"] for item in tool_evidence.get() or [] if item["evidence_note"]][
@@ -127,19 +132,37 @@ class GroundedSearchExecutor(Runnable):
 
     @staticmethod
     def _result(result, message):
-        # Keep research turns for a genuinely necessary evidence refinement.
-        # Report-only revision never receives or reconstructs those turns.
+        # Preserve completed graph turns when available; report-only revisions
+        # use the owned evidence collector without reconstructing interrupted calls.
         return dict(result, messages=[*result["messages"][:-1], message])
 
     def invoke(self, input, config=None, **kwargs):
         revision = input if isinstance(input, ReportRevision) else None
         result = {"messages": [AIMessage(content="")]}
         if revision is None:
-            result = self.researcher.invoke(input, config, **kwargs)
+            scope = open_collection()
+            collection_token = collection_scope.set(scope)
+            try:
+                try:
+                    scope.check()
+                    result = self.researcher.invoke(input, config, **kwargs)
+                except CollectionFinished as finished:
+                    if finished.task_id != scope.task_id:
+                        raise
+                    result = collection_result(input, finished)
+                except TimeoutError:
+                    remaining = scope.remaining()
+                    if remaining is None or remaining > 0:
+                        raise
+                    result = collection_result(input, scope.close("time_limit"))
+            finally:
+                collection_scope.reset(collection_token)
+            get_run_context().check_active()
             self._research_finished(result)
         from agent.runtime.reservations import activate_report
 
         activate_report(get_run_context(), active_call.get().call_id)
+        collection_token = collection_scope.set(None)
         token = model_phase.set("report_revision" if revision else "report_generation")
         try:
             messages = self._messages(revision)
@@ -147,16 +170,41 @@ class GroundedSearchExecutor(Runnable):
             return self._result(result, message)
         finally:
             model_phase.reset(token)
+            collection_scope.reset(collection_token)
 
     async def ainvoke(self, input, config=None, **kwargs):
         revision = input if isinstance(input, ReportRevision) else None
         result = {"messages": [AIMessage(content="")]}
         if revision is None:
-            result = await self.researcher.ainvoke(input, config, **kwargs)
+            scope = open_collection()
+            collection_token = collection_scope.set(scope)
+            timeout = None
+            try:
+                try:
+                    scope.check()
+                    timeout = asyncio.timeout(scope.remaining())
+                    async with timeout:
+                        result = await self.researcher.ainvoke(input, config, **kwargs)
+                except CollectionFinished as finished:
+                    if finished.task_id != scope.task_id:
+                        raise
+                    result = collection_result(input, finished)
+                except TimeoutError:
+                    remaining = scope.remaining()
+                    if not (timeout is not None and timeout.expired()) and (remaining is None or remaining > 0):
+                        raise
+                    result = collection_result(input, scope.close("time_limit"))
+            finally:
+                try:
+                    await scope.settle()
+                finally:
+                    collection_scope.reset(collection_token)
+            get_run_context().check_active()
             self._research_finished(result)
         from agent.runtime.reservations import activate_report
 
         activate_report(get_run_context(), active_call.get().call_id)
+        collection_token = collection_scope.set(None)
         token = model_phase.set("report_revision" if revision else "report_generation")
         try:
             messages = self._messages(revision)
@@ -166,3 +214,4 @@ class GroundedSearchExecutor(Runnable):
             return self._result(result, message)
         finally:
             model_phase.reset(token)
+            collection_scope.reset(collection_token)

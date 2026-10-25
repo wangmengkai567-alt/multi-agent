@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import CollectionFinished, ExecutionTerminated
 from agent.runtime.events import make_event, redact_text
 from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import HookRejected
@@ -280,6 +281,8 @@ def plan_research(
             except Exception as error:
                 for key, value in original.items():
                     setattr(context, key, value)
+                if isinstance(error, ExecutionTerminated | CollectionFinished):
+                    raise
                 raise HookRejected(str(error)) from error
             context.accepted_plan = True
             if operation == "append":

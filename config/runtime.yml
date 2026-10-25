@@ -19,6 +19,10 @@ budgets:
   retry: 12
   tools_per_turn: 8
   near_ratio: 0.85
+collection:
+  # Per expert task, shared across evidence refinements; report/review calls are separate.
+  model_calls: 12
+  tool_calls: 12
 job_budgets:
   total: 240
   main_model: 40

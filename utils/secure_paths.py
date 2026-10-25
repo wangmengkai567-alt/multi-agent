@@ -9,6 +9,15 @@ class PathDenied(PermissionError):
     pass
 
 
+def resource_path(value, root):
+    """Public file references are strictly relative to a server-owned resource root."""
+    if not isinstance(value, str) or not value or value.startswith(("/", "\\")) or PureWindowsPath(value).drive:
+        raise PathDenied("A relative resource path is required")
+    for component in value.replace("\\", "/").split("/"):
+        validate_filename(component)
+    return confined_path(value, root)
+
+
 def validate_identifier(value):
     if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
         raise PathDenied("Invalid session identifier")

@@ -10,6 +10,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.governance import register_turn
 from agent.runtime.output import normalize_model_message
 from agent.runtime.policies import request_timeout, reserve_calls
@@ -86,6 +87,8 @@ class BudgetChatModel(BaseChatModel):
                 context.check_active()
                 return ChatResult(generations=[ChatGeneration(message=register_turn(normalize_model_message(message)))])
         except BaseException as exc:
+            if isinstance(exc, ExecutionTerminated):
+                context.terminate(exc)
             error = exc
             raise
         finally:
@@ -113,6 +116,8 @@ class BudgetChatModel(BaseChatModel):
                 context.check_active()
                 return ChatResult(generations=[ChatGeneration(message=register_turn(normalize_model_message(message)))])
         except BaseException as exc:
+            if isinstance(exc, ExecutionTerminated):
+                context.terminate(exc)
             error = exc
             raise
         finally:

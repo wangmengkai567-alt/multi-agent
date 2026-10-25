@@ -15,6 +15,7 @@ from requests.adapters import HTTPAdapter
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import CollectionFinished, ExecutionTerminated
 from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import (
@@ -123,7 +124,12 @@ def _reserve(context, allowance, call, kind, attempt, request_key):
             r["call_id"] == call.call_id and r["status"] != "released" for r in context.attempt_ledger.values()
         )
         if not previous and context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
-            raise BudgetExceeded("单次模型回合工具调用次数已达到上限")
+            from agent.runtime.collection import current_collection
+
+            collection = current_collection()
+            if collection is not None:
+                collection.finish("turn_tool_limit")
+            raise PolicyError("单次模型回合工具调用次数已达到上限")
         categories = ["tool", *(["retry"] if attempt else [])]
         from agent.runtime.reservations import current_owner
 
@@ -473,6 +479,8 @@ def research_step(
     context, allowance, call = get_run_context(), search_allowance.get(), active_call.get()
     try:
         return _perform(action, gap_id, query, source_id, reason)
+    except (ExecutionTerminated, CollectionFinished):
+        raise
     except Exception as error:
         if context is None or allowance is None or call is None or context.stop_status:
             raise

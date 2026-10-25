@@ -8,7 +8,7 @@ from langchain.agents.middleware import AgentMiddleware, ModelResponse
 from langchain_core.messages import AIMessage
 
 from agent.runtime.experts import append_system
-from agent.runtime.policies import SearchLimitReached, calls_available, load_runtime_policy
+from agent.runtime.policies import SearchLimitReached, load_runtime_policy
 from agent.runtime.review_state import ReviewState, deliverable
 
 
@@ -16,7 +16,6 @@ from agent.runtime.review_state import ReviewState, deliverable
 class SearchTaskBudget:
     calls: set[str] = field(default_factory=set)
     page_calls: set[str] = field(default_factory=set)
-    research_turns: int = 0
     refinement_start: int = 0
     refinement_open: bool = False
     finalize_only: bool = False
@@ -155,12 +154,6 @@ class SearchAllowance:
             self.task.refinement_open = True
             self.task.finalize_only = not allow_search
 
-    def collection_turn_limit(self):
-        # Every admitted object needs its own collection exit, report and revision.
-        # Model calls are shared by all children, even when their search slots are not.
-        slots = self.context.policy.search.max_concurrent_tasks
-        return max(1, self.context.policy.budgets.sub_model // slots - 3)
-
     def snapshot(self):
         with self.lock:
             return dict(
@@ -197,34 +190,14 @@ def needs_search_refinement(review, evidence):
 
 
 class SearchExecutionMiddleware(AgentMiddleware):
-    def __init__(self, system_prompt="", *, grounded_report=False):
-        self.system_prompt, self.grounded_report = system_prompt, grounded_report
-
     def prepare_request(self, request):
         allowance = search_allowance.get()
         if allowance is None:
             return request
-        from agent.runtime.governance import near_budget
         from agent.runtime.research import available_actions
 
         context = allowance.context
         actions = available_actions(context, allowance)
-        remaining = context.remaining()
-        reserve = context.policy.timeouts.request_seconds + min(
-            context.policy.timeouts.finalize_seconds, context.policy.timeouts.total_seconds * 0.2
-        )
-        from agent.runtime.reservations import current_owner
-
-        held = context.revision_reservations.get(current_owner(context))
-        protected_revision = bool(held and held["active"])
-        if (
-            (near_budget(context) and not protected_revision)
-            or not calls_available("sub_model")
-            or remaining is not None
-            and remaining <= reserve
-            or allowance.task.research_turns >= allowance.collection_turn_limit()
-        ):
-            allowance.task.finalize_only = True
         if allowance.task.finalize_only or actions["allowed_actions"] == ["report"]:
             return ModelResponse(result=[AIMessage(content="资料收集完成；已有缺口由报告步骤保留。")])
         note = (
@@ -233,7 +206,6 @@ class SearchExecutionMiddleware(AgentMiddleware):
             + "。只用 research_step；一次一个动作。search/read 必须复制本任务的 gap_id/source_id；read 不传 query，程序按需求构造。资料足够就 report，不为可选背景扩大调查。\n"
             + json.dumps(actions, ensure_ascii=False)
         )
-        allowance.task.research_turns += 1
         return request.override(
             system_message=append_system(request.system_message, note),
             model_settings={**request.model_settings, "strict": True, "parallel_tool_calls": False},

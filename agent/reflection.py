@@ -12,13 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from agent.runtime.context import get_run_context
 from agent.runtime.contracts import REVIEW_CONTRACT_VERSION
+from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.evidence_protocol import is_web_evidence
 from agent.runtime.hooks import active_call, error_category
 from agent.runtime.models import budget_model
 from agent.runtime.output import cited_urls, source_page, visible_model_text
 from agent.runtime.policies import (
     SEARCH_CONTROL_CATEGORIES,
-    BudgetExceeded,
     policy_for_run,
     request_timeout,
 )
@@ -512,16 +512,15 @@ class ResultReviewer:
     def _failure(self, error):
         from agent.runtime.events import redact_text
 
-        status = "budget_exhausted" if isinstance(error, BudgetExceeded) else "check_incomplete"
         reason = redact_text(str(error) or type(error).__name__)
         return ReviewResult(
-            verdict=status,
+            verdict="check_incomplete",
             issues=["审核未完成：" + reason],
             revision_instruction="仅依据已有证据修正报告表达与引用，不重新搜索：" + reason
             if type(error).__name__ == "ReportError"
             else "",
             error=type(error).__name__,
-            state=ReviewState(check_status=status),
+            state=ReviewState(check_status="check_incomplete"),
         )
 
     def _key(self, contract):
@@ -650,6 +649,8 @@ class ResultReviewer:
                     if attempt:
                         raise
                     messages = self._repair_messages(messages, response, exc)
+        except ExecutionTerminated:
+            raise
         except Exception as exc:
             return self._failure(exc)
 
@@ -681,6 +682,8 @@ class ResultReviewer:
                     if attempt:
                         raise
                     messages = self._repair_messages(messages, response, exc)
+        except ExecutionTerminated:
+            raise
         except Exception as exc:
             return self._failure(exc)
 

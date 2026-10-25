@@ -198,18 +198,33 @@
  .agent-group > summary {cursor:pointer;font-weight:600;font-size:13px;padding:6px 2px;}
  .agent-group[open] > summary {margin-bottom:10px;}
  #jobArea:empty {display:none;}
+ [hidden] {display:none !important;}
+ #workspace {display:flex;flex:1;min-height:0;flex-direction:column;overflow:hidden;}
+ #loginPanel {margin:auto;padding:28px;max-width:460px;width:100%;}
+ #loginForm {display:flex;flex-direction:column;gap:16px;}
+ #accessPassword {padding:12px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;}
+ #authMessage {font-size:13px;line-height:1.6;color:var(--text-dim);}
 </style>
 </head>
 <body>
 
 <header>
   <h1>🤖 MultiAgent <span>Search</span></h1>
+  <button id="logoutBtn" class="btn btn-ghost" type="button" hidden>退出登录</button>
   <div class="ws-badge">
     <div class="ws-dot" id="wsDot"></div>
     <span id="wsStatus">就绪</span>
   </div>
 </header>
-
+<section id="loginPanel" aria-label="登录">
+  <form id="loginForm">
+    <label for="accessPassword">访问口令</label>
+    <input id="accessPassword" type="password" autocomplete="current-password" maxlength="1024" required>
+    <button id="loginBtn" class="btn btn-primary" type="submit" disabled>登录</button>
+    <p id="authMessage" role="status" aria-live="polite">正在确认登录状态…</p>
+  </form>
+</section>
+<main id="workspace" hidden>
 <div class="input-bar">
   <input id="queryInput" aria-label="分析问题" type="text" placeholder="输入问题，例如：明天武汉适合穿什么衣服？" />
   <button class="btn btn-primary" id="sendBtn" onclick="sendTask()" disabled>▶ 发送新任务</button>
@@ -248,9 +263,10 @@
   </div>
 </div>
 
-<script src="/static/run-events.js"></script>
+</main>
+<script src="/static/run-events.js?v=owner-session-v1"></script>
 <script src="/static/vendor/marked.umd.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/app.js?v=intent-material-v2"></script>
+<script src="/static/app.js?v=owner-session-v1"></script>
 </body>
 </html>

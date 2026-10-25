@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from agent.reflection import ResultReviewer
 from agent.results import ResultService
 from agent.runtime.backend import run_backend
+from agent.runtime.collection import CollectionExecutionMiddleware
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.evidence_protocol import bind_framework_tools
 from agent.runtime.experts import SerialDelegationMiddleware
@@ -60,11 +61,8 @@ def build_subagents(registry, models, *, hooks=None):
             "事实报告由后续独立步骤生成。委派返回的已审核事实也必须保留实际工具证据链。"
         )
         middleware = [
-            *(
-                [SearchExecutionMiddleware(prompt, grounded_report=spec.review_config.grounded_report)]
-                if spec.execution.planned
-                else []
-            ),
+            CollectionExecutionMiddleware(),
+            *([SearchExecutionMiddleware()] if spec.execution.planned else []),
             *(
                 [
                     bind_framework_tools(

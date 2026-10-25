@@ -12,10 +12,19 @@ from agent.runtime.hooks import HookRejected
 
 
 def public_job(job):
-    return {
+    import copy
+
+    from utils.artifact_links import artifact_url
+
+    value = {
         key: job.get(key)
         for key in ("task_id", "kind", "status", "result", "error", "poll_after_seconds", "execution_run_id")
     }
+    value["result"] = copy.deepcopy(value["result"])
+    if value["result"] and "artifacts" in value["result"]:
+        for artifact in value["result"]["artifacts"]:
+            artifact["url"] = artifact_url(job["run_id"], artifact["relative_path"])
+    return value
 
 
 @evidence_tool("network-control.v1")

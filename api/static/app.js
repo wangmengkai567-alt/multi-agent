@@ -3,6 +3,12 @@ const sessions = Object.create(null);
 let activeSessionId = null;
 let submitting = false;
 let fileRequest = 0;
+let authenticated = false;
+let csrfToken = null;
+let authEpoch = 0;
+let authTimer = null;
+const authChannel = new BroadcastChannel('multiagent.auth.v1');
+let authBootstrap = 0;
 const storageKey = 'multiagent.runs.v1';
 const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
@@ -38,20 +44,104 @@ function renderAnswer(element, text) {
 }
 function notify(message = '') { $('#notice').textContent = message; }
 function persist() {
+  if (!authenticated) return;
   try {
     localStorage.setItem(storageKey, JSON.stringify({active:activeSessionId,
       runs:Object.values(sessions).map(s => ({threadId:s.id, runId:s.runId, query:s.query}))}));
   } catch (_) { notify('浏览器无法保存任务列表；刷新后可通过运行详情恢复。'); }
 }
-async function request(url, options) {
-  const response = await fetch(url, options);
+function lockAuthentication(message = '请登录后继续。后台任务仍会运行。') {
+  authenticated = false; csrfToken = null; authEpoch++; fileRequest++;
+  clearTimeout(authTimer); authTimer = null;
+  for (const session of Object.values(sessions)) {
+    session.stream?.close(); clearTimeout(session.jobTimer);
+    delete sessions[session.runId];
+  }
+  activeSessionId = null; skillCatalog = null; submitting = false;
+  $('#workspace').hidden = true; $('#loginPanel').hidden = false; $('#logoutBtn').hidden = true;
+  $('#authMessage').textContent = message;
+  $('#queryInput').value = ''; $('#inputText').value = ''; $('#sendBtn').disabled = true;
+  $('#answer').textContent = ''; $('#jobArea').textContent = ''; $('#logArea').textContent = '';
+  $('#tabBar').textContent = ''; $('#runSummary').textContent = ''; $('#fileList').textContent = '';
+  $('#skillChoices').textContent = '登录后加载技能目录';
+  for (const id of Object.keys(skills)) delete skills[id];
+  $('#threadSelect').innerHTML = '<option value="">新会话</option>'; notify(''); updateWSStatus();
+}
+async function request(url, options = {}) {
+  if (!authenticated) throw Object.assign(new Error('请先登录'), {status:401});
+  const epoch = authEpoch;
+  const headers = new Headers(options.headers || {});
+  if (!['GET','HEAD','OPTIONS'].includes((options.method || 'GET').toUpperCase())) headers.set('X-CSRF-Token', csrfToken);
+  const response = await fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'});
+  if (epoch !== authEpoch) throw new Error('会话已切换，已忽略旧请求');
+  if (response.status === 401) {
+    lockAuthentication('登录已失效，请重新登录。后台任务仍会运行。');
+    throw Object.assign(new Error('登录已失效'), {status:401});
+  }
   const data = await response.json();
+  if (epoch !== authEpoch) throw new Error('会话已切换，已忽略旧请求');
   if (!response.ok) {
     const detail = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data.status || data);
     throw Object.assign(new Error(detail), {status:response.status, data});
   }
   return data;
 }
+async function checkAuthentication() {
+  if (!authenticated) return false;
+  const epoch = authEpoch;
+  const response = await fetch('/api/auth/session', {credentials:'same-origin',cache:'no-store'});
+  if (epoch !== authEpoch) return false;
+  if (response.status === 401) { lockAuthentication('登录已失效，请重新登录。后台任务仍会运行。'); return false; }
+  if (!response.ok) throw new Error('无法确认登录状态');
+  return true;
+}
+async function enterWorkspace(data) {
+  csrfToken = data.csrf_token; authenticated = true; authEpoch++;
+  clearTimeout(authTimer);
+  authTimer = setTimeout(() => lockAuthentication('登录已到期，请重新登录。后台任务仍会运行。'), Math.max(0, data.expires_at * 1000 - Date.now()));
+  $('#loginPanel').hidden = true; $('#workspace').hidden = false; $('#logoutBtn').hidden = false;
+  await Promise.all([loadSkillCatalog(), restoreSessions()]);
+}
+async function initializeAuthentication() {
+  lockAuthentication('正在确认登录状态…');
+  const attempt = ++authBootstrap;
+  $('#loginBtn').disabled = true;
+  try {
+    const response = await fetch('/api/auth/session', {credentials:'same-origin',cache:'no-store'});
+    if (attempt !== authBootstrap) return;
+    if (response.status === 401) { $('#authMessage').textContent = '请输入访问口令。'; return; }
+    if (!response.ok) throw new Error('读取登录状态失败');
+    const data = await response.json();
+    if (attempt !== authBootstrap) return;
+    await enterWorkspace(data);
+  } catch (error) { if (attempt === authBootstrap) $('#authMessage').textContent = error.message; }
+  finally { if (attempt === authBootstrap) $('#loginBtn').disabled = false; }
+}
+$('#loginForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('#loginBtn'), input = $('#accessPassword');
+  button.disabled = true; $('#authMessage').textContent = '正在登录…';
+  try {
+    const pending = fetch('/api/auth/login', {method:'POST', credentials:'same-origin', cache:'no-store',
+      headers:{'Content-Type':'application/json','X-Login-Intent':'login'}, body:JSON.stringify({password:input.value})});
+    input.value = '';
+    const response = await pending, data = await response.json();
+    if (!response.ok) throw new Error(data.detail || '登录失败');
+    authChannel.postMessage({type:'changed'});
+    await enterWorkspace(data);
+  } catch (error) { $('#authMessage').textContent = error.message; }
+  finally { input.value = ''; button.disabled = false; }
+});
+$('#logoutBtn').addEventListener('click', async () => {
+  $('#logoutBtn').disabled = true;
+  try { await request('/api/auth/logout', {method:'POST'}); authChannel.postMessage({type:'logged_out'}); lockAuthentication('已退出登录。后台任务仍会运行。'); }
+  catch (error) { if (authenticated) notify('退出失败：' + error.message); }
+  finally { $('#logoutBtn').disabled = false; }
+});
+authChannel.onmessage = event => {
+  if (event.data?.type === 'logged_out') { authBootstrap++; lockAuthentication('已在其他页面退出登录。后台任务仍会运行。'); $('#loginBtn').disabled = false; }
+  if (event.data?.type === 'changed') initializeAuthentication().catch(error => { $('#authMessage').textContent = error.message; });
+};
 function requiredSkillsForMode() {
   const mode = $('#modeSelect').value;
   if (!Object.hasOwn(skillCatalog.required_skills, mode)) throw new Error('当前业务模式不在服务端技能目录中');
@@ -67,11 +157,13 @@ function applyRequiredSkills() {
   }
 }
 async function loadSkillCatalog() {
+  const epoch = authEpoch;
   const retry = $('#retrySkillsBtn'), choices = $('#skillChoices');
   retry.disabled = true; $('#sendBtn').disabled = true;
   choices.setAttribute('aria-busy', 'true');
   try {
     const catalog = await request('/api/skills');
+    if (!authenticated) return;
     if (!catalog || !Array.isArray(catalog.skills) || catalog.skills.length === 0 ||
         catalog.max_selected !== catalog.skills.length || !catalog.required_skills ||
         typeof catalog.required_skills !== 'object' || Array.isArray(catalog.required_skills)) {
@@ -97,16 +189,16 @@ async function loadSkillCatalog() {
     for (const item of catalog.skills) skills[item.id] = item.label;
     skillCatalog = catalog;
     applyRequiredSkills();
-    retry.hidden = true; $('#sendBtn').disabled = submitting; notify('');
+    retry.hidden = true; $('#sendBtn').disabled = !authenticated || submitting; notify('');
   } catch (error) {
+    if (epoch !== authEpoch) return;
     skillCatalog = null;
     choices.textContent = '技能目录不可用';
     retry.hidden = false;
     notify('技能目录加载失败：' + error.message);
     return;
   } finally {
-    retry.disabled = false;
-    choices.setAttribute('aria-busy', 'false');
+    if (epoch === authEpoch) { retry.disabled = false; choices.setAttribute('aria-busy', 'false'); }
   }
   renderLog(sessions[activeSessionId]);
 }
@@ -131,13 +223,12 @@ function applyEvent(session, event) {
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
   if (currentState) session.statusSeq = event.event_seq;
-  if (event.event === 'session_created') session.dir = data.path;
   if (currentState && event.event === 'run_queued') session.status = 'queued';
   if (currentState && event.event === 'run_started') session.status = 'running';
   if (event.event === 'workflow_state' && ['degraded','completed_degraded'].includes(event.status)) session.degraded = true;
   if (currentState && event.event === 'task_result') {
     session.status = 'completed'; session.answer = data.result;
-    if (data.jobs) { session.jobs = data.jobs; if (typeof setTimeout === 'function') syncJobs(session); }
+    if (data.jobs && authenticated) syncJobs(session);
     session.recordingIncomplete = data.recording_status === 'incomplete';
   }
   if (currentState && ['error','run_cancelled','run_timed_out','run_interrupted'].includes(event.event)) {
@@ -163,6 +254,7 @@ function displayStatus(session) {
   return 'completed';
 }
 async function syncSession(session) {
+  if (!authenticated || sessions[session.runId] !== session) return;
   try {
     const history = await request('/api/runs/' + encodeURIComponent(session.runId) + '/history');
     if (sessions[session.runId] !== session) return;
@@ -183,7 +275,7 @@ async function syncSession(session) {
       }
       session.stream = new RunEventStream(session.id, session.runId, e => applyEvent(session, e), socket => {
         session.ws = socket; updateWSStatus();
-      });
+      }, checkAuthentication);
       // These events are already applied, so reconnect from the last contiguous event.
       for (const e of session.logs) session.stream.seen.add(session.runId + ':' + e.event_seq);
       while (session.seen.has(session.stream.afterSeq + 1)) session.stream.afterSeq++;
@@ -192,6 +284,7 @@ async function syncSession(session) {
   } catch (error) {
     session.syncError = error.status === 404 ? '服务端找不到该轮记录；可移除此视图。' : '读取记录失败：' + error.message;
   }
+  if (!authenticated || sessions[session.runId] !== session) return;
   renderTabs();
   if (activeSessionId === session.runId) renderLog(session);
   if (typeof setTimeout === 'function') syncJobs(session);
@@ -389,7 +482,7 @@ function renderCallGroups(session, openDetails = new Set()) {
   }).join('');
 }
 async function syncJobs(session) {
-  if (session.jobSyncing || sessions[session.runId] !== session) return;
+  if (!authenticated || session.jobSyncing || sessions[session.runId] !== session) return;
   session.jobSyncing = true;
   try {
     const data = await request('/api/runs/'+encodeURIComponent(session.runId)+'/jobs');
@@ -406,6 +499,7 @@ async function syncJobs(session) {
       session.jobTimer = setTimeout(()=>syncJobs(session),delay*1000);
     }
   } catch (error) {
+    if (!authenticated || sessions[session.runId] !== session) return;
     session.jobError = '后台任务状态读取失败：'+error.message;
     renderJobs(session);
     if (session.jobs?.some(j=>j.status==='working') && typeof setTimeout === 'function') {
@@ -414,7 +508,7 @@ async function syncJobs(session) {
   } finally { session.jobSyncing = false; }
 }
 function renderJobs(session) {
-  if (activeSessionId !== session.runId) return;
+  if (!authenticated || !session || sessions[session.runId] !== session || activeSessionId !== session.runId) return;
   const area = $('#jobArea');
   if (!area) return;
   const names = {working:'后台执行中',completed:'已完成',failed:'失败',cancelled:'已取消',input_required:'等待你的输入'};
@@ -424,14 +518,15 @@ function renderJobs(session) {
     ${job.status==='working'?`<button class="btn" data-cancel-job="${escapeHtml(job.task_id)}">取消后台任务</button>`:''}
     ${job.status==='input_required'?`<label>补充信息 <input data-job-input="${escapeHtml(job.task_id)}"></label><button class="btn" data-resume-job="${escapeHtml(job.task_id)}">提交并继续</button>`:''}
     ${job.result?.answer?`<div data-job-answer="${escapeHtml(job.task_id)}"></div>`:''}
-    ${(job.result?.artifacts || []).map(file=>`<a class="btn" href="/api/download?path=${encodeURIComponent(file.path)}" target="_blank" rel="noopener">下载 ${escapeHtml(file.name)}</a>`).join('')}
+    ${(job.result?.artifacts || []).map(file=>`<a class="btn" href="${escapeHtml(file.url)}" target="_blank" rel="noopener">下载 ${escapeHtml(file.name)}</a>`).join('')}
     ${job.execution_run_id?`<button class="btn" data-open-job="${escapeHtml(job.execution_run_id)}" data-job-thread="${escapeHtml(job.task_id)}">查看后台执行详情</button>`:''}
     </section>`).join('') + (session.jobError?`<p>${escapeHtml(session.jobError)}</p>`:'');
   for (const job of session.jobs || []) if (job.result?.answer) renderAnswer(area.querySelector(`[data-job-answer="${job.task_id}"]`),job.result.answer);
 }
 async function sendTask() {
+  const epoch = authEpoch;
   const input = $('#queryInput'), query = input.value.trim();
-  if (!query || submitting) return;
+  if (!authenticated || !query || submitting) return;
   if (skillCatalog === null) { notify('请先成功加载技能目录再提交任务'); return; }
   submitting = true; $('#sendBtn').disabled = true; notify('正在提交…');
   try {
@@ -448,12 +543,13 @@ async function sendTask() {
     session.status = 'queued'; input.value = ''; $('#inputText').value = ''; notify('任务已接收');
     await syncSession(session);
   } catch (error) {
+    if (epoch !== authEpoch) return;
     if (error.status === 409) {
       const session = createSession(error.data.thread_id, '该会话正在执行的任务', error.data.run_id);
       notify('该会话忙碌，已显示正在执行的任务。请等待、取消，或选择新会话。');
       await syncSession(session);
     } else notify('提交失败：' + error.message);
-  } finally { submitting = false; $('#sendBtn').disabled = skillCatalog === null; }
+  } finally { if (epoch === authEpoch) { submitting = false; $('#sendBtn').disabled = !authenticated || skillCatalog === null; } }
 }
 async function cancelRun() {
   const session = sessions[activeSessionId];
@@ -477,12 +573,12 @@ async function refreshFiles() {
   const version = ++fileRequest, session = sessions[activeSessionId], list = $('#fileList');
   if (!session) { list.innerHTML = '<div class="empty-state">选择任务后查看本轮文件</div>'; return; }
   try {
-    const path = `session_${session.id}/run_${session.runId}`;
-    const data = await request('/api/files?path=' + encodeURIComponent(path));
+    if (!authenticated) return;
+    const data = await request('/api/runs/' + encodeURIComponent(session.runId) + '/files');
     if (version !== fileRequest) return;
     list.innerHTML = data.files.map(f => `<div class="file-item"><div class="file-info">
       <div class="file-name">${escapeHtml(f.name)}</div><div class="file-meta">${f.size} B</div></div>
-      <a class="btn btn-primary" href="/api/download?path=${encodeURIComponent(f.path)}" target="_blank" rel="noopener">下载</a></div>`).join('') || '<div class="empty-state">本轮暂无文件</div>';
+      <a class="btn btn-primary" href="${escapeHtml(f.url)}" target="_blank" rel="noopener">下载</a></div>`).join('') || '<div class="empty-state">本轮暂无文件</div>';
   } catch (error) {
     if (version === fileRequest) list.textContent = error.status === 404 ? '本轮暂无文件' : '文件读取失败：' + error.message;
   }
@@ -498,6 +594,7 @@ async function restoreSessions() {
   activeSessionId = sessions[saved.active] ? saved.active : Object.keys(sessions).at(-1) || null;
   renderTabs(); renderLog(sessions[activeSessionId]);
   await Promise.all(Object.values(sessions).map(syncSession));
+  if (!authenticated) return;
   persist(); refreshFiles(); updateWSStatus();
 }
 $('#tabBar').addEventListener('click', e => {
@@ -512,7 +609,7 @@ $('#runSummary').addEventListener('click', e => {
 $('#modeSelect').addEventListener('change', applyRequiredSkills);
 $('#retrySkillsBtn').addEventListener('click', () => loadSkillCatalog().catch(error => notify('技能选项更新失败：' + error.message)));
 $('#queryInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); } });
-Promise.all([loadSkillCatalog(), restoreSessions()]).catch(error => notify('页面初始化失败：' + error.message));
+initializeAuthentication().catch(error => { $('#authMessage').textContent = error.message; });
 
 if ($('#jobArea')) $('#jobArea').addEventListener('click', async event => {
   const session = sessions[activeSessionId];

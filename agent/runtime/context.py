@@ -7,8 +7,10 @@ from pathlib import Path
 from threading import Event, RLock
 from time import monotonic
 
+from agent.runtime.errors import ExecutionTerminated
 
-class RunStopped(RuntimeError):
+
+class RunStopped(ExecutionTerminated):
     """Execution ended; neither new actions nor late results are allowed."""
 
 
@@ -17,11 +19,14 @@ class RunContext:
     run_id: str
     thread_id: str
     work_dir: Path
+    owner_id: str = field(default="", repr=False, kw_only=True)
     deadline: datetime | None = None
     reference_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
     unavailable_agents: dict[str, str] = field(default_factory=dict, repr=False)
     deadline_clock: float | None = None
     stop_status: str | None = None
+    terminal_error: ExecutionTerminated | None = field(default=None, repr=False)
+    collection_states: dict = field(default_factory=dict, repr=False)
     event_sink: object | None = field(default=None, repr=False)
     hook_failures: list[str] = field(default_factory=list, repr=False)
     policy: object | None = field(default=None, repr=False)
@@ -118,6 +123,12 @@ class RunContext:
                 self.stop_event.set()
             return self.stop_status
 
+    def terminate(self, error):
+        with self.budget_lock:
+            if self.terminal_error is None and self.stop_status is None:
+                self.terminal_error = error
+                self.stop("failed")
+
     def remaining(self):
         if self.deadline_clock is not None:
             return self.deadline_clock - monotonic()
@@ -127,6 +138,8 @@ class RunContext:
 
     def check_active(self):
         with self.budget_lock:
+            if self.terminal_error is not None:
+                raise self.terminal_error
             remaining = self.remaining()
             if self.stop_status is None and remaining is not None and remaining <= 0:
                 self.stop_status = "timed_out"

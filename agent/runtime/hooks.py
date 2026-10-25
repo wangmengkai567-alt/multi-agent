@@ -15,6 +15,7 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import CollectionFinished, ExecutionTerminated
 from agent.runtime.events import EventPersistenceError, make_event, redact_text
 from agent.runtime.review_state import ReviewState
 
@@ -55,6 +56,8 @@ class HookCall:
 def error_category(error):
     from agent.runtime.policies import classify_tool_error
 
+    if isinstance(error, CollectionFinished):
+        return "collection_finished"
     if isinstance(error, HookRejected):
         return classify_tool_error(error.__cause__) if error.__cause__ else "rejected"
     if isinstance(error, BaseException) and type(error).__name__ == "CancelledError":
@@ -294,7 +297,7 @@ class HookToolMiddleware(AgentMiddleware):
         call.error = exc
         call.status = (
             "rejected"
-            if isinstance(exc, HookRejected)
+            if isinstance(exc, HookRejected | CollectionFinished)
             else "cancelled"
             if error_category(exc) == "cancelled"
             else "failed"
@@ -320,7 +323,8 @@ class HookToolMiddleware(AgentMiddleware):
         from agent.reflection import capture_tool
 
         try:
-            capture_tool(call)
+            if not isinstance(call.error, CollectionFinished):
+                capture_tool(call)
         except Exception as exc:
             self._error(call, exc)
             raise
@@ -350,6 +354,14 @@ class HookToolMiddleware(AgentMiddleware):
                         call.result = invoke_bounded(handler, request, seconds)
                     self._returned(call)
                     return call.result
+                except ExecutionTerminated as exc:
+                    if context := get_run_context():
+                        context.terminate(exc)
+                    self._error(call, exc)
+                    raise
+                except CollectionFinished as exc:
+                    self._error(call, exc)
+                    raise
                 except HookRejected as exc:
                     self._error(call, exc)
                     return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
@@ -389,8 +401,14 @@ class HookToolMiddleware(AgentMiddleware):
             active_call.reset(token)
 
     async def awrap_tool_call(self, request, handler):
+        from agent.runtime.collection import current_collection
+
+        scope = current_collection()
         call = self._call(request)
         token = active_call.set(call)
+        task = asyncio.current_task()
+        if scope is not None:
+            scope.pending.add(task)
         try:
             while True:
                 started = monotonic()
@@ -415,6 +433,14 @@ class HookToolMiddleware(AgentMiddleware):
                             raise ToolCallTimeout(request.tool_call["name"], seconds) from error
                     self._returned(call)
                     return call.result
+                except ExecutionTerminated as exc:
+                    if context := get_run_context():
+                        context.terminate(exc)
+                    self._error(call, exc)
+                    raise
+                except CollectionFinished as exc:
+                    self._error(call, exc)
+                    raise
                 except HookRejected as exc:
                     self._error(call, exc)
                     return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
@@ -455,6 +481,8 @@ class HookToolMiddleware(AgentMiddleware):
                     self._error(call, exc)
                     raise
         finally:
+            if scope is not None:
+                scope.pending.discard(task)
             active_call.reset(token)
 
 

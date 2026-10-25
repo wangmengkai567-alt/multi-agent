@@ -14,10 +14,11 @@ from langchain_core.runnables import Runnable
 from agent.reflection import ResultReviewer, ReviewResult, source_urls, tool_evidence
 from agent.results import ResultService, sync_result
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.events import make_event, redact_text
 from agent.runtime.hooks import HookCall, HookRejected, active_call, error_message, pipeline
 from agent.runtime.models import ModelRequestTimeout
-from agent.runtime.policies import BudgetExceeded, SearchLimitReached, classify_tool_error, reserve_calls
+from agent.runtime.policies import ReservationUnavailable, SearchLimitReached, classify_tool_error, reserve_calls
 from agent.runtime.reporting import ReportRevision, ResearchOutputError
 from agent.runtime.requirements import apply_coverage, ensure_task
 from agent.runtime.review_state import ReviewState, deliverable
@@ -138,7 +139,7 @@ class DelegationRunnable(Runnable):
                 task_id=call.search_task_key,
                 protect_revision=self.spec.review_config.max_refinements > 0,
             )
-        except BudgetExceeded as exc:
+        except ReservationUnavailable as exc:
             if self.spec.execution.planned:
                 from agent.runtime.reservations import release
 
@@ -149,7 +150,7 @@ class DelegationRunnable(Runnable):
                     allowance.task.active = False
                     allowance.task.state = ReviewState(check_status="budget_exhausted")
                     allowance.task.closed_reason = allowance.task.failure_reason = str(exc)
-            raise
+            raise HookRejected(str(exc)) from exc
         record["state"] = ReviewState()
         if request_id:
             with context.budget_lock:
@@ -357,7 +358,12 @@ class DelegationRunnable(Runnable):
             return None
         from agent.runtime.reservations import hold
 
-        allow_search = not review_only and needs_search_refinement(review, evidence)
+        collection = context.collection_states.get(call.search_task_key)
+        allow_search = (
+            not review_only
+            and not (collection and collection["closed_reason"])
+            and needs_search_refinement(review, evidence)
+        )
         remaining = context.remaining()
         requests = 1 if review_only else 3 if allow_search else 2
         needed = requests * context.policy.timeouts.request_seconds
@@ -376,7 +382,7 @@ class DelegationRunnable(Runnable):
             amounts.update(tool=2, search=1, read=1)
         try:
             hold(context, call.call_id, amounts, activate=True, task_id=call.search_task_key)
-        except BudgetExceeded:
+        except ReservationUnavailable:
             record["error"] = "reserve_exhausted"
             self._review_event(
                 context, call, review.model_copy(update={"error": "reserve_exhausted"}), attempt + 1, "revision_stopped"
@@ -419,6 +425,8 @@ class DelegationRunnable(Runnable):
         return dict(inputs, messages=[*messages[:-1], HumanMessage(content=content)])
 
     def _dependency(self, error):
+        if isinstance(error, ExecutionTerminated):
+            raise error
         from agent.runtime.recovery import ToolCallTimeout
 
         if isinstance(error, ResearchOutputError):
@@ -433,8 +441,6 @@ class DelegationRunnable(Runnable):
         if category == "execution" and error.__cause__ is not None:
             category = classify_tool_error(error.__cause__)
         reason = redact_text(str(error) or type(error).__name__)
-        if isinstance(error, BudgetExceeded) or category == "budget":
-            return ReviewResult(verdict="budget_exhausted", issues=["调用预算耗尽"])
         if category in ("configuration", "permission", "transient"):
             return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + reason])
         return ReviewResult(verdict="tool_failed", issues=["子任务执行失败：" + reason])
@@ -523,6 +529,8 @@ class DelegationRunnable(Runnable):
                             if isinstance(current, ReviewOnly)
                             else self.executor.invoke(current, config, **kwargs)
                         )
+                    except ExecutionTerminated:
+                        raise
                     except Exception as exc:
                         dependency = self._dependency(exc)
                         result = (
@@ -544,17 +552,7 @@ class DelegationRunnable(Runnable):
                         context.event_sink,
                     )
                 checked = self._checked(context, call, record, result, review, attempt)
-                try:
-                    current = self._refine(context, call, input, review, attempt, result, evidence, record)
-                except BudgetExceeded:
-                    return self._checked(
-                        context,
-                        call,
-                        record,
-                        result,
-                        review,
-                        attempt,
-                    )
+                current = self._refine(context, call, input, review, attempt, result, evidence, record)
                 if current is None:
                     return checked
                 call.status, record["error"] = "running", None
@@ -636,18 +634,13 @@ class DelegationRunnable(Runnable):
                 dependency = None
                 try:
                     try:
-                        from agent.runtime.governance import collection_timeout
-
-                        seconds = collection_timeout(context)
-                        if isinstance(current, ReviewOnly):
-                            result = current.result
-                        elif seconds is None:
-                            result = await self.executor.ainvoke(current, config, **kwargs)
-                        else:
-                            import asyncio
-
-                            async with asyncio.timeout(seconds):
-                                result = await self.executor.ainvoke(current, config, **kwargs)
+                        result = (
+                            current.result
+                            if isinstance(current, ReviewOnly)
+                            else await self.executor.ainvoke(current, config, **kwargs)
+                        )
+                    except ExecutionTerminated:
+                        raise
                     except Exception as exc:
                         dependency = self._dependency(exc)
                         result = (
@@ -664,17 +657,7 @@ class DelegationRunnable(Runnable):
                 )
                 await self.results.save(context, call, record["result"], evidence, review, attempt)
                 checked = self._checked(context, call, record, result, review, attempt)
-                try:
-                    current = self._refine(context, call, input, review, attempt, result, evidence, record)
-                except BudgetExceeded:
-                    return self._checked(
-                        context,
-                        call,
-                        record,
-                        result,
-                        review,
-                        attempt,
-                    )
+                current = self._refine(context, call, input, review, attempt, result, evidence, record)
                 if current is None:
                     return checked
                 call.status, record["error"] = "running", None

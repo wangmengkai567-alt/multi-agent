@@ -3,7 +3,6 @@
 import json
 from contextvars import ContextVar
 from hashlib import sha256
-from urllib.parse import quote
 from uuid import uuid4
 
 from langchain.agents.middleware import ModelResponse
@@ -13,6 +12,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from agent.runtime.context import get_run_context
 from agent.runtime.contracts import assert_contract
 from agent.runtime.hooks import HookToolMiddleware
+from utils.artifact_links import artifact_url
 
 authorized_action = ContextVar("authorized_delivery_action", default=None)
 
@@ -87,9 +87,8 @@ def _verify_markdown(context, text):
 
 def _render_artifact(context, contract, text, conversion=None):
     if contract.file_output == "markdown":
-        path = (context.work_dir / "answer.md").resolve()
         _save_artifact(context, text, dict(kind="markdown", path="answer.md", status="completed"))
-        return text + "\n\n[下载 Markdown](/api/download?path=" + quote(str(path), safe="") + ")"
+        return text + "\n\n[下载 Markdown](" + artifact_url(context.run_id, "answer.md") + ")"
     if context.job_service is not None:
         job = json.loads(conversion)
         _save_artifact(context, text, dict(kind="pdf", status=job["status"], task_id=job["task_id"]))
@@ -98,7 +97,7 @@ def _render_artifact(context, contract, text, conversion=None):
     if not path.is_file() or not path.stat().st_size:
         raise RuntimeError("PDF conversion did not produce the requested artifact")
     _save_artifact(context, text, dict(kind="pdf", path="answer.pdf", status="completed"))
-    return text + "\n\n[下载 PDF](/api/download?path=" + quote(str(path.resolve()), safe="") + ")"
+    return text + "\n\n[下载 PDF](" + artifact_url(context.run_id, "answer.pdf") + ")"
 
 
 def deliver_file(text):

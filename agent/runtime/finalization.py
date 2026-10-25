@@ -45,6 +45,7 @@ class SearchFinalizationMiddleware(AgentMiddleware):
         context = get_run_context()
         if context is None:
             return request
+        context.check_active()
         if context.answer_repair_attempted:
             return request.override(tools=[], tool_choice="none", model_settings=self._delivery_settings(request))
         if context.task_contract is not None:
@@ -79,12 +80,12 @@ class SearchFinalizationMiddleware(AgentMiddleware):
                         )
                     ],
                 )
-        if not (context.search_tasks or context.approved_internal):
-            return request
         from agent.runtime.governance import announce, near_budget
 
         if near_budget(context):
             announce(context, "保留最终交付与审核额度")
+        if context.collecting and not (context.search_tasks or context.approved_internal):
+            return request
         planned = set(context.task_scopes)
         task_done = (
             bool(context.search_tasks)

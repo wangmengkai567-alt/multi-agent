@@ -47,13 +47,23 @@ TAVILY_API_KEY=your-tavily-api-key
 
 MySQL 为可选功能：需要时填写 `.env.example` 中的 `MYSQL_*` 配置，`MYSQL_DATABASE` 填已有库名，并在 `config/runtime.yml` 的 `sql.allowed_tables` 中配置允许查询的表名。不使用时保留账号、库名为空，表白名单为 `[]`。
 
-**3. 启动服务**
+**3. 配置访问认证并离线迁移**
+
+在 `.env` 中设置独立的 `APP_ACCESS_PASSWORD`（使用密码管理器生成至少 32 字符的随机口令），保留默认 `APP_ORIGIN=http://127.0.0.1:8000`。停止所有旧服务，再执行：
 
 ```powershell
-.venv\Scripts\python.exe api\server.py
+uv run --offline --no-project --python .venv\Scripts\python.exe python -B -m api.migrate_security
 ```
 
-打开 [任务页面](http://localhost:8000)，或查看 [API 文档](http://localhost:8000/docs)。在终端按 `Ctrl+C` 停止服务。
+该命令先备份 `runs.db` 和 `jobs.db`，再将历史会话、运行、后台任务和上传资源显式归属到唯一持久所有者。迁移未完成时服务拒绝启动。详细的迁移边界、远程 HTTPS 配置与恢复说明见 [单人认证与资源归属](docs/implementation/26-single-owner-security.md)。
+
+**4. 启动服务并登录**
+
+```powershell
+uv run --offline --no-project --python .venv\Scripts\python.exe python -B api\server.py
+```
+
+打开 [任务页面](http://127.0.0.1:8000)，输入访问口令登录。浏览器地址须与 `APP_ORIGIN` 完全一致；公开 API 文档入口已关闭。在终端按 `Ctrl+C` 停止服务。
 
 会话和任务记录由 SQLite 自动保存在 `data/`，无需单独安装数据库服务；生成文件保存在 `output/`。
 

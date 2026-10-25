@@ -73,15 +73,3 @@ def announce(context, reason):
                     call_id=context.run_id,
                 )
             )
-
-
-def collection_timeout(context):
-    if context.policy is None:
-        from agent.runtime.policies import policy_for_run
-
-        context.policy = policy_for_run()
-    remaining = context.remaining()
-    if remaining is None:
-        return None
-    reserve = min(context.policy.timeouts.finalize_seconds, context.policy.timeouts.total_seconds * 0.2)
-    return max(0.001, remaining - reserve)

@@ -44,6 +44,7 @@ def save_job_checkpoint(context):
             tasks[key] = item
         fields = (
             "call_counts",
+            "collection_states",
             "answer_repair_attempted",
             "answer_citation_repair_attempted",
             "coverage",
@@ -76,6 +77,9 @@ def save_job_checkpoint(context):
         data = {key: getattr(context, key) for key in fields}
         data.update(
             execution_run_id=context.run_id,
+            terminal_failure=type(context.terminal_error).__name__ if context.terminal_error is not None else None,
+            owner_id=context.owner_id,
+            thread_id=context.thread_id,
             research_scope_id=context.research_scope_id,
             user_query=context.user_query,
             input_text=context.input_text,
@@ -103,9 +107,12 @@ def restore_job_checkpoint(context):
     data = json.loads(Path(path).read_text("utf-8"))
     if data.get("checkpoint_schema_version") != CHECKPOINT_VERSION:
         context.stop("interrupted")
-        raise RunStopped("旧 checkpoint 与当前意图及交付契约不一致，保留原文件并中断；不按新协议自动续跑")
+        raise RunStopped("旧 checkpoint 与当前执行控制及任务契约不一致，保留原文件并中断；不按新协议自动续跑")
     if (
-        data["research_scope_id"] != context.research_scope_id
+        not context.owner_id
+        or data["owner_id"] != context.owner_id
+        or data["thread_id"] != context.thread_id
+        or data["research_scope_id"] != context.research_scope_id
         or data["user_query"] != context.user_query
         or data["network_policy"] != context.network_policy
         or data["input_text"] != context.input_text
@@ -115,6 +122,11 @@ def restore_job_checkpoint(context):
     if data["source_policy_version"] != sha256(context.policy.sources.model_dump_json().encode()).hexdigest():
         context.stop("interrupted")
         raise RunStopped("Source policy changed; retain the checkpoint and require a new reviewed run")
+    if data["terminal_failure"] is not None:
+        context.stop("failed")
+        raise RunStopped(
+            "Saved execution terminated: " + data["terminal_failure"] + "; retain checkpoint without resampling"
+        )
     from agent.runtime.contracts import TaskContract, assert_contract
 
     saved_contract = data["task_contract"]
@@ -131,6 +143,9 @@ def restore_job_checkpoint(context):
     context.resume_source_run_id = data["execution_run_id"]
     special = {
         "checkpoint_schema_version",
+        "terminal_failure",
+        "owner_id",
+        "thread_id",
         "tool_turns",
         "search_calls",
         "tasks",

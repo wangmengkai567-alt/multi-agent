@@ -9,6 +9,10 @@ from uuid import uuid4
 
 import aiosqlite
 
+from api.security import MIGRATION_REQUIRED
+from api.security_schema import RUN_SCHEMA, identity
+from utils.secure_paths import validate_identifier
+
 ACTIVE = ("queued", "running")
 TERMINAL = ("completed", "failed", "cancelled", "interrupted", "timed_out")
 
@@ -27,21 +31,47 @@ class RunStore:
     def __init__(self, connection):
         self.connection = connection
         self._lock = asyncio.Lock()
+        self.owner_id = None
+        self.migration_id = None
 
     @classmethod
     async def open(cls, path: Path):
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.is_file():
+            raise RuntimeError(MIGRATION_REQUIRED)
         connection = await aiosqlite.connect(path)
         connection.row_factory = aiosqlite.Row
         store = cls(connection)
         try:
-            await store._migrate()
+            record = await identity(connection, RUN_SCHEMA)
+            store.owner_id, store.migration_id = record["owner_id"], record["migration_id"]
+            await connection.execute("PRAGMA foreign_keys=ON")
+            await store.verify_ownership()
         except BaseException:
             await connection.close()
             raise
         return store
 
-    async def _migrate(self):
+    async def verify_ownership(self):
+        async with self._lock:
+            async with self.connection.execute(
+                "SELECT COUNT(*) FROM runs r LEFT JOIN threads t ON t.thread_id=r.thread_id WHERE t.owner_id IS NULL OR t.owner_id!=? OR r.workspace IS NULL",
+                (self.owner_id,),
+            ) as cursor:
+                if (await cursor.fetchone())[0]:
+                    raise RuntimeError("Run ownership/workspace migration is incomplete")
+            async with self.connection.execute(
+                "SELECT COUNT(*) FROM threads WHERE owner_id!=?", (self.owner_id,)
+            ) as cursor:
+                if (await cursor.fetchone())[0]:
+                    raise RuntimeError("Thread owner does not match the persistent identity")
+            for table in ("events", "subtasks", "results"):
+                async with self.connection.execute(
+                    f"SELECT COUNT(*) FROM {table} c LEFT JOIN runs r ON r.run_id=c.run_id WHERE r.run_id IS NULL OR c.thread_id!=r.thread_id"
+                ) as cursor:
+                    if (await cursor.fetchone())[0]:
+                        raise RuntimeError(f"{table} parent ownership is inconsistent")
+
+    async def _migrate_legacy(self):
         async with self._lock:
             async with self.connection.execute("PRAGMA user_version") as cursor:
                 version = (await cursor.fetchone())[0]
@@ -378,6 +408,8 @@ class RunStore:
                 raise
 
     async def _list_results(self, run_id, thread_id=None, purpose=None):
+        if await self._get(run_id) is None:
+            return []
         sql = "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id WHERE r.run_id=?"
         args = [run_id]
         if thread_id is not None:
@@ -396,6 +428,8 @@ class RunStore:
 
     async def get_result(self, result_id, run_id, thread_id):
         async with self._lock:
+            if await self._get(run_id) is None:
+                return None
             async with self.connection.execute(
                 "SELECT * FROM results WHERE result_id=? AND run_id=? AND thread_id=?",
                 (result_id, run_id, thread_id),
@@ -405,6 +439,8 @@ class RunStore:
     async def get_current_result(self, result_id, run_id, thread_id):
         """Restore only the current result of its actual subtask/run/thread."""
         async with self._lock:
+            if await self._get(run_id) is None:
+                return None
             async with self.connection.execute(
                 "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id "
                 "AND s.run_id=r.run_id AND s.thread_id=r.thread_id AND s.current_result_id=r.result_id "
@@ -414,6 +450,8 @@ class RunStore:
                 return self._decode_result(await cursor.fetchone())
 
     async def _list_subtasks(self, run_id):
+        if await self._get(run_id) is None:
+            return []
         async with self.connection.execute(
             "SELECT * FROM subtasks WHERE run_id=? ORDER BY created_at,call_id", (run_id,)
         ) as cursor:
@@ -542,6 +580,8 @@ class RunStore:
                 raise
 
     async def _list_events(self, run_id):
+        if await self._get(run_id) is None:
+            return []
         async with self.connection.execute(
             "SELECT * FROM events WHERE run_id=? ORDER BY event_seq", (run_id,)
         ) as cursor:
@@ -550,6 +590,8 @@ class RunStore:
 
     async def list_events(self, run_id: str, *, after_seq=0, limit=None):
         async with self._lock:
+            if await self._get(run_id) is None:
+                return []
             async with self.connection.execute(
                 "SELECT * FROM events WHERE run_id=? AND event_seq>? ORDER BY event_seq LIMIT ?",
                 (run_id, after_seq, -1 if limit is None else limit),
@@ -559,7 +601,8 @@ class RunStore:
     async def thread_runs(self, thread_id):
         async with self._lock:
             async with self.connection.execute(
-                "SELECT run_id FROM runs WHERE thread_id=? ORDER BY created_at,run_id", (thread_id,)
+                "SELECT r.run_id FROM runs r JOIN threads t ON t.thread_id=r.thread_id WHERE r.thread_id=? AND t.owner_id=? ORDER BY r.created_at,r.run_id",
+                (thread_id, self.owner_id),
             ) as cursor:
                 return [row["run_id"] for row in await cursor.fetchall()]
 
@@ -579,11 +622,21 @@ class RunStore:
 
     async def list_active(self):
         async with self._lock:
-            async with self.connection.execute("SELECT * FROM runs WHERE status IN ('queued','running')") as cursor:
+            async with self.connection.execute(
+                "SELECT r.* FROM runs r JOIN threads t ON t.thread_id=r.thread_id WHERE t.owner_id=? AND r.status IN ('queued','running')",
+                (self.owner_id,),
+            ) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
 
-    async def create(self, thread_id: str, question: str, *, run_id: str | None = None, event=None) -> dict:
+    async def create(
+        self, thread_id: str, question: str, *, run_id: str | None = None, event=None, job_id=None
+    ) -> dict:
         run_id = run_id or str(uuid4())
+        validate_identifier(run_id)
+        validate_identifier(thread_id)
+        if job_id is not None and validate_identifier(job_id) != thread_id:
+            raise ValueError("Research execution thread must match its job")
+        workspace = f"background-jobs/{job_id}" if job_id else f"session_{thread_id}/run_{run_id}"
         record = dict(
             run_id=run_id,
             thread_id=thread_id,
@@ -596,9 +649,11 @@ class RunStore:
         )
         async with self._lock:
             try:
+                if not await self._owns_thread(thread_id):
+                    raise ValueError("Owned thread required")
                 await self.connection.execute(
-                    "INSERT INTO runs (run_id,thread_id,question,status,created_at) VALUES (?,?,?,'queued',?)",
-                    (run_id, thread_id, question, record["created_at"]),
+                    "INSERT INTO runs (run_id,thread_id,question,status,created_at,workspace) VALUES (?,?,?,'queued',?,?)",
+                    (run_id, thread_id, question, record["created_at"], workspace),
                 )
                 if event is not None:
                     record["saved_event"] = await self._append_event(event)
@@ -618,7 +673,10 @@ class RunStore:
             return record
 
     async def _get(self, run_id):
-        async with self.connection.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)) as cursor:
+        async with self.connection.execute(
+            "SELECT r.* FROM runs r JOIN threads t ON t.thread_id=r.thread_id WHERE r.run_id=? AND t.owner_id=?",
+            (run_id, self.owner_id),
+        ) as cursor:
             row = await cursor.fetchone()
         return dict(row) if row else None
 
@@ -629,6 +687,8 @@ class RunStore:
     async def start(self, run_id: str, *, event=None):
         async with self._lock:
             try:
+                if await self._get(run_id) is None:
+                    return None if event is not None else False
                 cursor = await self.connection.execute(
                     "UPDATE runs SET status='running' WHERE run_id=? AND status='queued'", (run_id,)
                 )
@@ -648,6 +708,8 @@ class RunStore:
             raise ValueError("A completed run requires an answer")
         async with self._lock:
             try:
+                if await self._get(run_id) is None:
+                    return None if event is not None else False
                 cursor = await self.connection.execute(
                     """UPDATE runs SET status=?,answer=?,error=?,ended_at=?,coverage=?
                        WHERE run_id=? AND status IN ('queued','running')""",
@@ -681,3 +743,29 @@ class RunStore:
     async def close(self):
         async with self._lock:
             await self.connection.close()
+
+    async def _owns_thread(self, thread_id):
+        async with self.connection.execute(
+            "SELECT 1 FROM threads WHERE thread_id=? AND owner_id=?", (thread_id, self.owner_id)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+    async def owns_thread(self, thread_id):
+        async with self._lock:
+            return await self._owns_thread(thread_id)
+
+    async def create_thread(self, thread_id=None):
+        # IDs come only from the server, including a previously authenticated job ID.
+        thread_id = validate_identifier(thread_id or str(uuid4()))
+        async with self._lock:
+            try:
+                await self.connection.execute(
+                    "INSERT OR IGNORE INTO threads VALUES(?,?,?)", (thread_id, self.owner_id, _now())
+                )
+                if not await self._owns_thread(thread_id):
+                    raise ValueError("Thread belongs to another owner")
+                await self.connection.commit()
+            except BaseException:
+                await self.connection.rollback()
+                raise
+        return thread_id

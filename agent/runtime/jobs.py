@@ -9,6 +9,8 @@ from uuid import uuid4
 import aiosqlite
 
 from agent.runtime.events import redact_text
+from api.security import MIGRATION_REQUIRED
+from api.security_schema import verify_jobs
 
 TERMINAL = frozenset({"completed", "failed", "cancelled"})
 
@@ -28,9 +30,11 @@ class JobFailed(RuntimeError):
 
 
 class JobService:
-    def __init__(self, connection, handlers, directory, scheduler):
+    def __init__(self, connection, handlers, directory, scheduler, run_store):
         self.connection, self.handlers, self.directory = connection, handlers, Path(directory)
         self.lock, self.tasks, self.closing = asyncio.Lock(), {}, False
+        self.run_store = run_store
+        self.resource_owner_id = run_store.owner_id
         self.scheduler = scheduler
         self.tickets = {}
         self.pending = {}
@@ -41,36 +45,18 @@ class JobService:
         self.close_lock = asyncio.Lock()
 
     @classmethod
-    async def open(cls, path, handlers, directory, *, scheduler=None):
+    async def open(cls, path, handlers, directory, *, scheduler, run_store):
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.is_file():
+            raise RuntimeError(MIGRATION_REQUIRED)
         connection = await aiosqlite.connect(path)
         connection.row_factory = aiosqlite.Row
-        await connection.execute("""CREATE TABLE IF NOT EXISTS jobs (
-            task_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, run_id TEXT NOT NULL,
-            kind TEXT NOT NULL, request_key TEXT NOT NULL, payload TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('working','completed','failed','cancelled','input_required')),
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0, result TEXT, error TEXT,
-            execution_run_id TEXT, resume_input TEXT,
-            UNIQUE(thread_id,request_key))""")
-        await connection.execute(
-            "CREATE TABLE IF NOT EXISTS job_subscriptions (run_id TEXT NOT NULL,task_id TEXT NOT NULL,PRIMARY KEY(run_id,task_id))"
-        )
-        async with connection.execute("PRAGMA table_info(jobs)") as cursor:
-            columns = {row[1] for row in await cursor.fetchall()}
-        for column in ("owner", "lease_until"):
-            if column not in columns:
-                await connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
-        if "recovery_count" not in columns:
-            await connection.execute("ALTER TABLE jobs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0")
-        await connection.commit()
-        if scheduler is None:
-            from agent.runtime.policies import load_runtime_policy
-            from agent.runtime.scheduler import ServiceScheduler
-
-            scheduler = ServiceScheduler(load_runtime_policy().scheduler)
-        return cls(connection, handlers, directory, scheduler)
+        try:
+            await verify_jobs(connection, run_store)
+            return cls(connection, handlers, directory, scheduler, run_store)
+        except BaseException:
+            await connection.close()
+            raise
 
     @staticmethod
     def decode(row):
@@ -85,19 +71,26 @@ class JobService:
     async def get(self, task_id, thread_id):
         async with self.lock:
             async with self.connection.execute(
-                "SELECT * FROM jobs WHERE task_id=? AND thread_id=?", (task_id, thread_id)
+                "SELECT * FROM jobs WHERE task_id=? AND thread_id=? AND resource_owner_id=?",
+                (task_id, thread_id, self.resource_owner_id),
             ) as cursor:
                 return self.decode(await cursor.fetchone())
 
     async def list_run(self, run_id):
+        if await self.run_store.get(run_id) is None:
+            return []
         async with self.lock:
             async with self.connection.execute(
-                "SELECT * FROM jobs WHERE run_id=? OR task_id IN (SELECT task_id FROM job_subscriptions WHERE run_id=?) ORDER BY created_at",
-                (run_id, run_id),
+                "SELECT * FROM jobs WHERE resource_owner_id=? AND (run_id=? OR task_id IN (SELECT task_id FROM job_subscriptions WHERE run_id=?)) ORDER BY created_at",
+                (self.resource_owner_id, run_id, run_id),
             ) as cursor:
                 return [self.decode(row) for row in await cursor.fetchall()]
 
     async def subscribe(self, task_id, run_id):
+        run = await self.run_store.get(run_id)
+        job = await self.get(task_id, run["thread_id"]) if run else None
+        if job is None:
+            raise ValueError("Job and subscribing run must belong to the same owned thread")
         async with self.lock:
             await self.connection.execute("INSERT OR IGNORE INTO job_subscriptions VALUES(?,?)", (run_id, task_id))
             await self.connection.commit()
@@ -105,22 +98,24 @@ class JobService:
     async def list_thread(self, thread_id):
         async with self.lock:
             async with self.connection.execute(
-                "SELECT * FROM jobs WHERE thread_id=? ORDER BY created_at DESC LIMIT 20", (thread_id,)
+                "SELECT * FROM jobs WHERE thread_id=? AND resource_owner_id=? ORDER BY created_at DESC LIMIT 20",
+                (thread_id, self.resource_owner_id),
             ) as cursor:
                 return [self.decode(row) for row in await cursor.fetchall()]
 
     async def submit(self, thread_id, run_id, kind, payload, request_key, seconds):
         if self.closing or kind not in self.handlers:
             raise ValueError("Background job handler unavailable")
-        from datetime import timedelta
-
+        run = await self.run_store.get(run_id)
+        if not run or run["thread_id"] != thread_id:
+            raise ValueError("Job parent run ownership mismatch")
         task_id = str(uuid4())
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         async with self.lock:
             await self.connection.execute(
                 """INSERT OR IGNORE INTO jobs
-                (task_id,thread_id,run_id,kind,request_key,payload,status,created_at,updated_at,expires_at)
-                VALUES(?,?,?,?,?,?,'working',?,?,?)""",
+                (task_id,thread_id,run_id,kind,request_key,payload,status,created_at,updated_at,expires_at,resource_owner_id)
+                VALUES(?,?,?,?,?,?,'working',?,?,?,?)""",
                 (
                     task_id,
                     thread_id,
@@ -131,11 +126,13 @@ class JobService:
                     now(),
                     now(),
                     (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat(),
+                    self.resource_owner_id,
                 ),
             )
             await self.connection.commit()
             async with self.connection.execute(
-                "SELECT * FROM jobs WHERE thread_id=? AND request_key=?", (thread_id, request_key)
+                "SELECT * FROM jobs WHERE thread_id=? AND request_key=? AND resource_owner_id=?",
+                (thread_id, request_key, self.resource_owner_id),
             ) as cursor:
                 job = self.decode(await cursor.fetchone())
         if job["payload"] != payload or job["kind"] != kind:
@@ -238,6 +235,7 @@ class JobService:
                     job["task_id"],
                     job["thread_id"],
                     self.directory,
+                    owner_id=self.resource_owner_id,
                     policy=load_runtime_policy(),
                     scheduler=self.scheduler,
                     scheduler_ticket=self.tickets.get(job["task_id"]),
@@ -270,7 +268,9 @@ class JobService:
 
     async def recover(self):
         async with self.lock:
-            async with self.connection.execute("SELECT * FROM jobs WHERE status='working'") as cursor:
+            async with self.connection.execute(
+                "SELECT * FROM jobs WHERE status='working' AND resource_owner_id=?", (self.resource_owner_id,)
+            ) as cursor:
                 jobs = [self.decode(row) for row in await cursor.fetchall()]
         for job in jobs:
             self.schedule(job, recovering=True)
@@ -281,7 +281,7 @@ class JobService:
         async with self.lock:
             await self.connection.execute(
                 """UPDATE jobs SET status=?,result=?,error=?,updated_at=?,owner=NULL,lease_until=NULL
-                WHERE task_id=? AND status=? AND (? IS NULL OR owner=?)""",
+                WHERE task_id=? AND status=? AND (? IS NULL OR owner=?) AND resource_owner_id=?""",
                 (
                     status,
                     json.dumps(result, ensure_ascii=False) if result is not None else None,
@@ -291,6 +291,7 @@ class JobService:
                     expected,
                     expected_owner,
                     expected_owner,
+                    self.resource_owner_id,
                 ),
             )
             await self.connection.commit()

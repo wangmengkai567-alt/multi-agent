@@ -19,7 +19,7 @@ async def submit_conversion(context, source, target):
     payload = dict(
         source_base64=base64.b64encode(raw).decode("ascii"),
         source_sha256=digest,
-        work_dir=str(context.work_dir.resolve()),
+        conversion_version=1,
         output_relative=relative,
     )
     key = context.run_id + ":pdf:" + sha256((digest + relative).encode()).hexdigest()
@@ -49,6 +49,7 @@ async def convert_document(job, service, output_root):
         job["task_id"],
         job["thread_id"],
         service.directory / job["task_id"],
+        owner_id=job["resource_owner_id"],
         deadline=datetime.fromisoformat(job["expires_at"]),
         policy=load_runtime_policy(),
         background_job=True,
@@ -70,9 +71,14 @@ async def convert_document(job, service, output_root):
 
 
 async def _convert_document(job, service, output_root):
-    from utils.path_utils import confined_path
+    from utils.secure_paths import resource_path
     from utils.word_converter import convert_md_to_pdf_via_word
 
+    if job["payload"].get("conversion_version") != 1:
+        raise ValueError("Conversion task requires the current resource ownership protocol")
+    run = await service.run_store.get(job["run_id"])
+    if not run or run["thread_id"] != job["thread_id"] or job["resource_owner_id"] != service.resource_owner_id:
+        raise ValueError("Conversion parent run ownership mismatch")
     directory = service.directory / job["task_id"]
     directory.mkdir(parents=True, exist_ok=True)
     raw = base64.b64decode(job["payload"]["source_base64"], validate=True)
@@ -84,8 +90,8 @@ async def _convert_document(job, service, output_root):
     if not source.exists():
         source.write_bytes(raw)
     stage = directory / ("stage-" + uuid4().hex[:12] + ".pdf")
-    work_dir = confined_path(job["payload"]["work_dir"], output_root)
-    target = confined_path(job["payload"]["output_relative"], work_dir)
+    work_dir = resource_path(run["workspace"], output_root)
+    target = resource_path(job["payload"]["output_relative"], work_dir)
     if (
         target.suffix.lower() != ".pdf"
         or target.is_relative_to(work_dir / "uploads")
@@ -98,12 +104,16 @@ async def _convert_document(job, service, output_root):
         raise RuntimeError("文档转换未产生有效 PDF")
     if datetime.fromisoformat(job["expires_at"]) <= datetime.now(UTC):
         raise TimeoutError("转换总时长预算耗尽")
-    result = {"answer": "PDF 转换已完成，可下载文件。", "artifacts": [{"name": target.name, "path": str(target)}]}
+    result = {
+        "answer": "PDF 转换已完成，可下载文件。",
+        "artifacts": [{"name": target.name, "relative_path": target.relative_to(work_dir).as_posix()}],
+    }
     async with service.lock:
         try:
             await service.connection.execute("BEGIN IMMEDIATE")
             async with service.connection.execute(
-                "SELECT owner,status FROM jobs WHERE task_id=?", (job["task_id"],)
+                "SELECT owner,status FROM jobs WHERE task_id=? AND resource_owner_id=?",
+                (job["task_id"], service.resource_owner_id),
             ) as cursor:
                 row = await cursor.fetchone()
             if row is None or row["owner"] != service.owner or row["status"] != "working":

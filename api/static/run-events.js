@@ -1,10 +1,11 @@
 /* Durable run events: reconnect with a cursor and deduplicate by run/sequence. */
 class RunEventStream {
-  constructor(threadId, runId, onEvent, onState) {
+  constructor(threadId, runId, onEvent, onState, checkAuthentication) {
     this.threadId = threadId;
     this.runId = runId;
     this.onEvent = onEvent;
     this.onState = onState;
+    this.checkAuthentication = checkAuthentication;
     this.afterSeq = 0;
     this.seen = new Set();
     this.closed = false;
@@ -33,11 +34,20 @@ class RunEventStream {
       while (this.seen.has(this.runId + ':' + (this.afterSeq + 1))) this.afterSeq++;
     };
     socket.onerror = () => socket.close();
-    socket.onclose = () => {
+    socket.onclose = event => {
       this.onState(null);
+      if (event.code === 4403) { this.close(); return; }
       if (!this.closed) {
         const delay = Math.min(10000, 500 * 2 ** Math.min(this.attempt++, 5));
-        this.timer = setTimeout(() => { this.timer = null; this.connect(); }, delay);
+        this.timer = setTimeout(async () => {
+          this.timer = null;
+          try {
+            if (!await this.checkAuthentication() || this.closed) return;
+            this.connect();
+          } catch (_) {
+            if (!this.closed) socket.onclose({code:1006});
+          }
+        }, delay);
       }
     };
   }

@@ -15,6 +15,7 @@ from tavily.errors import ForbiddenError, InvalidAPIKeyError, MissingAPIKeyError
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.source_policy import SourcePolicy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -37,16 +38,25 @@ class SearchLimitReached(PolicyError):
 SEARCH_CONTROL_CATEGORIES = frozenset(("search_limit",))
 
 
-class BudgetExceeded(PolicyError):
+class BudgetExceeded(ExecutionTerminated):
     pass
 
 
-class MissingConfiguration(PolicyError):
+class MissingConfiguration(ExecutionTerminated):
     pass
+
+
+class ReservationUnavailable(PolicyError):
+    """An unspent report/refinement hold cannot be admitted."""
 
 
 class StrictConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class CollectionLimits(StrictConfig):
+    model_calls: int = Field(default=12, ge=1, le=10000)
+    tool_calls: int = Field(default=12, ge=1, le=10000)
 
 
 class Budgets(StrictConfig):
@@ -182,6 +192,7 @@ class RuntimePolicy(StrictConfig):
     sources: SourcePolicy = Field(default_factory=SourcePolicy)
     scheduler: SchedulerLimits = Field(default_factory=SchedulerLimits)
     timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)
+    collection: CollectionLimits = Field(default_factory=CollectionLimits)
     budgets: Budgets
     job_budgets: Budgets = Field(
         default_factory=lambda: Budgets(total=240, main_model=40, sub_model=90, review=24, tool=120, retry=24)
@@ -236,6 +247,12 @@ def _reserve_calls(*kinds, charge):
     from agent.runtime.reservations import current_owner, held_counts
 
     with context.budget_lock:
+        from agent.runtime.collection import current_collection
+
+        collection = current_collection()
+        if charge and collection is not None:
+            for kind, count in requested.items():
+                collection.check(kind, count)
         reserved = delivery_reserve(context)
         held = held_counts(context)
         owner = current_owner(context)
@@ -250,17 +267,30 @@ def _reserve_calls(*kinds, charge):
         for kind in KINDS:
             reserved[kind] = reserved.get(kind, 0) + held[kind] - consume.get(kind, 0)
         context.check_active()
+        failure = None
         if sum(context.call_counts.values()) + len(kinds) + sum(reserved.values()) > limits.total:
-            raise BudgetExceeded("Total collection call budget reached; synthesis and review calls are reserved")
+            failure = BudgetExceeded("Total collection call budget reached; synthesis and review calls are reserved")
         for kind, count in requested.items():
             if context.call_counts[kind] + count + reserved.get(kind, 0) > getattr(limits, kind):
-                raise BudgetExceeded(f"{kind} call budget exhausted")
+                failure = BudgetExceeded(f"{kind} call budget exhausted")
+                break
+        if failure is not None:
+            hard_limit = sum(context.call_counts.values()) + len(kinds) > limits.total or any(
+                context.call_counts[kind] + count > getattr(limits, kind) for kind, count in requested.items()
+            )
+            if charge and collection is not None and not hard_limit:
+                collection.finish("reserved_capacity")
+            if charge:
+                context.terminate(failure)
+            raise failure
         if not charge:
             return
         for kind, count in requested.items():
             context.call_counts[kind] += count
             if consume.get(kind):
                 own["remaining"][kind] -= consume[kind]
+        if collection is not None:
+            collection.record(requested)
         from agent.runtime.checkpoints import save_job_checkpoint
 
         save_job_checkpoint(context)
@@ -271,7 +301,15 @@ def request_timeout(maximum=None):
     limits = policy_for_run().timeouts
     context.check_active()
     remaining = context.remaining()
-    return min(value for value in (limits.request_seconds, maximum, remaining) if value is not None)
+    from agent.runtime.collection import current_collection
+
+    collection = current_collection()
+    collection_remaining = collection.remaining() if collection is not None else None
+    if collection_remaining is not None and collection_remaining <= 0:
+        collection.finish("time_limit")
+    return min(
+        value for value in (limits.request_seconds, maximum, remaining, collection_remaining) if value is not None
+    )
 
 
 SAFE_FUNCTIONS = frozenset(
@@ -433,6 +471,8 @@ def classify_tool_error(error):
         return "search_limit"
     if isinstance(error, BudgetExceeded):
         return "budget"
+    if isinstance(error, ReservationUnavailable):
+        return "reservation_unavailable"
     if isinstance(error, PermissionError):
         return "permission"
     if isinstance(error, InvalidAPIKeyError | ForbiddenError):
@@ -481,7 +521,7 @@ def validate_tool_call(call):
     ):
         raise PolicyError("当前持久化研究任务仅执行只读查询；文件交付由交互轮次单独执行")
     if context and not context.collecting and name in ("task", "research_step", "submit_research_job"):
-        raise BudgetExceeded("本轮已进入交付阶段，不再启动调查")
+        raise PolicyError("本轮已进入交付阶段，不再启动调查")
     if name == "execute":
         raise PolicyError("Script execution is disabled")
     if name == "task" and set(args) - {"description", "subagent_type"}:
@@ -543,7 +583,12 @@ def before_tool_policy(call):
         turn = context.tool_turns.get((owner, call.call_id), owner)
         with context.budget_lock:
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
-                raise BudgetExceeded("单次模型回合工具调用次数已达到上限")
+                from agent.runtime.collection import current_collection
+
+                collection = current_collection()
+                if collection is not None:
+                    collection.finish("turn_tool_limit")
+                raise PolicyError("单次模型回合工具调用次数已达到上限")
             reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
             context.turn_counts[turn] = context.turn_counts.get(turn, 0) + 1
             from agent.runtime.checkpoints import save_job_checkpoint

@@ -163,9 +163,9 @@ class EventSink:
                 f"{len(failures)} event(s) were not saved for run {run_id or 'all'}"
             ) from failures[0][1]
 
-    async def create(self, thread_id, query, run_id):
+    async def create(self, thread_id, query, run_id, *, job_id=None):
         event = make_event(thread_id, run_id, "run_queued", "任务已接收", actor="main", status="queued", call_id=run_id)
-        record = await self.store.create(thread_id, redact_text(query), run_id=run_id, event=event)
+        record = await self.store.create(thread_id, redact_text(query), run_id=run_id, event=event, job_id=job_id)
         self._dispatch(record.pop("saved_event"))
         return record
 
