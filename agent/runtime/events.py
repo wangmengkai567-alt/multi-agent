@@ -190,6 +190,9 @@ class EventSink:
         error = redact_text(error) if error is not None else None
         kind = "task_result" if status == "completed" else "error" if status == "failed" else f"run_{status}"
         data = {"result": answer} if status == "completed" else {"error": error, "partial_result": answer}
+        from agent.runtime.completion import completion_snapshot
+
+        data["completion"] = completion_snapshot(context, status)
         data["coverage"] = getattr(context, "coverage", "unknown")
         draft = getattr(context, "delivery_draft", None)
         if draft and draft.get("source_status") is not None:

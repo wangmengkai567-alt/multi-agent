@@ -13,7 +13,7 @@ const storageKey = 'multiagent.runs.v1';
 const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
-  input_required:'等待补充任务范围', pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'已完成，覆盖待确认'};
+  input_required:'等待补充任务范围', pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'完成情况待确认'};
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手', document:'材料分析助手', delivery:'文件交付'};
 const skills = Object.create(null);
 let skillCatalog = null;
@@ -218,11 +218,11 @@ function applyEvent(session, event) {
   session.logs.push(event);
   session.logs.sort((a,b) => a.event_seq - b.event_seq);
   const data = event.data || {};
-  if (data.coverage) session.coverage = data.coverage;
+  if (data.coverage && event.event_seq >= session.statusSeq) session.coverage = data.coverage;
   if (event.event === 'clarification_requested') session.clarification = true;
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
-  if (currentState) session.statusSeq = event.event_seq;
+  if (currentState) { session.statusSeq = event.event_seq; session.completion = data.completion; }
   if (currentState && event.event === 'run_queued') session.status = 'queued';
   if (currentState && event.event === 'run_started') session.status = 'running';
   if (event.event === 'workflow_state' && ['degraded','completed_degraded'].includes(event.status)) session.degraded = true;
@@ -244,14 +244,8 @@ function applyEvent(session, event) {
 }
 function displayStatus(session) {
   if (session.status !== 'completed') return session.status;
-  if (session.clarification) return 'input_required';
-  if (session.jobs?.some(job => job.status === 'working' || job.status === 'input_required')) return 'pending';
-  const research = session.jobs?.find(job => job.kind === 'research');
-  if (research && ['failed','cancelled','timed_out','interrupted'].includes(research.status)) return research.status;
-  const coverage = research?.status === 'completed' ? research.result?.coverage : session.coverage;
-  if (coverage === 'partial') return 'partial';
-  if (coverage !== 'complete') return 'coverage_unknown';
-  return 'completed';
+  if (!session.completion) return 'coverage_unknown';
+  return ({complete:'completed', unknown:'coverage_unknown'}[session.completion.status] || session.completion.status);
 }
 async function syncSession(session) {
   if (!authenticated || sessions[session.runId] !== session) return;
@@ -265,6 +259,7 @@ async function syncSession(session) {
     if (activeStates.has(session.status) || session.status === 'unknown' || !activeStates.has(history.run.status)) {
       session.status = history.run.status;
       session.coverage = history.run.coverage;
+      session.completion = history.run.completion;
       session.answer = history.run.answer;
       session.error = history.run.error;
     }
@@ -354,6 +349,8 @@ function describeEvent(event) {
     const reason = d.error && !/^<object object at 0x[0-9a-f]+>$/i.test(d.error) ? d.error : '当前操作已取消';
     return '操作已取消：' + reason;
   }
+  if (event.event === 'after_tool' && d.execution_status === 'completed' && d.result_status === 'rejected') return (d.tool_name || '工具') + ' · 已执行，结果未获准：' + (d.error || event.status);
+  if (event.event === 'after_tool' && d.execution_status === 'unknown') return (d.tool_name || '工具') + ' · 执行结果未确定：' + (d.error || event.status);
   if (event.event === 'after_tool') return (d.tool_name || event.actor?.split(':').at(-1) || '工具') + (event.status === 'completed' ? ' · 已完成' : ' · 未完成：' + (d.error || event.status));
   if (event.event === 'on_error') return '动作失败：' + (d.error || '请查看详情');
   if (event.event === 'workflow_state') return ({initialized:'分析流程已准备', blocked:'前置条件未满足，需先完成查询或文件读取',
@@ -384,6 +381,7 @@ function renderLog(session) {
     <button class="btn btn-ghost" id="cancelBtn" ${activeStates.has(session.status) ? '' : 'disabled'}>取消本轮</button>
     <button class="btn btn-ghost" id="syncBtn">重新读取记录</button>
     ${session.error ? `<p>${escapeHtml(session.error)}</p>` : ''}
+    ${session.completion?.error ? `<p>${escapeHtml(typeof session.completion.error === 'string' ? session.completion.error : session.completion.error.message)}</p>` : ''}
     ${session.syncError ? `<p>${escapeHtml(session.syncError)}</p>` : ''}
     ${session.recordingIncomplete ? '<p>部分执行记录未保存，详情见最终事件。</p>' : ''}
     ${session.clarification ? '<p>请在问题栏补充完整任务后重新提交。</p>' : ''}
@@ -488,6 +486,7 @@ async function syncJobs(session) {
     const data = await request('/api/runs/'+encodeURIComponent(session.runId)+'/jobs');
     if (sessions[session.runId] !== session) return;
     session.jobs = data.jobs || [];
+    if (data.completion && data.status_seq >= session.statusSeq) session.completion = data.completion;
     session.jobError = '';
     renderTabs();
     if (activeSessionId === session.runId) renderLog(session);
@@ -557,7 +556,7 @@ async function cancelRun() {
   $('#cancelBtn').disabled = true;
   try {
     const record = await request('/api/runs/' + encodeURIComponent(session.runId) + '/cancel', {method:'POST'});
-    session.status = record.status; session.answer = record.answer; session.error = record.error;
+    session.status = record.status; session.answer = record.answer; session.error = record.error; session.completion = record.completion;
     if (session.stream) { session.stream.close(); session.stream = null; }
     await syncSession(session); notify('当前状态：' + (statusNames[displayStatus(session)] || record.status));
   } catch (error) { notify('取消请求失败：' + error.message); renderLog(session); }

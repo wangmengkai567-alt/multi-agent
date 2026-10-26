@@ -665,16 +665,34 @@ async def _research_job(job):
         "execution_run_id": run_id,
         "partial": context.coverage != "complete",
         "coverage": context.coverage,
+        "completion": result["completion"],
     }
+
+
+async def _with_completion(record, jobs=None):
+    from agent.runtime.completion import resolve_completion
+
+    if record is None:
+        return None
+    if jobs is None:
+        jobs = await app.state.job_service.list_run(record["run_id"])
+    return dict(record, completion=resolve_completion(record["completion"], jobs))
 
 
 @app.get("/api/runs/{run_id}/jobs")
 async def list_run_jobs(run_id: str):
-    if await app.state.run_store.get(run_id) is None:
+    record = await app.state.run_store.get(run_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
     from tools.job_tools import public_job
 
-    return {"jobs": [public_job(job) for job in await app.state.job_service.list_run(run_id)]}
+    jobs = await app.state.job_service.list_run(run_id)
+    record = await _with_completion(record, jobs)
+    return {
+        "jobs": [public_job(job) for job in jobs],
+        "completion": record["completion"],
+        "status_seq": record["terminal_event_seq"],
+    }
 
 
 @app.get("/api/jobs/{task_id}")
@@ -718,7 +736,7 @@ async def get_run(run_id: str):
     record = await app.state.run_store.get(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return record
+    return await _with_completion(record)
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -738,7 +756,7 @@ async def cancel_run(run_id: str):
             task = app.state.run_tasks.get(run_id)
             if status in ("cancelled", "timed_out", "interrupted") and task is not None and not task.done():
                 task.cancel()
-        return await app.state.run_store.get(run_id)
+        return await _with_completion(await app.state.run_store.get(run_id))
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -763,6 +781,7 @@ async def get_run_history(run_id: str):
     history = await app.state.run_store.history(run_id)
     if history is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    history["run"] = await _with_completion(history["run"])
     return history
 
 

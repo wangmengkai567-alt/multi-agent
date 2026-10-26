@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from agent.runtime.context import get_run_context
 
 CONTRACT_VERSION = 2
-CHECKPOINT_VERSION = 21
+CHECKPOINT_VERSION = 22
 REVIEW_CONTRACT_VERSION = "review-v14-intent-material-delivery"
 
 Purpose = Literal[

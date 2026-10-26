@@ -352,6 +352,9 @@ async def finalize_answer(context, answer):
             if contract.delivery_kind != "grounded" or not contract.network_allowed:
                 raise ValueError("Pending research contradicts the locked contract")
             return answer
+        from agent.runtime.completion import validate_delivery
+
+        validate_delivery(context, answer)
     if not guarded(context):
         return answer
     initialize_workflow(context)

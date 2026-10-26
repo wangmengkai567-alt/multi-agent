@@ -47,6 +47,10 @@ class HookCall:
     current_result_id: str | None = None
     report_attempt: int = 0
     executed: bool = False
+    execution_status: str = "not_started"
+    result_status: str = "unavailable"
+    stage: str = "admission"
+    terminal_recorded: bool = False
     attempt: int = 0
     workflow_data: dict = field(default_factory=dict, repr=False)
     search_task_key: str | None = field(default=None, repr=False)
@@ -80,6 +84,15 @@ def error_message(error):
     return redact_text(str(error) or type(error).__name__)
 
 
+def error_details(call):
+    return dict(
+        error_category=error_category(call.error),
+        stage=call.stage,
+        tool_name=call.actor.rsplit(":", 1)[-1],
+        call_id=call.call_id,
+    )
+
+
 def record_hook(name, call):
     context = get_run_context()
     if context is None or context.event_sink is None:
@@ -90,11 +103,17 @@ def record_hook(name, call):
     if name == "after_tool":
         data["result_length"] = len(str(call.result)) if call.result is not None else 0
         data["result_type"] = type(call.result).__name__
-        data["executed"] = call.executed
+        data.update(
+            executed=call.executed,
+            execution_status=call.execution_status,
+            result_status=call.result_status,
+            stage=call.stage,
+            tool_name=call.actor.rsplit(":", 1)[-1],
+        )
     if name == "after_subagent":
         data.update(check_status=call.check_status, result_length=len(str(call.result)))
     if call.error is not None:
-        data.update(error=error_message(call.error), error_category=error_category(call.error))
+        data.update(error=error_message(call.error), **error_details(call))
     context.event_sink.submit(
         make_event(
             context.thread_id,
@@ -297,6 +316,11 @@ class HookToolMiddleware(AgentMiddleware):
 
     def _error(self, call, exc):
         call.error = exc
+        call.result_status = "rejected"
+        if call.execution_status == "running":
+            from agent.runtime.recovery import ToolCallTimeout
+
+            call.execution_status = "unknown" if isinstance(exc, ToolCallTimeout | asyncio.CancelledError) else "failed"
         call.status = (
             "rejected"
             if isinstance(exc, HookRejected | CollectionFinished)
@@ -306,6 +330,15 @@ class HookToolMiddleware(AgentMiddleware):
         )
         self.hooks.emit("on_error", call)
 
+    @staticmethod
+    def _error_response(call, message):
+        return ToolMessage(
+            content=message,
+            tool_call_id=call.call_id,
+            status="error",
+            additional_kwargs={"runtime_error": dict(error_details(call), message=error_message(call.error))},
+        )
+
     def _returned(self, call):
         if context := get_run_context():
             context.check_active()
@@ -314,6 +347,8 @@ class HookToolMiddleware(AgentMiddleware):
         if isinstance(result, Command) and isinstance(result.update, dict):
             value = result.update.get("messages", [])
             messages = [value] if isinstance(value, ToolMessage) else value if isinstance(value, list) else []
+        if any(isinstance(message, ToolMessage) and message.tool_call_id != call.call_id for message in messages):
+            raise ValueError("Tool returned a message for a different invocation")
         if any(isinstance(message, ToolMessage) and message.status == "error" for message in messages):
             # Do not copy raw error tool payloads (which may echo uploaded bodies).
             self._error(call, RuntimeError("Tool returned an error response"))
@@ -321,19 +356,45 @@ class HookToolMiddleware(AgentMiddleware):
             call.status = "completed"
 
     def _after(self, request, call, started):
+        if call.terminal_recorded:
+            return
+        call.terminal_recorded = True
+        call.stage = "result_validation" if call.error is None else call.stage
         call.elapsed_ms = (monotonic() - started) * 1000
         from agent.reflection import capture_tool
 
         try:
             if not isinstance(call.error, CollectionFinished):
                 capture_tool(call)
+            if call.status == "completed":
+                call.result_status = "accepted"
         except Exception as exc:
             self._error(call, exc)
             raise
         finally:
-            self.hooks.emit("after_tool", call)
+            try:
+                if self.actor == "delivery":
+                    from agent.runtime.delivery_actions import record_action
+
+                    record_action(call)
+            except Exception as exc:
+                logger.exception("Delivery action record was NOT saved")
+                if context := get_run_context():
+                    context.hook_failures.append("delivery_checkpoint: " + redact_text(str(exc)))
+            finally:
+                self.hooks.emit("after_tool", call)
         if request.tool_call["name"] == "task" and call.executed and not self.managed_delegation:
             self.hooks.emit("after_subagent", call)
+
+    @staticmethod
+    def _execute(request, call, handler):
+        context = get_run_context()
+        if context:
+            context.check_active()
+        if call.terminal_recorded:
+            raise RuntimeError("Tool attempt already reached its terminal outcome")
+        call.executed, call.execution_status = True, "running"
+        return handler(request)
 
     def wrap_tool_call(self, request, handler):
         call = self._call(request)
@@ -346,14 +407,17 @@ class HookToolMiddleware(AgentMiddleware):
 
                     prepare_tool_sync(call)
                     self._before(request, call)
-                    call.executed = True
                     seconds = self._timeout(call)
+                    call.stage = "execution"
                     if seconds is None:
-                        call.result = handler(request)
+                        call.result = self._execute(request, call, handler)
                     else:
                         from agent.runtime.tool_timeout import invoke_bounded
 
-                        call.result = invoke_bounded(handler, request, seconds)
+                        call.result = invoke_bounded(lambda r: self._execute(r, call, handler), request, seconds)
+                    call.execution_status = "completed"
+                    call.result_status = "pending"
+                    call.stage = "result_validation"
                     self._returned(call)
                     return call.result
                 except ExecutionTerminated as exc:
@@ -368,17 +432,17 @@ class HookToolMiddleware(AgentMiddleware):
                     self._error(call, exc)
                     if call.search_task_key:
                         raise  # The owning delegation records a failed dependency, without report/review calls.
-                    return ToolMessage(content=error_message(exc), tool_call_id=call.call_id, status="error")
+                    return self._error_response(call, error_message(exc))
                 except HookRejected as exc:
                     self._error(call, exc)
-                    return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
+                    return self._error_response(call, error_message(exc))
                 except Exception as exc:
                     self._error(call, exc)
                     delay = self._retry_delay(request, call, exc)
                     if delay is None:
                         if call.workflow_data.get("retry_blocked"):
-                            return ToolMessage(
-                                content=call.workflow_data["retry_blocked"], tool_call_id=call.call_id, status="error"
+                            return self._error_response(
+                                call, error_message(exc) + "; " + call.workflow_data["retry_blocked"]
                             )
                         raise
                 except BaseException as exc:
@@ -403,6 +467,8 @@ class HookToolMiddleware(AgentMiddleware):
                     )
                 call.attempt += 1
                 call.error, call.status, call.result, call.executed = None, "running", None, False
+                call.execution_status, call.result_status, call.stage = "not_started", "unavailable", "admission"
+                call.terminal_recorded = False
                 sleep(delay)
         finally:
             active_call.reset(token)
@@ -424,8 +490,10 @@ class HookToolMiddleware(AgentMiddleware):
 
                     await prepare_tool(call)
                     self._before(request, call)
-                    call.executed = True
                     seconds = self._timeout(call)
+                    call.executed = True
+                    call.execution_status = "running"
+                    call.stage = "execution"
                     if seconds is None:
                         call.result = await handler(request)
                     else:
@@ -438,6 +506,9 @@ class HookToolMiddleware(AgentMiddleware):
                             if isinstance(error, ToolCallTimeout):
                                 raise
                             raise ToolCallTimeout(request.tool_call["name"], seconds) from error
+                    call.execution_status = "completed"
+                    call.result_status = "pending"
+                    call.stage = "result_validation"
                     self._returned(call)
                     return call.result
                 except ExecutionTerminated as exc:
@@ -452,17 +523,17 @@ class HookToolMiddleware(AgentMiddleware):
                     self._error(call, exc)
                     if call.search_task_key:
                         raise  # The owning delegation records a failed dependency, without report/review calls.
-                    return ToolMessage(content=error_message(exc), tool_call_id=call.call_id, status="error")
+                    return self._error_response(call, error_message(exc))
                 except HookRejected as exc:
                     self._error(call, exc)
-                    return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
+                    return self._error_response(call, error_message(exc))
                 except Exception as exc:
                     self._error(call, exc)
                     delay = self._retry_delay(request, call, exc)
                     if delay is None:
                         if call.workflow_data.get("retry_blocked"):
-                            return ToolMessage(
-                                content=call.workflow_data["retry_blocked"], tool_call_id=call.call_id, status="error"
+                            return self._error_response(
+                                call, error_message(exc) + "; " + call.workflow_data["retry_blocked"]
                             )
                         raise
                 except BaseException as exc:
@@ -487,6 +558,8 @@ class HookToolMiddleware(AgentMiddleware):
                     )
                 call.attempt += 1
                 call.error, call.status, call.result, call.executed = None, "running", None, False
+                call.execution_status, call.result_status, call.stage = "not_started", "unavailable", "admission"
+                call.terminal_recorded = False
                 try:
                     await asyncio.sleep(delay)
                 except asyncio.CancelledError as exc:

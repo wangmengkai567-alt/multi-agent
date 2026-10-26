@@ -678,7 +678,22 @@ class RunStore:
             (run_id, self.owner_id),
         ) as cursor:
             row = await cursor.fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        record = dict(row)
+        record["completion"] = None
+        record["terminal_event_seq"] = 0
+        if record["status"] in TERMINAL:
+            async with self.connection.execute(
+                "SELECT data,event_seq FROM events WHERE run_id=? AND call_id=? AND event IN "
+                "('task_result','error','run_cancelled','run_timed_out','run_interrupted') ORDER BY event_seq DESC LIMIT 1",
+                (run_id, run_id),
+            ) as cursor:
+                event = await cursor.fetchone()
+            if event is not None:
+                record["completion"] = json.loads(event["data"]).get("completion")
+                record["terminal_event_seq"] = event["event_seq"]
+        return record
 
     async def get(self, run_id: str) -> dict | None:
         async with self._lock:
