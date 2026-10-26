@@ -42,7 +42,7 @@ def initialize_workflow(context=None):
         validate_filename(name)
     with context.budget_lock:
         if context.workflow is None and guarded(context):
-            context.workflow = dict(mode=context.business_mode, db="pending", search="pending", reports={})
+            context.workflow = dict(mode=context.business_mode, db="pending", search="pending")
             emit(
                 context,
                 "initialized",
@@ -157,10 +157,8 @@ async def snapshot(context):
         db_failure_ids=failures if degraded else [],
         degraded=degraded,
         source_ids=source_ids,
-        linked_search_ids=[r["result_id"] for r in searches],
         missing_sources=missing,
         unread_uploads=upload_requirements(context),
-        external_summaries=[r["summary"] for r in searches],
     )
 
 
@@ -213,26 +211,88 @@ def prepare_tool_sync(call):
         sync_result(prepare_tool(call), context.event_sink)
 
 
+def _source_status(data):
+    return {
+        "missing_sources": sorted(data["missing_sources"]),
+        "unread_uploads": sorted(data["unread_uploads"]),
+        "degraded": data["degraded"],
+        "db_failure_ids": sorted(data["db_failure_ids"]),
+        "source_ids": {kind: sorted(ids) for kind, ids in data["source_ids"].items()},
+    }
+
+
+def sources_incomplete(status):
+    return bool(status and (status["missing_sources"] or status["unread_uploads"] or status["degraded"]))
+
+
+async def delivery_sources(context):
+    if not guarded(context):
+        return None
+    initialize_workflow(context)
+    return _source_status(await snapshot(context))
+
+
+def disclose_sources(context, text, status):
+    if status is None:
+        return text
+    context.delivery_draft["source_status"] = status
+    if not sources_incomplete(status):
+        return text
+    notices = ["【未完成核验】"]
+    if status["degraded"]:
+        notices.append(DEGRADED_NOTICE)
+    if status["missing_sources"]:
+        labels = {"db": "业务数据库", "search": "公开资料检索"}
+        notices.append("尚无本轮合格结果的必需来源：" + "、".join(labels[k] for k in status["missing_sources"]) + "。")
+    if status["unread_uploads"]:
+        notices.append("尚未完成读取的必需文件：" + json.dumps(status["unread_uploads"], ensure_ascii=False) + "。")
+    notices.append("以上缺口未被视为已完成，已有结论仅限于实际取得且通过审核的依据。")
+    return text + "\n\n" + "\n\n".join(notices)
+
+
+def constrain_coverage(context):
+    draft = context.delivery_draft
+    if draft and sources_incomplete(draft.get("source_status")):
+        if not draft["used_fact_ids"]:
+            context.coverage = "unknown"
+        elif context.coverage == "complete":
+            context.coverage = "partial"
+
+
+def _reviewed_sources(context, data):
+    draft = context.delivery_draft
+    if not draft or not draft.get("reviewed_content_digest") or draft.get("source_status") != _source_status(data):
+        raise refusal("delivery_not_reviewed", "交付内容及当前来源缺口必须共同通过终审，不能绕过审核结束任务。")
+    return draft
+
+
 def report_check(context, data, call=None):
-    if not data or data["missing_sources"] or data["unread_uploads"]:
-        missing = data.get("missing_sources", required_sources(context)) if data else required_sources(context)
-        unread = data.get("unread_uploads", list(context.required_uploads)) if data else list(context.required_uploads)
-        emit(context, "blocked", call, code="report_not_ready", missing_sources=missing, unread_uploads=unread)
-        raise refusal(
-            "report_not_ready",
-            "先完成所需查询并通过检查，读取本轮要求的上传文件后再生成报告或结束任务。",
-            missing_sources=missing,
-            unread_uploads=unread,
-        )
+    if data and not sources_incomplete(_source_status(data)):
+        return
+    from agent.runtime.delivery_actions import action_authorized
 
-
-def degraded_content(data):
-    parts = [DEGRADED_NOTICE, "外部检索助手返回的材料（未完成内部数据对照）："]
-    for text in data["external_summaries"]:
-        parts.append("\n".join("> " + line for line in text.splitlines()))
-    parts.append("数据库失败记录：" + ", ".join(data["db_failure_ids"]))
-    parts.append("外部结果引用：" + ", ".join(data["linked_search_ids"]))
-    return "\n\n".join(parts)
+    if data and call is not None and action_authorized(call):
+        draft = _reviewed_sources(context, data)
+        name = call.actor.rsplit(":", 1)[-1]
+        if (
+            name == "generate_markdown"
+            and sha256(call.args["content"].encode()).hexdigest() == draft["reviewed_content_digest"]
+        ):
+            return
+        if name == "convert_md_to_pdf":
+            source = resolve_run_path(str(Path(call.args["md_filename"]).with_suffix(".md")))
+            if source.is_file() and sha256(source.read_bytes()).hexdigest() == draft.get("reviewed_markdown_digest"):
+                return
+        raise refusal("delivery_content_changed", "文件交付只能使用与终审一致的正文。")
+    missing = data["missing_sources"] if data else required_sources(context)
+    unread = data["unread_uploads"] if data else list(context.required_uploads)
+    emit(context, "blocked", call, code="report_not_ready", missing_sources=missing, unread_uploads=unread)
+    raise refusal(
+        "report_not_ready",
+        "先调查所需来源；无法补齐时，将已有依据与真实缺口交给终审，再由程序交付。",
+        missing_sources=missing,
+        unread_uploads=unread,
+    )
 
 
 def before_tool_workflow(call):
@@ -241,22 +301,6 @@ def before_tool_workflow(call):
         return
     data = call.workflow_data
     report_check(context, data, call)
-    name = call.actor.rsplit(":", 1)[-1]
-    if data["degraded"]:
-        if name == "edit_file":
-            raise refusal("degraded_rewrite", "降级报告必须重新生成，不能编辑可能含内部指标的旧正文。")
-        if name == "convert_md_to_pdf":
-            source = resolve_run_path(str(Path(call.args["md_filename"]).with_suffix(".md")))
-            if (
-                not source.is_file()
-                or context.workflow["reports"].get(str(source)) != sha256(source.read_bytes()).hexdigest()
-            ):
-                raise refusal("degraded_source", "先生成注明数据库不可用的降级 Markdown，再转换 PDF。")
-        else:
-            from agent.runtime.delivery_actions import action_authorized
-
-            if not action_authorized(call):
-                call.args["content"] = degraded_content(data)
     emit(context, "report_allowed", call, source_ids=data["source_ids"], degraded=data["degraded"])
 
 
@@ -293,17 +337,6 @@ def after_tool_workflow(call):
         with context.budget_lock:
             context.upload_reads[str(file)] = digest
         emit(context, "upload_read", call, file_sha256=digest)
-    elif output_call(call) and call.workflow_data.get("degraded") and name in ("write_file", "generate_markdown"):
-        if name == "write_file":
-            file = resolve_run_path(call.args["file_path"], virtual=True)
-        else:
-            filename = call.args["filename"]
-            file = resolve_run_path(
-                str(Path(call.args.get("path") or "") / (filename if filename.endswith(".md") else filename + ".md"))
-            )
-        if file.is_file():
-            with context.budget_lock:
-                context.workflow["reports"][str(file)] = sha256(file.read_bytes()).hexdigest()
 
 
 async def finalize_answer(context, answer):
@@ -323,12 +356,24 @@ async def finalize_answer(context, answer):
         return answer
     initialize_workflow(context)
     data = await snapshot(context)
-    report_check(context, data)
+    status = _source_status(data)
+    if sources_incomplete(status):
+        draft = _reviewed_sources(context, data)
+        if draft.get("delivered_content_digest") != sha256(answer.encode()).hexdigest():
+            raise refusal("delivery_content_changed", "最终答复必须与通过终审并交付的内容一致。")
+        constrain_coverage(context)
     emit(
         context,
-        "completed_degraded" if data["degraded"] else "completed",
+        "completed_degraded"
+        if data["degraded"]
+        else "completed_partial"
+        if sources_incomplete(status)
+        else "completed",
         source_ids=data["source_ids"],
         db_failure_ids=data["db_failure_ids"],
+        missing_sources=data["missing_sources"],
+        unread_uploads=data["unread_uploads"],
+        coverage=context.coverage,
     )
     return answer
 
@@ -346,7 +391,8 @@ def instruction(context):
                 if context.business_mode == "internal_external"
                 else "本轮普通任务自由选择助手。"
             )
-            + "报告或结束任务前完成所需查询与上传文件读取。",
+            + "调查阶段先完成所需查询与上传文件读取；无法补齐时保留已核实结果并如实披露缺口。"
+            "来源未齐影响任务覆盖状态，不等同于运行失败；最终内容与缺口必须共同通过审核。",
         ),
         ensure_ascii=False,
     )

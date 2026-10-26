@@ -191,6 +191,9 @@ class EventSink:
         kind = "task_result" if status == "completed" else "error" if status == "failed" else f"run_{status}"
         data = {"result": answer} if status == "completed" else {"error": error, "partial_result": answer}
         data["coverage"] = getattr(context, "coverage", "unknown")
+        draft = getattr(context, "delivery_draft", None)
+        if draft and draft.get("source_status") is not None:
+            data["source_status"] = draft["source_status"]
         if getattr(context, "pending_jobs", None):
             data["jobs"] = list(context.pending_jobs.values())
         if hasattr(context, "call_counts"):

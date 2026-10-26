@@ -83,6 +83,7 @@ def _verify_markdown(context, text):
     expected = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n").encode("utf-8")
     if (context.work_dir / "answer.md").read_bytes() != expected:
         raise RuntimeError("Written Markdown differs from the content that passed review")
+    context.delivery_draft["reviewed_markdown_digest"] = sha256(expected).hexdigest()
 
 
 def _render_artifact(context, contract, text, conversion=None):

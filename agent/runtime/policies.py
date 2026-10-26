@@ -15,7 +15,7 @@ from tavily.errors import ForbiddenError, InvalidAPIKeyError, MissingAPIKeyError
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import ExecutionTerminated
+from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
 from agent.runtime.source_policy import SourcePolicy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -43,7 +43,7 @@ class BudgetExceeded(ExecutionTerminated):
 
 
 class MissingConfiguration(ExecutionTerminated):
-    pass
+    """Required execution configuration is invalid; the run cannot safely continue."""
 
 
 class ReservationUnavailable(PolicyError):
@@ -367,7 +367,7 @@ SAFE_FUNCTIONS = frozenset(
 def require_sql_tables(limits=None):
     limits = limits or policy_for_run().sql
     if not limits.allowed_tables:
-        raise MissingConfiguration(
+        raise DependencyUnavailable(
             "MySQL queries are disabled: configure sql.allowed_tables with actual business tables"
         )
     return limits
@@ -455,7 +455,7 @@ def validate_sql(query, limits=None):
 def require_db_credentials():
     required = ("MYSQL_READONLY_USER", "MYSQL_READONLY_PASSWORD", "MYSQL_DATABASE")
     if any(not os.getenv(key) for key in required):
-        raise MissingConfiguration(
+        raise DependencyUnavailable(
             "Read-only database credentials are missing; administrative credentials are not used"
         )
     if os.getenv("MYSQL_READONLY_USER", "").lower() in ("root", "admin"):
@@ -463,7 +463,7 @@ def require_db_credentials():
 
 
 def classify_tool_error(error):
-    if isinstance(error, MissingConfiguration):
+    if isinstance(error, MissingConfiguration | DependencyUnavailable):
         return "configuration"
     if isinstance(error, MissingAPIKeyError):
         return "configuration"

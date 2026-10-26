@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import CollectionFinished, ExecutionTerminated
+from agent.runtime.errors import CollectionFinished, DependencyUnavailable, ExecutionTerminated
 from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import (
@@ -479,7 +479,7 @@ def research_step(
     context, allowance, call = get_run_context(), search_allowance.get(), active_call.get()
     try:
         return _perform(action, gap_id, query, source_id, reason)
-    except (ExecutionTerminated, CollectionFinished):
+    except (ExecutionTerminated, CollectionFinished, DependencyUnavailable):
         raise
     except Exception as error:
         if context is None or allowance is None or call is None or context.stop_status:

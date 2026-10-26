@@ -165,10 +165,6 @@ def parse_delivery(text, context):
                     + requirement["anchor"]
                     + "」：本轮尚未获得足够的已审核证据以完整核实该需求。"
                 )
-            if context.workflow and context.workflow.get("db") == "degraded":
-                from agent.runtime.workflows import DEGRADED_NOTICE
-
-                notices.insert(0, DEGRADED_NOTICE)
             claim.text = "\n\n".join(dict.fromkeys(notices))
             if len(claim.text) > 4000:
                 raise ValueError("Split limitation requirements into smaller blocks")
@@ -195,12 +191,6 @@ def parse_delivery(text, context):
         )
         rendered.append(claim.text + (" " + citations if citations else ""))
         used.update(claim.fact_ids)
-    if (
-        context.workflow
-        and context.workflow.get("db") == "degraded"
-        and not any(block.kind == "limitation" for block in draft.blocks)
-    ):
-        raise ValueError("Degraded database workflow requires a program-rendered limitation block")
     context.delivery_draft = {
         **draft.model_dump(),
         "used_fact_ids": sorted(used),

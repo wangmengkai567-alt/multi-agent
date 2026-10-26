@@ -9,8 +9,8 @@ from typing import Annotated
 from langchain_core.tools import tool
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import DependencyUnavailable
 from agent.runtime.evidence_protocol import evidence_tool
-from agent.runtime.policies import MissingConfiguration
 from agent.runtime.skills import record_read
 from api.context import get_session_context
 from api.monitor import monitor
@@ -125,7 +125,7 @@ def _read(file, maximum=None):
             raise ValueError("Original document exceeds the configured upload size limit")
         return raw, _extract(file, raw)
     except ImportError as exc:
-        raise MissingConfiguration("Required file reader dependency is missing") from exc
+        raise DependencyUnavailable("Required file reader dependency is missing") from exc
     except UnicodeDecodeError as exc:
         raise ValueError("File format cannot be read as UTF-8 text") from exc
 

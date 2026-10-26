@@ -135,7 +135,7 @@ class SearchFinalizationMiddleware(AgentMiddleware):
             "只有当前有效事实可作确定结论，缺资料时明确缺口，不用记忆补齐。"
             "未指定历史年份的节日价格按 reference_time 的当前年份理解。往年优惠不能当作今年活动或今年推荐依据；"
             "用户不要求历史对比时不选用往年活动事实，不能为填满答复而输出过期优惠。"
-            "workflow.db=degraded 时用 limitation 明确数据库依赖不可用，没有可用内部经营指标，不能声称完成内外对照。"
+            "业务来源和文件核验缺口由程序从本轮持久化状态补充披露；只为未覆盖的原始需求输出 limitation，不对已覆盖需求伪造缺口。"
         )
         data = dict(
             user_query=context.task_instruction,

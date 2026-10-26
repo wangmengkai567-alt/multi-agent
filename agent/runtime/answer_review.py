@@ -51,13 +51,15 @@ class AnswerReviewMiddleware(AgentMiddleware):
             else None
         )
 
-    def _render(self, message):
+    def _render(self, message, source_status):
         from agent.runtime.checkpoints import write_json
+        from agent.runtime.workflows import disclose_sources
 
         context = get_run_context()
         error = None
         try:
-            return parse_delivery(message.text, context)
+            text = parse_delivery(message.text, context)
+            return disclose_sources(context, text, source_status)
         except ValueError as exc:
             error = str(exc)
             raise
@@ -158,6 +160,10 @@ class AnswerReviewMiddleware(AgentMiddleware):
             recompute_run(context)
         else:
             context.coverage = "unknown"
+        from agent.runtime.workflows import constrain_coverage
+
+        constrain_coverage(context)
+        review.answer_kind = context.coverage
         if context.event_sink:
             payload = review.model_dump()
             payload.update(coverage=context.coverage, coverage_rows=review.coverage, delivery=context.delivery_draft)
@@ -249,7 +255,19 @@ class AnswerReviewMiddleware(AgentMiddleware):
             messages=[HumanMessage(content=json.dumps(data, ensure_ascii=False))],
         )
 
+    @staticmethod
+    def _delivered(text):
+        from agent.runtime.checkpoints import save_job_checkpoint
+
+        context = get_run_context()
+        context.delivery_draft["delivered_content_digest"] = sha256(text.encode()).hexdigest()
+        save_job_checkpoint(context)
+        return text
+
     def wrap_model_call(self, request, handler):
+        from agent.results import sync_result
+        from agent.runtime.workflows import delivery_sources, guarded
+
         current = request
         while True:
             response = handler(current)
@@ -257,7 +275,9 @@ class AnswerReviewMiddleware(AgentMiddleware):
             if message is None:
                 return response
             try:
-                text = self._render(message)
+                context = get_run_context()
+                status = sync_result(delivery_sources(context), context.event_sink) if guarded(context) else None
+                text = self._render(message, status)
                 review = self._review_sync(text)
                 self._record(review, text)
                 if review.verdict == "passed":
@@ -270,10 +290,12 @@ class AnswerReviewMiddleware(AgentMiddleware):
                 raise RuntimeError("最终答复未满足事实支持与交付契约：" + error)
         from agent.runtime.delivery_actions import deliver_file
 
-        text = deliver_file(text)
+        text = self._delivered(deliver_file(text))
         return replace(response, result=[*response.result[:-1], message.model_copy(update={"content": text})])
 
     async def awrap_model_call(self, request, handler):
+        from agent.runtime.workflows import delivery_sources
+
         current = request
         while True:
             response = await handler(current)
@@ -281,7 +303,8 @@ class AnswerReviewMiddleware(AgentMiddleware):
             if message is None:
                 return response
             try:
-                text = self._render(message)
+                status = await delivery_sources(get_run_context())
+                text = self._render(message, status)
                 review = await self._review(text)
                 self._record(review, text)
                 if review.verdict == "passed":
@@ -294,5 +317,5 @@ class AnswerReviewMiddleware(AgentMiddleware):
                 raise RuntimeError("最终答复未满足事实支持与交付契约：" + error)
         from agent.runtime.delivery_actions import adeliver_file
 
-        text = await adeliver_file(text)
+        text = self._delivered(await adeliver_file(text))
         return replace(response, result=[*response.result[:-1], message.model_copy(update={"content": text})])

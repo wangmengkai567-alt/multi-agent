@@ -12,9 +12,10 @@ from langchain_core.tools import tool
 from pydantic import BeforeValidator, Field
 from tavily import TavilyClient
 
+from agent.runtime.errors import DependencyUnavailable
 from agent.runtime.evidence import relevant_excerpt
 from agent.runtime.evidence_protocol import evidence_tool, web_result_error, web_results
-from agent.runtime.policies import MissingConfiguration, PolicyError, policy_for_run, request_timeout
+from agent.runtime.policies import PolicyError, policy_for_run, request_timeout
 from agent.runtime.retrieval import SearchHistory
 from api.monitor import monitor
 
@@ -121,7 +122,7 @@ def internet_search(
     load_dotenv()
     key = os.getenv("TAVILY_API_KEY")
     if not key:
-        raise MissingConfiguration("Tavily API key is missing")
+        raise DependencyUnavailable("Tavily API key is missing")
     limits = policy_for_run().search
     monitor.report_tool("网络搜索工具", {"query": query, "topic": topic, "max_results": max_results})
 
@@ -192,7 +193,7 @@ def read_web_page(
     load_dotenv()
     key = os.getenv("TAVILY_API_KEY")
     if not key:
-        raise MissingConfiguration("Tavily API key is missing")
+        raise DependencyUnavailable("Tavily API key is missing")
     limits = policy_for_run().search
     monitor.report_tool("网页正文读取工具", {"url": url, "query": query})
     with TavilyClient(api_key=key) as client:

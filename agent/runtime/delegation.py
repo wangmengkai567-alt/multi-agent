@@ -215,6 +215,8 @@ class DelegationRunnable(Runnable):
         return result
 
     def _error(self, call, record, error):
+        if isinstance(error, ExecutionTerminated):
+            get_run_context().terminate(error)
         call.error = error
         call.status = (
             "rejected"
@@ -277,6 +279,8 @@ class DelegationRunnable(Runnable):
 
         call.state = record["state"] = review.state
         call.check_status = record["check_status"] = review.state.check_status
+        if review.verdict == "dependency_unavailable":
+            record["error"] = review.error or "; ".join(review.issues)
         call.report_attempt = attempt
         self._review_event(context, call, review, attempt)
         if review.coverage:
@@ -442,7 +446,7 @@ class DelegationRunnable(Runnable):
             category = classify_tool_error(error.__cause__)
         reason = redact_text(str(error) or type(error).__name__)
         if category in ("configuration", "permission", "transient"):
-            return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + reason])
+            return ReviewResult(verdict="dependency_unavailable", issues=["依赖不可用：" + reason], error=reason)
         return ReviewResult(verdict="tool_failed", issues=["子任务执行失败：" + reason])
 
     def _recovered_result(self, inputs):

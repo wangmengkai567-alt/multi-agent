@@ -15,7 +15,7 @@ from langgraph.types import Command
 from pydantic import ValidationError
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import CollectionFinished, ExecutionTerminated
+from agent.runtime.errors import CollectionFinished, DependencyUnavailable, ExecutionTerminated
 from agent.runtime.events import EventPersistenceError, make_event, redact_text
 from agent.runtime.review_state import ReviewState
 
@@ -362,6 +362,11 @@ class HookToolMiddleware(AgentMiddleware):
                 except CollectionFinished as exc:
                     self._error(call, exc)
                     raise
+                except DependencyUnavailable as exc:
+                    self._error(call, exc)
+                    if call.search_task_key:
+                        raise  # The owning delegation records a failed dependency, without report/review calls.
+                    return ToolMessage(content=error_message(exc), tool_call_id=call.call_id, status="error")
                 except HookRejected as exc:
                     self._error(call, exc)
                     return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")
@@ -441,6 +446,11 @@ class HookToolMiddleware(AgentMiddleware):
                 except CollectionFinished as exc:
                     self._error(call, exc)
                     raise
+                except DependencyUnavailable as exc:
+                    self._error(call, exc)
+                    if call.search_task_key:
+                        raise  # The owning delegation records a failed dependency, without report/review calls.
+                    return ToolMessage(content=error_message(exc), tool_call_id=call.call_id, status="error")
                 except HookRejected as exc:
                     self._error(call, exc)
                     return ToolMessage(content=redact_text(str(exc)), tool_call_id=call.call_id, status="error")

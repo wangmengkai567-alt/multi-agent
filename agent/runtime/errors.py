@@ -5,6 +5,10 @@ class ExecutionTerminated(RuntimeError):
     """The run must stop; do not turn this exception into model feedback."""
 
 
+class DependencyUnavailable(RuntimeError):
+    """End the affected expert branch; this dependency cannot be fixed by its model."""
+
+
 class CollectionFinished(Exception):
     """End one expert's collection and continue with its tool-free report."""
 
