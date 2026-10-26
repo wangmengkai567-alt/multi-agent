@@ -5,6 +5,28 @@ timeouts:
   tool_seconds: 25.0
   finalize_seconds: 45.0
   job_seconds: 1800.0
+context:
+  # Project request budget, measured over the complete UTF-8 JSON payload.
+  # This is a conservative local guard, not a supplier token-usage measurement.
+  max_request_bytes: 524288
+  skill_metadata_bytes: 8000
+  safety_tokens: 8192
+  # Alibaba Cloud model cards, verified 2026-10-26. Values are tokens, not K/M abbreviations.
+  # https://help.aliyun.com/zh/model-studio/qwen3-8-max
+  # https://help.aliyun.com/zh/model-studio/qwen3-8-flash
+  models:
+    qwen3.8-max:
+      window_tokens: 1000000
+      max_input_tokens: 991808
+      max_thinking_input_tokens: 983616
+      max_output_tokens: 131072
+      max_thinking_tokens: 262144
+    qwen3.8-flash:
+      window_tokens: 1000000
+      max_input_tokens: 991808
+      max_thinking_input_tokens: 983616
+      max_output_tokens: 131072
+      max_thinking_tokens: 262144
 review:
   # Current provider supports strict JSON Schema; disable strict_schema for JSON-object-only providers.
   json_mode: true

@@ -80,6 +80,7 @@ class RequestMeasurement:
             tool_call_count=0,
             invalid_tool_count=0,
             transport=None,
+            context_admission=None,
             usage_available=False,
             input_units=None,
             output_units=None,
@@ -182,6 +183,11 @@ def observe_http_request(request):
     def size(value):
         return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
+    from agent.runtime.model_context import admit_context
+
+    if not isinstance(data.get("model"), str) or not isinstance(data.get("messages"), list):
+        raise ValueError("Model context admission requires a model ID and chat messages")
+    admit_context(measurement, data, request_bytes=len(raw))
     drafts = []
     for message in data.get("messages", []):
         content = message.get("content")

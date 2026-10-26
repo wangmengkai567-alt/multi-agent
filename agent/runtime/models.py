@@ -12,6 +12,7 @@ from langchain_core.runnables import Runnable
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.governance import register_turn
+from agent.runtime.model_context import admit_context, prepared_payload
 from agent.runtime.output import normalize_model_message
 from agent.runtime.policies import request_timeout, reserve_calls
 
@@ -73,6 +74,7 @@ class BudgetChatModel(BaseChatModel):
         try:
             with context.scheduler.provider(context, "models", self.resource_group):
                 measured.admit()
+                admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
                 kwargs["timeout"] = request_timeout(category=self.category, phase=measured.row["phase"])
                 reserve_calls(
                     self.category,
@@ -105,6 +107,7 @@ class BudgetChatModel(BaseChatModel):
         try:
             async with context.scheduler.aprovider(context, "models", self.resource_group):
                 measured.admit()
+                admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
                 kwargs["timeout"] = request_timeout(category=self.category, phase=measured.row["phase"])
                 reserve_calls(
                     self.category,

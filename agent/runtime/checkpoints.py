@@ -76,8 +76,11 @@ def save_job_checkpoint(context):
             "plan_closed",
             "approved_internal",
         )
+        from agent.runtime.skills import save_skill_context
+
         data = {key: getattr(context, key) for key in fields}
         data.update(
+            skill_context=save_skill_context(context),
             execution_run_id=context.run_id,
             terminal_failure=type(context.terminal_error).__name__ if context.terminal_error is not None else None,
             owner_id=context.owner_id,
@@ -145,6 +148,7 @@ def restore_job_checkpoint(context):
     context.resume_source_run_id = data["execution_run_id"]
     special = {
         "checkpoint_schema_version",
+        "skill_context",
         "terminal_failure",
         "owner_id",
         "thread_id",
@@ -160,6 +164,14 @@ def restore_job_checkpoint(context):
     for key, value in data.items():
         if key not in special:
             setattr(context, key, value)
+    from agent.runtime.policies import MissingConfiguration
+    from agent.runtime.skills import restore_skill_context
+
+    try:
+        restore_skill_context(context, data["skill_context"])
+    except (ValueError, KeyError, TypeError, OSError, MissingConfiguration) as exc:
+        context.stop("interrupted")
+        raise RunStopped("Saved Skill snapshots failed source or coverage validation") from exc
     from agent.runtime.evidence_protocol import validate_record
     from agent.runtime.quotes import validate_registry
 

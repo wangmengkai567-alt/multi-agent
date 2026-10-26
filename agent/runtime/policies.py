@@ -188,7 +188,39 @@ class TimeoutLimits(StrictConfig):
     job_seconds: float = Field(default=1800.0, gt=0, le=86400)
 
 
+class ModelWindow(StrictConfig):
+    window_tokens: int = Field(ge=1)
+    max_input_tokens: int = Field(ge=1)
+    max_thinking_input_tokens: int = Field(ge=1)
+    max_output_tokens: int = Field(ge=1)
+    max_thinking_tokens: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def valid_window(self):
+        if self.max_thinking_input_tokens > self.max_input_tokens or self.max_input_tokens > self.window_tokens:
+            raise ValueError("Model input limits must fit its context window")
+        if max(self.max_output_tokens, self.max_thinking_tokens) >= self.window_tokens:
+            raise ValueError("Model output limits must leave space for input")
+        return self
+
+
+class ContextLimits(StrictConfig):
+    max_request_bytes: int = Field(ge=1024, le=10485760)
+    skill_metadata_bytes: int = Field(ge=1024, le=1048576)
+    safety_tokens: int = Field(ge=1)
+    models: dict[str, ModelWindow]
+
+    @model_validator(mode="after")
+    def valid_models(self):
+        if not self.models or any(not key.strip() for key in self.models):
+            raise ValueError("Declare context limits for every configured model")
+        if any(self.safety_tokens >= model.max_thinking_input_tokens for model in self.models.values()):
+            raise ValueError("Context safety reserve must leave space for input")
+        return self
+
+
 class RuntimePolicy(StrictConfig):
+    context: ContextLimits
     sources: SourcePolicy = Field(default_factory=SourcePolicy)
     scheduler: SchedulerLimits = Field(default_factory=SchedulerLimits)
     timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)

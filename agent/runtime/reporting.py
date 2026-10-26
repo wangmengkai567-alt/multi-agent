@@ -15,6 +15,7 @@ from agent.runtime.evidence import model_evidence
 from agent.runtime.facts import REPORT_PROMPT, report_response_format
 from agent.runtime.hooks import active_call
 from agent.runtime.models import model_phase
+from agent.runtime.skills import loaded_skill_context
 
 
 @dataclass(frozen=True)
@@ -45,11 +46,7 @@ class GroundedSearchExecutor(Runnable):
         context.check_active()
         limits = context.policy.search
         report_chars = limits.model_context_chars // limits.max_concurrent_tasks
-        guidance = [
-            body
-            for (actor, owner, _), body in context.skill_bodies.items()
-            if actor == call.target and owner == call.call_id
-        ]
+        guidance = loaded_skill_context(actor=call.target, owner=call.call_id)
         tools = model_evidence(tool_evidence.get() or [], report_chars, limits.result_chars)
         from agent.runtime.quotes import register_options
 
