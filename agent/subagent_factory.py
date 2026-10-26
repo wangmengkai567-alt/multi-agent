@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from agent.reflection import ResultReviewer
 from agent.results import ResultService
 from agent.runtime.backend import run_backend
+from agent.runtime.capabilities import READONLY_FILESYSTEM_PROMPT, CapabilityDisclosureMiddleware
 from agent.runtime.collection import CollectionExecutionMiddleware
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.evidence_protocol import bind_framework_tools
@@ -18,7 +19,7 @@ from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.models import budget_model
 from agent.runtime.reporting import GroundedSearchExecutor
 from agent.runtime.search import SearchExecutionMiddleware
-from agent.runtime.skills import ProjectSkillsMiddleware
+from agent.runtime.skills import ProjectSkillsMiddleware, SkillReadMiddleware
 
 
 def validate_model(model, *, needs_tools=False, tools=()):
@@ -61,6 +62,7 @@ def build_subagents(registry, models, *, hooks=None):
             "事实报告由后续独立步骤生成。委派返回的已审核事实也必须保留实际工具证据链。"
         )
         middleware = [
+            SkillReadMiddleware(),
             CollectionExecutionMiddleware(),
             *([SearchExecutionMiddleware()] if spec.execution.planned else []),
             *(
@@ -74,9 +76,10 @@ def build_subagents(registry, models, *, hooks=None):
                 else []
             ),
             *([ProjectSkillsMiddleware(spec.allowed_skill_ids)] if spec.allowed_skill_ids else []),
-            bind_framework_tools(FilesystemMiddleware(backend=run_backend)),
+            bind_framework_tools(FilesystemMiddleware(backend=run_backend, system_prompt=READONLY_FILESYSTEM_PROMPT)),
             SummarizationMiddleware(model=child_model, backend=run_backend, **spec.summary.kwargs()),
             PatchToolCallsMiddleware(),
+            CapabilityDisclosureMiddleware({t: registry.get(t) for t in spec.delegate_targets}),
             HookToolMiddleware(
                 spec.agent_id,
                 allowed_targets={t: registry.get(t) for t in spec.delegate_targets},

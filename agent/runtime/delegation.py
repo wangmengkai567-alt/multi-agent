@@ -45,8 +45,15 @@ class DelegationRunnable(Runnable):
         context = get_run_context()
         if context is None:
             raise HookRejected("Expert execution requires a run context")
-        if self.spec.execution.network_access and context.network_policy == "forbidden":
-            raise HookRejected("显式联网限制禁止执行联网专家")
+        from agent.runtime.capabilities import expert_available
+
+        with context.budget_lock:
+            unavailable = context.unavailable_agents.get(self.spec.agent_id)
+        if unavailable:
+            raise HookRejected(unavailable + "；本轮不重复调用该助手，请说明依据缺失。")
+
+        if not expert_available(context, self.spec.agent_id, self.spec):
+            raise HookRejected("专家不在当前契约、权限或执行阶段允许的范围内")
         if self.registry is not None:
             from agent.runtime.experts import bind_registry
 
@@ -54,17 +61,7 @@ class DelegationRunnable(Runnable):
         if context.task_contract is not None:
             from agent.runtime.contracts import assert_contract
 
-            contract = assert_contract(context)
-            if (
-                contract.delivery_kind != "grounded"
-                or not contract.network_allowed
-                and self.spec.execution.network_access
-            ):
-                raise HookRejected("Expert execution contradicts the locked task contract")
-        with context.budget_lock:
-            unavailable = context.unavailable_agents.get(self.spec.agent_id)
-        if unavailable:
-            raise HookRejected(unavailable + "；本轮不重复调用该助手，请说明依据缺失。")
+            assert_contract(context)
         messages = inputs.get("messages", [])
         if not messages or not isinstance(messages[-1], HumanMessage) or not messages[-1].text.strip():
             raise HookRejected("Expert execution requires a non-empty task description")

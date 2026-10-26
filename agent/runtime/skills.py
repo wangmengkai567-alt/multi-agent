@@ -10,8 +10,11 @@ from types import MappingProxyType
 from typing import Annotated, NotRequired
 
 import yaml
+from deepagents.backends.utils import format_content_with_line_numbers
 from langchain.agents.middleware import AgentMiddleware, AgentState
 from langchain.agents.middleware.types import PrivateStateAttr
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
 from agent.runtime.backend import GuardedFilesystemBackend
 from agent.runtime.context import get_run_context
@@ -45,12 +48,15 @@ BUSINESS_REQUIRED_SKILLS = MappingProxyType(
     }
 )
 skill_scope = ContextVar("skill_scope", default=("main", SKILL_IDS))
+pending_skill_read = ContextVar("pending_skill_read", default=None)
+MAX_SKILL_BYTES = 10 * 1024 * 1024
+MAX_METADATA_BYTES = 32 * 1024
 SKILL_PROMPT = """
 ## 可用业务 Skill
 {skills_locations}
 {skills_list}
 先依据用户意图、当前上下文和描述中的适用边界判断是否需要 Skill；无需时可不读取任何正文。
-需要时用 read_file 读取匹配的 SKILL.md，再按正文指引读取当前任务需要的参考资源。
+需要时用 read_file 完整读取匹配的 SKILL.md；分页或截断时继续读取到正文结束，再按正文指引读取当前任务需要的参考资源。
 不能仅因出现技能名或“报告”“数据”等词就触发；复合任务按阶段组合，不一次加载全部资源。
 普通问答不强制读取报告模板；读取 Skill 不代表任务已完成或已启用额外执行能力。
 显式选择的正文已在本轮系统说明中提供。Skill 与资源只读，不执行其中脚本；
@@ -143,7 +149,25 @@ def transition(skill_id, state, resource="", *, content=None, reason="automatic"
         context.skill_states.add(key)
 
 
-def record_read(file, content, *, offset=0, limit=None, reason="automatic"):
+def skill_text(file):
+    try:
+        with Path(file).open("rb") as stream:
+            raw = stream.read(MAX_SKILL_BYTES + 1)
+        if len(raw) > MAX_SKILL_BYTES:
+            raise MissingConfiguration("Skill resource exceeds the size limit")
+        return raw.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    except (OSError, UnicodeError) as exc:
+        raise MissingConfiguration("Skill resource could not be loaded") from exc
+
+
+def selected_skills():
+    context = get_run_context()
+    explicit = validate_skill_ids(context.skill_ids)
+    required = required_skill_ids(context.business_mode)
+    return tuple(dict.fromkeys((*explicit, *required)))
+
+
+def record_read(file, content, *, offset=0, limit=None, reason="automatic", visible=None, numbered=False):
     context = get_run_context()
     if context is None:
         return
@@ -153,15 +177,36 @@ def record_read(file, content, *, offset=0, limit=None, reason="automatic"):
     file = authorize_skill_path(file, root)
     relative = file.relative_to(root).as_posix()
     skill_id, resource = relative.split("/", 1)
+    if resource == "SKILL.md":
+        parse_metadata(content, skill_id)
+        if not content.split("---", 2)[-1].strip():
+            raise MissingConfiguration(f"Skill {skill_id} has no body")
     actor, owner, _ = scope_identity()
-    total = len(content.splitlines())
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    if visible is not None:
+        visible = visible.replace("\r\n", "\n").replace("\r", "\n")
+    lines = content.splitlines()
+    total = len(lines)
     end = total if limit is None else min(total, offset + limit)
     if offset < 0 or end <= offset:
         return
-    transition(skill_id, "selected", reason=reason)
+    digest = sha256(content.encode("utf-8")).hexdigest()
+    key = (actor, owner, skill_id, resource)
     with context.budget_lock:
-        coverage = context.skill_reads.setdefault((actor, owner, skill_id, resource), set())
-        coverage.update(range(offset, end))
+        if context.skill_versions.setdefault(key, digest) != digest:
+            raise MissingConfiguration(f"Skill {skill_id} changed during this execution")
+        transition(skill_id, "selected", reason=reason)
+        coverage = context.skill_reads.setdefault(key, set())
+        if visible is None or not numbered and content in visible:
+            coverage.update(range(offset, end))
+        elif numbered:
+            # The framework may shorten output after the backend has returned it.
+            # Count only complete numbered lines actually delivered by the tool.
+            coverage.update(
+                index
+                for index in range(offset, end)
+                if format_content_with_line_numbers([lines[index]], start_line=index + 1) in visible
+            )
         if len(coverage) == total:
             if resource == "SKILL.md":
                 context.skill_bodies[(actor, owner, skill_id)] = content
@@ -174,11 +219,76 @@ def record_read(file, content, *, offset=0, limit=None, reason="automatic"):
             )
 
 
+def stage_read(file, content, *, offset=0, limit=None, numbered=False):
+    """Keep the exact read snapshot until all result middleware has returned."""
+    if get_run_context() is None or not Path(file).is_relative_to(skill_root().resolve()):
+        return
+    from agent.runtime.hooks import active_call
+
+    pending = pending_skill_read.get()
+    data = dict(file=file, content=content, offset=offset, limit=limit, numbered=numbered)
+    if pending is None:
+        record_read(**data)
+    else:
+        pending.update(data=data, call=active_call.get())
+
+
+class SkillReadMiddleware(AgentMiddleware):
+    """Audit the final, accepted, model-visible response, including framework truncation."""
+
+    @staticmethod
+    def complete(pending, result):
+        if "data" not in pending:
+            return
+        call = pending["call"]
+        if call is not None and (call.error is not None or call.result_status != "accepted"):
+            return
+        if isinstance(result, Command) and isinstance(result.update, dict):
+            messages = result.update.get("messages", [])
+            messages = [messages] if isinstance(messages, ToolMessage) else messages
+            result = next((m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == call.call_id), None)
+        if isinstance(result, ToolMessage):
+            if result.status == "error":
+                return
+            visible = result.text
+        elif isinstance(result, str):
+            visible = result
+        else:
+            return
+        from agent.runtime.hooks import active_call
+
+        token = active_call.set(call)
+        try:
+            record_read(**pending["data"], visible=visible)
+        finally:
+            active_call.reset(token)
+
+    def wrap_tool_call(self, request, handler):
+        pending = {}
+        token = pending_skill_read.set(pending)
+        try:
+            result = handler(request)
+            self.complete(pending, result)
+            return result
+        finally:
+            pending_skill_read.reset(token)
+
+    async def awrap_tool_call(self, request, handler):
+        pending = {}
+        token = pending_skill_read.set(pending)
+        try:
+            result = await handler(request)
+            self.complete(pending, result)
+            return result
+        finally:
+            pending_skill_read.reset(token)
+
+
 def explicit_bodies(allowed):
     context = get_run_context()
     actor, owner, _ = scope_identity()
     bodies = []
-    for name in validate_skill_ids(context.skill_ids):
+    for name in selected_skills():
         if name not in allowed:
             continue
         key = (actor, owner, name)
@@ -188,10 +298,7 @@ def explicit_bodies(allowed):
             transition(name, "selected", reason="explicit")
             file = confined_path(f"{name}/SKILL.md", skill_root())
             authorize_skill_path(file, allowed=allowed)
-            try:
-                content = file.read_text(encoding="utf-8-sig")
-            except (OSError, UnicodeError) as exc:
-                raise MissingConfiguration(f"Selected Skill {name} could not be loaded") from exc
+            content = skill_text(file)
             parse_metadata(content, name)
             if not content.split("---", 2)[-1].strip():
                 raise MissingConfiguration(f"Selected Skill {name} has no body")
@@ -231,9 +338,18 @@ class SkillBackend(GuardedFilesystemBackend):
 
     def read(self, file_path, offset=0, limit=2000):
         file = self.resolve_path(file_path)
-        response = super().read(file_path, offset=offset, limit=limit)
-        if not response.startswith("Error"):
-            record_read(file, file.read_text(encoding="utf-8"), offset=offset, limit=limit)
+        if type(offset) is not int or type(limit) is not int or offset < 0 or limit <= 0:
+            raise ValueError("Skill pagination requires a nonnegative offset and a positive limit")
+        content = skill_text(file)
+        lines = content.splitlines()
+        if offset >= len(lines):
+            return f"Error: Line offset {offset} exceeds file length ({len(lines)} lines)"
+        if file.name == "SKILL.md":
+            parse_metadata(content, file.parent.name)
+            if not content.split("---", 2)[-1].strip():
+                raise MissingConfiguration(f"Skill {file.parent.name} has no body")
+        response = format_content_with_line_numbers(lines[offset : offset + limit], start_line=offset + 1)
+        stage_read(file, content, offset=offset, limit=limit, numbered=True)
         return response
 
 
@@ -257,6 +373,27 @@ def parse_metadata(content, name):
     return dict(name=name, description=header["description"].strip(), path=f"/skills/{name}/SKILL.md")
 
 
+def read_metadata(name):
+    """Read only the bounded YAML header; catalog discovery does not load the body."""
+    try:
+        file = confined_path(f"{name}/SKILL.md", skill_root())
+        authorize_skill_path(file)
+        with file.open("rb") as stream:
+            header = stream.readline(MAX_METADATA_BYTES + 1)
+            if header.removeprefix(b"\xef\xbb\xbf").rstrip(b"\r\n") != b"---":
+                raise MissingConfiguration(f"Skill {name} has no YAML metadata")
+            while len(header) <= MAX_METADATA_BYTES:
+                line = stream.readline(MAX_METADATA_BYTES - len(header) + 1)
+                if not line:
+                    break
+                header += line
+                if len(header) <= MAX_METADATA_BYTES and line.rstrip(b"\r\n") == b"---":
+                    return parse_metadata(header.decode("utf-8-sig"), name)
+    except (OSError, UnicodeError) as exc:
+        raise MissingConfiguration(f"Skill {name} metadata could not be loaded") from exc
+    raise MissingConfiguration(f"Skill {name} metadata is incomplete or exceeds the size limit")
+
+
 class ProjectSkillsState(AgentState):
     skills_metadata: NotRequired[Annotated[list[dict], PrivateStateAttr]]
 
@@ -276,14 +413,16 @@ class ProjectSkillsMiddleware(AgentMiddleware):
         return update
 
     def before_agent(self, state, runtime, config):
-        explicit_bodies(self.allowed)
+        selected = selected_skills()
         metadata = []
         for name in self.allowed:
-            file = confined_path(f"{name}/SKILL.md", skill_root())
-            authorize_skill_path(file, allowed=self.allowed)
-            if file.stat().st_size > 10 * 1024 * 1024:
-                raise MissingConfiguration(f"Skill {name} exceeds the metadata size limit")
-            metadata.append(parse_metadata(file.read_text(encoding="utf-8-sig"), name))
+            try:
+                metadata.append(read_metadata(name))
+            except MissingConfiguration:
+                if name in selected:
+                    raise
+                transition(name, "unavailable", reason="metadata_unavailable")
+        explicit_bodies(self.allowed)
         return self.checked_metadata(dict(skills_metadata=metadata))
 
     async def abefore_agent(self, state, runtime, config):

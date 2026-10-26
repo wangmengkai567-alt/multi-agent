@@ -11,7 +11,7 @@ from langchain_core.tools import tool
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import DependencyUnavailable
 from agent.runtime.evidence_protocol import evidence_tool
-from agent.runtime.skills import record_read
+from agent.runtime.skills import stage_read
 from api.context import get_session_context
 from api.monitor import monitor
 from utils.path_utils import resolve_path
@@ -143,7 +143,7 @@ def read_file_content(
     monitor.report_tool("文件内容读取工具", {"filename": filename, "instruction": instruction})
     _, (content, _, _, _, _) = _read(file)
     if file.suffix.lower() not in (".docx", ".pdf", ".xlsx", ".xls"):
-        record_read(file, content)
+        stage_read(file, content, numbered=False)
     return content
 
 

@@ -41,11 +41,12 @@ def _build_agent(saver):
     from agent.prompts import main_agent_content
     from agent.results import RESULT_DISPLAY_PROMPT
     from agent.runtime.answer_review import AnswerReviewMiddleware
+    from agent.runtime.capabilities import READONLY_FILESYSTEM_PROMPT, CapabilityDisclosureMiddleware
     from agent.runtime.contracts import TaskContractMiddleware
     from agent.runtime.evidence_protocol import adapter_for_tool, bind_framework_tools
     from agent.runtime.experts import ExpertRegistryMiddleware
     from agent.runtime.finalization import SearchFinalizationMiddleware
-    from agent.runtime.skills import ProjectSkillsMiddleware
+    from agent.runtime.skills import ProjectSkillsMiddleware, SkillReadMiddleware
     from agent.runtime.task_plan import plan_research
     from agent.subagent_factory import build_subagents, validate_model
     from agent.subagent_registry import SummaryConfig, load_default_registry
@@ -77,7 +78,8 @@ def _build_agent(saver):
         middleware=[
             ExpertRegistryMiddleware(registry),
             bind_framework_tools(TodoListMiddleware()),
-            bind_framework_tools(FilesystemMiddleware(backend=run_backend)),
+            SkillReadMiddleware(),
+            bind_framework_tools(FilesystemMiddleware(backend=run_backend, system_prompt=READONLY_FILESYSTEM_PROMPT)),
             bind_framework_tools(SubAgentMiddleware(backend=run_backend, subagents=subagents)),
             SummarizationMiddleware(model=root_model, backend=run_backend, **SummaryConfig().kwargs()),
             PatchToolCallsMiddleware(),
@@ -85,6 +87,7 @@ def _build_agent(saver):
             AnswerReviewMiddleware(review_model),
             SearchFinalizationMiddleware(main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT),
             ProjectSkillsMiddleware(),
+            CapabilityDisclosureMiddleware(registry.specs),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
         ],
     ).with_config({"recursion_limit": 1000})

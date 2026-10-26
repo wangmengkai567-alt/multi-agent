@@ -229,31 +229,22 @@ class HookToolMiddleware(AgentMiddleware):
     def _before(self, request, call):
         if context := get_run_context():
             context.check_active()
+        from agent.runtime.capabilities import expert_available, tool_available
+        from agent.runtime.delivery_actions import action_authorized
+
         if context and context.task_contract is not None:
             from agent.runtime.contracts import assert_contract
 
-            contract = assert_contract(context)
-            from agent.runtime.delivery_actions import action_authorized
-
-            if (
-                contract.delivery_kind == "clarification"
-                or contract.delivery_kind == "direct"
-                and not action_authorized(call)
-            ):
-                raise HookRejected("当前契约禁止模型业务工具调用")
-            if request.tool_call["name"] in (
-                "generate_markdown",
-                "convert_md_to_pdf",
-                "write_file",
-                "edit_file",
-            ) and not action_authorized(call):
-                raise HookRejected("文件仅由程序在内容终审通过后生成")
-            if not contract.network_allowed and (
-                (call.target in self.target_specs and self.target_specs[call.target].execution.network_access)
-                or request.tool_call["name"]
-                in ("research_step", "internet_search", "read_web_page", "submit_research_job")
-            ):
-                raise HookRejected("原始任务禁止联网，本轮不能调用搜索或提交研究任务")
+            assert_contract(context)
+        if context and not action_authorized(call) and not tool_available(context, request.tool_call["name"]):
+            raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
+        if (
+            context
+            and call.target in self.target_specs
+            and not expert_available(context, call.target, self.target_specs[call.target])
+        ):
+            unavailable = context.unavailable_agents.get(call.target)
+            raise HookRejected(unavailable or "专家不在当前契约、权限或执行阶段允许的范围内")
         tool = getattr(request, "tool", None)
         context = get_run_context()
         if context and context.enforce_plan and hasattr(request, "tool") and tool is None:
@@ -267,15 +258,7 @@ class HookToolMiddleware(AgentMiddleware):
             except EvidenceError as exc:
                 raise HookRejected(str(exc)) from exc
             call.evidence_adapter = adapter.adapter_id
-            if (
-                context
-                and adapter.network
-                and (
-                    context.network_policy == "forbidden"
-                    or context.task_contract is not None
-                    and not context.task_contract.network_allowed
-                )
-            ):
+            if context and adapter.network and not tool_available(context, request.tool_call["name"], network=True):
                 raise HookRejected("本轮联网权限不允许执行该工具")
             try:
                 parsed_args = tool.tool_call_schema.model_validate(call.args).model_dump(exclude_unset=True)

@@ -40,6 +40,7 @@ class RunContext:
     upload_coverage: dict = field(default_factory=dict, repr=False)
     skill_states: set = field(default_factory=set, repr=False)
     skill_reads: dict = field(default_factory=dict, repr=False)
+    skill_versions: dict = field(default_factory=dict, repr=False)
     skill_bodies: dict = field(default_factory=dict, repr=False)
     search_calls: set[tuple[str, str]] = field(default_factory=set, repr=False)
     search_tasks: dict = field(default_factory=dict, repr=False)
