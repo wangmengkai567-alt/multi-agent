@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from agent.runtime.context import get_run_context
 
 CONTRACT_VERSION = 2
-CHECKPOINT_VERSION = 19
+CHECKPOINT_VERSION = 21
 REVIEW_CONTRACT_VERSION = "review-v14-intent-material-delivery"
 
 Purpose = Literal[
@@ -315,6 +315,9 @@ def _save_contract(context, contract):
     with context.budget_lock:
         if context.task_contract is not None:
             raise ValueError("Task contract is already locked")
+        from agent.runtime.capacity import initialize
+
+        initialize(context, contract)
         context.task_contract = contract
     from agent.runtime.checkpoints import save_job_checkpoint, write_json
     from agent.runtime.events import make_event

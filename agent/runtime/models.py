@@ -73,10 +73,14 @@ class BudgetChatModel(BaseChatModel):
         try:
             with context.scheduler.provider(context, "models", self.resource_group):
                 measured.admit()
-                reserve_calls(self.category, *(("retry",) if kwargs.pop("budget_retry", False) else ()))
+                kwargs["timeout"] = request_timeout(category=self.category, phase=measured.row["phase"])
+                reserve_calls(
+                    self.category,
+                    *(("retry",) if kwargs.pop("budget_retry", False) else ()),
+                    phase=measured.row["phase"],
+                )
                 measured.start()
                 config = {"callbacks": run_manager.handlers} if run_manager else None
-                kwargs["timeout"] = request_timeout()
                 kwargs["stream"] = False
                 try:
                     message = self.delegate.invoke(messages, config=config, stop=stop, **kwargs)
@@ -101,10 +105,14 @@ class BudgetChatModel(BaseChatModel):
         try:
             async with context.scheduler.aprovider(context, "models", self.resource_group):
                 measured.admit()
-                reserve_calls(self.category, *(("retry",) if kwargs.pop("budget_retry", False) else ()))
+                kwargs["timeout"] = request_timeout(category=self.category, phase=measured.row["phase"])
+                reserve_calls(
+                    self.category,
+                    *(("retry",) if kwargs.pop("budget_retry", False) else ()),
+                    phase=measured.row["phase"],
+                )
                 measured.start()
                 config = {"callbacks": run_manager.handlers} if run_manager else None
-                kwargs["timeout"] = request_timeout()
                 kwargs["stream"] = False
                 try:
                     async with asyncio.timeout(kwargs["timeout"]):

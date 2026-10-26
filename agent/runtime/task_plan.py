@@ -256,6 +256,9 @@ def plan_research(
                     failure_reason="dependency_failed: task was not executed",
                     state=ReviewState(check_status="dependency_unavailable"),
                 )
+            from agent.runtime.capacity import close_blocked
+
+            close_blocked(context, blocked)
             context.plan_closed = True
         else:
             if not tasks or (operation == "initialize") == context.accepted_plan:
@@ -278,6 +281,9 @@ def plan_research(
                     context.task_scopes[task_id]["requirement_ids"] = [
                         r["rid"] for r in task_requirements(context, task_id)
                     ]
+                from agent.runtime.capacity import admit_plan
+
+                admit_plan(context, [key for key, _, _ in pending])
             except Exception as error:
                 for key, value in original.items():
                     setattr(context, key, value)

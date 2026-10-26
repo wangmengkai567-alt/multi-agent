@@ -222,28 +222,29 @@ def policy_for_run():
         return context.policy
 
 
-def reserve_calls(*kinds):
+def reserve_calls(*kinds, phase=None):
     """Reserve all categories or none, before performing any external action."""
-    _reserve_calls(*kinds, charge=True)
+    _reserve_calls(*kinds, charge=True, phase=phase)
 
 
-def calls_available(*kinds):
+def calls_available(*kinds, phase=None):
     """Use the same admission calculation without charging a future call."""
     try:
-        _reserve_calls(*kinds, charge=False)
-    except BudgetExceeded:
+        _reserve_calls(*kinds, charge=False, phase=phase)
+    except (BudgetExceeded, ReservationUnavailable):
         return False
     return True
 
 
-def _reserve_calls(*kinds, charge):
+def _reserve_calls(*kinds, charge, phase=None):
     if not kinds or set(kinds) - set(KINDS):
         raise ValueError("Unknown or empty call category")
     context = get_run_context()
     context.check_active()
     limits = policy_for_run().budgets
     requested = {kind: kinds.count(kind) for kind in set(kinds)}
-    from agent.runtime.governance import delivery_reserve
+    from agent.runtime.capacity import eligible as capacity_eligible
+    from agent.runtime.capacity import pending_counts
     from agent.runtime.reservations import current_owner, held_counts
 
     with context.budget_lock:
@@ -253,17 +254,25 @@ def _reserve_calls(*kinds, charge):
         if charge and collection is not None:
             for kind, count in requested.items():
                 collection.check(kind, count)
-        reserved = delivery_reserve(context)
+        if phase is None:
+            from agent.runtime.models import model_phase
+
+            phase = model_phase.get()
+        reserved = pending_counts(context)
+        capacity = {kind: capacity_eligible(context, kind, phase) for kind in requested}
+        capacity_consumed = {kind: 1 for kind, row in capacity.items() if row is not None}
+        reserved.subtract(capacity_consumed)
         held = held_counts(context)
         owner = current_owner(context)
         own = context.revision_reservations.get(owner)
         eligible = dict(own["remaining"]) if own and own["active"] else {}
-        if requested.get("sub_model"):
-            from agent.runtime.models import model_phase
-
-            if model_phase.get() not in ("report_generation", "report_revision"):
-                eligible["sub_model"] = max(0, eligible.get("sub_model", 0) - 1)
+        if requested.get("sub_model") and phase not in ("report_generation", "report_revision"):
+            eligible["sub_model"] = max(0, eligible.get("sub_model", 0) - 1)
         consume = {k: min(requested.get(k, 0), v) for k, v in eligible.items()}
+        for kind, amount in consume.items():
+            if amount and capacity_consumed.get(kind):
+                capacity_consumed.pop(kind)
+                reserved[kind] += 1
         for kind in KINDS:
             reserved[kind] = reserved.get(kind, 0) + held[kind] - consume.get(kind, 0)
         context.check_active()
@@ -280,6 +289,8 @@ def _reserve_calls(*kinds, charge):
             )
             if charge and collection is not None and not hard_limit:
                 collection.finish("reserved_capacity")
+            if not hard_limit:
+                raise ReservationUnavailable(str(failure))
             if charge:
                 context.terminate(failure)
             raise failure
@@ -289,6 +300,8 @@ def _reserve_calls(*kinds, charge):
             context.call_counts[kind] += count
             if consume.get(kind):
                 own["remaining"][kind] -= consume[kind]
+            if capacity_consumed.get(kind):
+                capacity[kind][kind] -= capacity_consumed[kind]
         if collection is not None:
             collection.record(requested)
         from agent.runtime.checkpoints import save_job_checkpoint
@@ -296,19 +309,29 @@ def _reserve_calls(*kinds, charge):
         save_job_checkpoint(context)
 
 
-def request_timeout(maximum=None):
+def request_timeout(maximum=None, *, category=None, phase=None):
     context = get_run_context()
     limits = policy_for_run().timeouts
     context.check_active()
     remaining = context.remaining()
+    from agent.runtime.hooks import active_call
+
+    call = active_call.get()
+    if category is None and maximum is not None and call and "admitted_timeout" in call.workflow_data:
+        return min(value for value in (maximum, remaining, call.workflow_data["admitted_timeout"]) if value is not None)
     from agent.runtime.collection import current_collection
 
     collection = current_collection()
     collection_remaining = collection.remaining() if collection is not None else None
     if collection_remaining is not None and collection_remaining <= 0:
         collection.finish("time_limit")
-    return min(
-        value for value in (limits.request_seconds, maximum, remaining, collection_remaining) if value is not None
+    from agent.runtime.capacity import timeout
+
+    return timeout(
+        context,
+        min(value for value in (limits.request_seconds, maximum, remaining, collection_remaining) if value is not None),
+        category=category,
+        phase=phase,
     )
 
 
@@ -589,6 +612,10 @@ def before_tool_policy(call):
                 if collection is not None:
                     collection.finish("turn_tool_limit")
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
+            if call.actor.rsplit(":", 1)[-1] != "task":
+                call.workflow_data["admitted_timeout"] = request_timeout(
+                    context.policy.timeouts.tool_seconds, category="tool"
+                )
             reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
             context.turn_counts[turn] = context.turn_counts.get(turn, 0) + 1
             from agent.runtime.checkpoints import save_job_checkpoint

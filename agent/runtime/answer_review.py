@@ -45,11 +45,12 @@ class AnswerReviewMiddleware(AgentMiddleware):
         context = get_run_context()
         if context and context.enforce_plan and context.task_contract is None:
             raise ValueError("Final delivery requires a locked task contract")
-        return (
-            message
-            if context and (context.task_contract or context.search_tasks or context.approved_internal)
-            else None
-        )
+        if context and (context.task_contract or context.search_tasks or context.approved_internal):
+            from agent.runtime.capacity import begin_delivery
+
+            begin_delivery(context)
+            return message
+        return None
 
     def _render(self, message, source_status):
         from agent.runtime.checkpoints import write_json
@@ -196,7 +197,7 @@ class AnswerReviewMiddleware(AgentMiddleware):
         context = get_run_context()
         if context.answer_repair_attempted:
             return None
-        reserve_calls("retry")
+        reserve_calls("retry", phase="final_revision")
         context.answer_repair_attempted = True
         if context.task_contract is not None and context.task_contract.delivery_kind == "direct":
             return request.override(

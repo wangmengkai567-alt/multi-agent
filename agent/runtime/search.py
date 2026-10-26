@@ -91,10 +91,10 @@ class SearchAllowance:
                 self.task.sources = list(sources)
                 self.task.closed_reason = self.task.closed_reason or reason or "该检索子任务本轮已完成"
 
-    def complex_task(self):
-        context = self.context
+    @staticmethod
+    def complex_task(context):
         complex_skills = {"research", "ecommerce-analysis", "report-writing"}
-        with self.lock:
+        with context.budget_lock:
             return (
                 context.business_mode == "internal_external"
                 or bool(set(context.skill_ids) & complex_skills)
@@ -135,11 +135,11 @@ class SearchAllowance:
 
     def initial_limit(self):
         limits = self.context.policy.search
-        return limits.research_calls_per_task if self.complex_task() else limits.calls_per_task
+        return limits.research_calls_per_task if self.complex_task(self.context) else limits.calls_per_task
 
     def run_limit(self):
         limits = self.context.policy.search
-        return limits.research_calls_per_run if self.complex_task() else limits.calls_per_run
+        return limits.research_calls_per_run if self.complex_task(self.context) else limits.calls_per_run
 
     def limit(self):
         return self.initial_limit() + (

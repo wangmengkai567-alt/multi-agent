@@ -27,40 +27,41 @@ def register_turn(message):
     return message.model_copy(update={"tool_calls": calls})
 
 
-def delivery_reserve(context):
-    """Keep one synthesis/check cycle and one correction out of collection's budget."""
-    if not context.collecting or not context.search_calls:
-        return {}
-    return {"main_model": 2, "review": 2, "retry": 1}
-
-
 def near_budget(context):
     policy = context.policy
     if policy is None:
         return False
+    from agent.runtime.capacity import pending_seconds
+    from agent.runtime.policies import calls_available
+
     remaining = context.remaining()
-    reserve = min(policy.timeouts.finalize_seconds, policy.timeouts.total_seconds * 0.2)
-    counts = context.call_counts
-    reserved = delivery_reserve(context)
-    delivery_pressure = sum(counts.values()) + sum(reserved.values()) >= policy.budgets.total or any(
-        counts[kind] + count >= getattr(policy.budgets, kind) for kind, count in reserved.items()
+    waiting = any(
+        key != "delivery"
+        and row["owner"] is None
+        and any(amount for stage in row["stages"].values() for amount in stage.values())
+        for key, row in context.capacity_reservations.items()
     )
-    return (
-        delivery_pressure
-        or remaining is not None
-        and remaining <= reserve
-        or sum(counts.values()) >= policy.budgets.total * policy.budgets.near_ratio
+    counts = context.call_counts
+    pressure = not waiting and (
+        sum(counts.values()) >= policy.budgets.total * policy.budgets.near_ratio
         or any(
             counts[k] >= getattr(policy.budgets, k) * policy.budgets.near_ratio
             for k in ("tool", "sub_model", "main_model", "review")
-            if getattr(policy.budgets, k)
         )
+    )
+    return (
+        pressure
+        or not calls_available("main_model", phase="coordination")
+        or remaining is not None
+        and remaining <= pending_seconds(context) + policy.timeouts.shutdown_seconds
     )
 
 
 def announce(context, reason):
     if context.collecting:
-        context.collecting = False
+        from agent.runtime.capacity import begin_delivery
+
+        begin_delivery(context)
         if context.event_sink:
             context.event_sink.submit(
                 make_event(

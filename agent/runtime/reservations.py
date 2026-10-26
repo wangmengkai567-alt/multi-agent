@@ -19,11 +19,10 @@ def held_counts(context):
     counts = Counter()
     for row in context.revision_reservations.values():
         counts.update(row["remaining"])
-        counts.update(row["revision_floor"])
     return counts
 
 
-def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revision=False):
+def hold(context, owner, amounts, *, activate=False, task_id=None):
     from agent.runtime.policies import KINDS, ReservationUnavailable
 
     with context.budget_lock:
@@ -31,7 +30,9 @@ def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revis
         previous_owner = None
         if owner not in context.revision_reservations and context.resume_source_run_id and task_id is not None:
             candidates = [
-                identity for identity, saved in context.revision_reservations.items() if saved["task_id"] == task_id
+                identity
+                for identity, saved in context.revision_reservations.items()
+                if saved["task_id"] == task_id and identity in context.restored_reservation_owners
             ]
             if len(candidates) > 1:
                 from agent.runtime.context import RunStopped
@@ -42,18 +43,13 @@ def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revis
         row = deepcopy(
             context.revision_reservations[previous_owner]
             if previous_owner
-            else context.revision_reservations.get(owner, {"remaining": {}, "active": False, "revision_floor": {}})
+            else context.revision_reservations.get(owner, {"remaining": {}, "active": False})
         )
-        before = Counter(row["remaining"]) + Counter(row["revision_floor"])
+        before = Counter(row["remaining"])
         remaining = Counter(row["remaining"])
-        if activate:
-            remaining.update(row["revision_floor"])
-            row["revision_floor"] = {}
-        if protect_revision:
-            row["revision_floor"] = {"sub_model": 1, "review": 1}
         for kind, amount in amounts.items():
             remaining[kind] = max(remaining[kind], amount)
-        after = remaining + Counter(row["revision_floor"])
+        after = remaining
         add = {kind: max(0, amount - before[kind]) for kind, amount in after.items()}
         held = held_counts(context)
         if task_id is not None:
@@ -85,9 +81,9 @@ def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revis
                 > context.policy.search.page_reads_per_task
             ):
                 raise ReservationUnavailable("reserve_exhausted: task read capacity")
-        from agent.runtime.governance import delivery_reserve
+        from agent.runtime.capacity import pending_counts
 
-        held.update(delivery_reserve(context))
+        held.update(pending_counts(context))
         kinds = context.policy.budgets
         if (
             sum(context.call_counts.values())
@@ -104,6 +100,7 @@ def hold(context, owner, amounts, *, activate=False, task_id=None, protect_revis
         if previous_owner:
             row["recovered_from"] = [*row.get("recovered_from", []), previous_owner]
             del context.revision_reservations[previous_owner]
+            context.restored_reservation_owners.discard(previous_owner)
         context.revision_reservations[owner] = row
 
 

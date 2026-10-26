@@ -30,9 +30,9 @@ class CollectionScope:
         remaining = self.context.remaining()
         if remaining is None:
             return None
-        timeouts = self.context.policy.timeouts
-        final = min(timeouts.finalize_seconds, timeouts.total_seconds * 0.2)
-        return remaining - timeouts.request_seconds - final
+        from agent.runtime.capacity import pending_seconds
+
+        return remaining - pending_seconds(self.context) - self.context.policy.timeouts.shutdown_seconds
 
     def close(self, reason):
         context = self.context
@@ -69,14 +69,6 @@ class CollectionScope:
                 self.finish(self.state["closed_reason"])
             if not context.collecting:
                 self.finish("run_finalizing")
-            from agent.runtime.governance import announce, near_budget
-            from agent.runtime.reservations import current_owner
-
-            held = context.revision_reservations.get(current_owner(context))
-            protected_revision = bool(held and held["active"])
-            if near_budget(context) and not protected_revision:
-                announce(context, "专家采集达到整轮收尾阈值")
-                self.finish("budget_pressure")
             remaining = self.remaining()
             if remaining is not None and remaining <= 0:
                 self.finish("time_limit")

@@ -62,6 +62,8 @@ def save_job_checkpoint(context):
             "outbound",
             "review_cache",
             "revision_reservations",
+            "capacity_reservations",
+            "expert_tasks",
             "delivery_draft",
             "collecting",
             "turn_counts",
@@ -206,6 +208,9 @@ def restore_job_checkpoint(context):
             # Preserve uncertain charges, but never invent a transport send.
             row["status"] = "uncertain"
             row["outcome"] = "uncertain"
+    from agent.runtime.capacity import validate_restored
     from agent.runtime.measurement import persist
 
+    validate_restored(context)
+    context.restored_reservation_owners = set(context.revision_reservations)
     persist(context)

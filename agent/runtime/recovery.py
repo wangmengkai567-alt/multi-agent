@@ -74,14 +74,18 @@ def retry_delay(request, call, error):
     if status == 429:
         # Without a usable header use the configured backoff, never a model guess.
         delay = max(delay, retry_after(error) or 0)
+    from agent.runtime.capacity import pending_seconds
+
     remaining = context.remaining()
+    if remaining is not None:
+        remaining -= pending_seconds(context)
     if remaining is not None and delay + min(policy_for_run().timeouts.tool_seconds, 1.0) >= remaining:
         call.workflow_data["retry_blocked"] = "剩余时长预算不足，未安排重试"
         return None
     with context.budget_lock:
-        counts = context.call_counts
-        budget = policy_for_run().budgets
-        if counts["retry"] >= budget.retry or counts["tool"] >= budget.tool or sum(counts.values()) + 2 > budget.total:
+        from agent.runtime.policies import calls_available
+
+        if not calls_available("tool", "retry"):
             call.workflow_data["retry_blocked"] = "重试或工具调用 budget 预算不足，未安排重试"
             return None
     return delay

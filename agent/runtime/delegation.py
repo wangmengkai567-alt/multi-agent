@@ -123,22 +123,18 @@ class DelegationRunnable(Runnable):
             except SearchLimitReached as exc:
                 raise HookRejected(str(exc)) from exc
         if not self.spec.execution.planned:
-            from agent.runtime.requirements import register_support
+            from agent.runtime.capacity import expert_task
+            from agent.runtime.requirements import register_support, task_requirements
 
-            call.search_task_key = self.spec.agent_id + ":" + call.call_id
-            register_support(context, call.search_task_key)
+            call.search_task_key = expert_task(context, self.spec.agent_id, description)
+            if not task_requirements(context, call.search_task_key):
+                register_support(context, call.search_task_key)
         else:
             ensure_task(context, call.search_task_key, description)
-        from agent.runtime.reservations import hold
+        from agent.runtime.capacity import claim
 
         try:
-            hold(
-                context,
-                call.call_id,
-                {"sub_model": 1, "review": 1},
-                task_id=call.search_task_key,
-                protect_revision=self.spec.review_config.max_refinements > 0,
-            )
+            claim(context, call)
         except ReservationUnavailable as exc:
             if self.spec.execution.planned:
                 from agent.runtime.reservations import release
@@ -232,6 +228,9 @@ class DelegationRunnable(Runnable):
         from agent.runtime.reservations import release
 
         release(context, call.call_id)
+        from agent.runtime.capacity import finish
+
+        finish(context, call)
         if self.spec.execution.source_kind == "db" and call.status == "completed" and deliverable(record["state"]):
             with context.budget_lock:
                 context.internal_result_version += 1
@@ -370,9 +369,14 @@ class DelegationRunnable(Runnable):
         )
         remaining = context.remaining()
         requests = 1 if review_only else 3 if allow_search else 2
-        needed = requests * context.policy.timeouts.request_seconds
+        from agent.runtime.capacity import pending_seconds, unit_seconds
+        from agent.runtime.reservations import current_owner
+
+        own = context.revision_reservations.get(current_owner(context))
+        protected = sum(unit_seconds(context, k) * v for k, v in own["remaining"].items()) if own else 0
+        needed = requests * unit_seconds(context, "sub_model") + pending_seconds(context) - protected
         if allow_search:
-            needed += 2 * context.policy.timeouts.tool_seconds
+            needed += 2 * unit_seconds(context, "tool")
         if remaining is not None and remaining <= needed:
             record["error"] = "time_exhausted: 未启动无法在总时限内完成的修订"
             self._review_event(

@@ -53,7 +53,9 @@ class SearchFinalizationMiddleware(AgentMiddleware):
 
             contract = assert_contract(context)
             if contract.delivery_kind == "direct":
-                context.collecting = False
+                from agent.runtime.capacity import begin_delivery
+
+                begin_delivery(context)
                 return request.override(
                     tools=[],
                     tool_choice="none",
@@ -101,7 +103,9 @@ class SearchFinalizationMiddleware(AgentMiddleware):
         )
         if context.collecting and not (search_must_finish(context) or task_done or internal_done):
             return request
-        context.collecting = False
+        from agent.runtime.capacity import begin_delivery
+
+        begin_delivery(context)
         if not context.search_finalization_announced and context.event_sink:
             context.event_sink.submit(
                 make_event(

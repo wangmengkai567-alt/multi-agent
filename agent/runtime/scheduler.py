@@ -155,19 +155,37 @@ class ServiceScheduler:
                 )
             )
 
-    def acquire(self, gate, context, label):
+    @staticmethod
+    def _check_wait(context):
         context.check_active()
+        if context.policy is None:
+            return
+        from agent.runtime.collection import current_collection
+        from agent.runtime.measurement import active_request
+        from agent.runtime.policies import request_timeout
+
+        collection = current_collection()
+        if collection is not None:
+            collection.check()
+        request = active_request.get()
+        if request is not None and request.context is context and not request.closed:
+            request_timeout(category=request.row["category"], phase=request.row["phase"])
+        elif collection is not None or context.capacity_reservations:
+            request_timeout()
+
+    def acquire(self, gate, context, label):
+        self._check_wait(context)
         ticket, started = gate.enqueue(), monotonic()
         try:
             if not gate.ready(ticket):
                 self.event(context, "queued", label, started)
                 while True:
-                    context.check_active()
+                    self._check_wait(context)
                     if gate.ready(ticket):
                         break
                     # No network, model budget or execution slot is held by a waiter.
                     sleep(0.02)
-            context.check_active()
+            self._check_wait(context)
             self.event(context, "started", label, started)
             return Lease(gate)
         except BaseException:
@@ -181,21 +199,21 @@ class ServiceScheduler:
 
     async def aacquire(self, gate, context, label, ticket=None):
         if ticket is None:
-            context.check_active()
+            self._check_wait(context)
             ticket = gate.enqueue()
         started = monotonic()
         acquired = False
         try:
-            context.check_active()
+            self._check_wait(context)
             if not gate.ready(ticket):
                 self.event(context, "queued", label, started)
                 while True:
-                    context.check_active()
+                    self._check_wait(context)
                     if gate.ready(ticket):
                         break
                     await asyncio.sleep(0.02)
             acquired = True
-            context.check_active()
+            self._check_wait(context)
             self.event(context, "started", label, started)
             return Lease(gate)
         except BaseException:

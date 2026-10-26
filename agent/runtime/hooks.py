@@ -291,7 +291,9 @@ class HookToolMiddleware(AgentMiddleware):
         name = call.actor.rsplit(":", 1)[-1]
         if name in ("task", "research_step"):
             return None  # Delegations have their own collection and run deadlines.
-        return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None
+        if "admitted_timeout" in call.workflow_data:
+            return call.workflow_data["admitted_timeout"]
+        return request_timeout(policy_for_run().timeouts.tool_seconds, category="tool") if get_run_context() else None
 
     def _error(self, call, exc):
         call.error = exc

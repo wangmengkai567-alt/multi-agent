@@ -644,7 +644,17 @@ class ResultReviewer:
                     else "final_review"
                     if self.final_answer
                     else "semantic_review",
-                    **self._model_kwargs(request_timeout(), contract),
+                    **self._model_kwargs(
+                        request_timeout(
+                            category="review",
+                            phase="review_revision"
+                            if attempt
+                            else "final_review"
+                            if self.final_answer
+                            else "semantic_review",
+                        ),
+                        contract,
+                    ),
                 )
                 try:
                     return self._adjudicate(key, response, contract)
@@ -677,7 +687,17 @@ class ResultReviewer:
                     else "final_review"
                     if self.final_answer
                     else "semantic_review",
-                    **self._model_kwargs(request_timeout(), contract),
+                    **self._model_kwargs(
+                        request_timeout(
+                            category="review",
+                            phase="review_revision"
+                            if attempt
+                            else "final_review"
+                            if self.final_answer
+                            else "semantic_review",
+                        ),
+                        contract,
+                    ),
                 )
                 try:
                     return self._adjudicate(key, response, contract)

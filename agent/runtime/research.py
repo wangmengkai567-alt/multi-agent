@@ -19,7 +19,6 @@ from agent.runtime.errors import CollectionFinished, DependencyUnavailable, Exec
 from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import (
-    BudgetExceeded,
     MissingConfiguration,
     PolicyError,
     SearchLimitReached,
@@ -91,9 +90,11 @@ def available_actions(context, allowance):
     ]
     sources = SearchHistory(task.evidence).sources
     actions = ["report"]
-    remaining = context.remaining()
-    reserve = min(context.policy.timeouts.finalize_seconds, context.policy.timeouts.total_seconds * 0.2)
-    if not task.finalize_only and (remaining is None or remaining > reserve) and gaps:
+    from agent.runtime.collection import current_collection
+
+    collection = current_collection()
+    remaining = collection.remaining() if collection is not None else context.remaining()
+    if not task.finalize_only and (remaining is None or remaining > 0) and gaps:
         if not allowance.exhausted():
             actions.append("search")
         if allowance.can_read_page() and sources:
@@ -136,6 +137,25 @@ def _reserve(context, allowance, call, kind, attempt, request_key):
         hold_owner = current_owner(context)
         own = context.revision_reservations.get(hold_owner)
         before = dict(own["remaining"]) if own and own["active"] else {}
+        from agent.runtime.capacity import eligible
+        from agent.runtime.policies import request_timeout
+
+        protected = eligible(context, "tool")
+        protected_key = (
+            next(
+                (
+                    key
+                    for key, row in context.capacity_reservations.items()
+                    if row["stages"].get("collection") is protected
+                ),
+                None,
+            )
+            if protected is not None
+            else None
+        )
+        protected_before = protected.get("tool", 0) if protected is not None else 0
+
+        call.workflow_data["admitted_timeout"] = request_timeout(context.policy.search.timeout_seconds, category="tool")
         reserve_calls(*categories)
         if own and own["active"] and own["remaining"].get(kind, 0):
             own["remaining"][kind] -= 1
@@ -161,6 +181,8 @@ def _reserve(context, allowance, call, kind, attempt, request_key):
             sent_at=None,
             hold_owner=hold_owner,
             hold_consumed=hold_consumed,
+            capacity_owner=protected_key,
+            capacity_consumed=protected_before - protected.get("tool", 0) if protected is not None else 0,
         )
         _checkpoint(context)
     return key
@@ -178,6 +200,10 @@ def _release(context, allowance, key):
         if own:
             for kind, amount in row["hold_consumed"].items():
                 own["remaining"][kind] = own["remaining"].get(kind, 0) + amount
+        capacity = context.capacity_reservations.get(row["capacity_owner"])
+        if capacity is not None and "collection" in capacity["stages"]:
+            stage = capacity["stages"]["collection"]
+            stage["tool"] = stage.get("tool", 0) + row["capacity_consumed"]
         token = f"{row['call_id']}:{row['attempt']}"
         if row["kind"] == "search":
             allowance.task.calls.discard(token)
@@ -453,9 +479,16 @@ def _perform(action, gap_id, query, source_id, reason):
                     min(context.policy.retry.max_delay_seconds, context.policy.retry.delay_seconds * 2**attempt),
                     retry_after(error) or 0 if http_status(error) == 429 else 0,
                 )
+                from agent.runtime.capacity import pending_seconds
+                from agent.runtime.collection import current_collection
+                from agent.runtime.policies import ReservationUnavailable
+
                 remaining = context.remaining()
-                if remaining is not None and delay + context.policy.timeouts.tool_seconds >= remaining:
-                    raise BudgetExceeded("time_exhausted: not enough time for retry") from error
+                if remaining is not None and delay + pending_seconds(context) >= remaining:
+                    scope = current_collection()
+                    if scope is not None:
+                        scope.finish("reserved_time")
+                    raise ReservationUnavailable("time_exhausted: not enough unreserved time for retry") from error
                 if context.stop_event.wait(delay):
                     context.check_active()
     finally:
