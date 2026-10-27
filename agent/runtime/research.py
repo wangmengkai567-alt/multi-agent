@@ -10,66 +10,57 @@ from time import monotonic
 from typing import Literal
 
 from langchain_core.tools import tool
-from requests import Timeout as RequestsTimeout
-from requests.adapters import HTTPAdapter
-from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import CollectionFinished, DependencyUnavailable, ExecutionTerminated
 from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import (
-    MissingConfiguration,
     PolicyError,
     SearchLimitReached,
     classify_tool_error,
     reserve_calls,
 )
+from agent.runtime.recovery import is_transport_timeout
 from agent.runtime.retrieval import SearchHistory, source_key
 from agent.runtime.search import search_allowance
 
 provider_attempt = ContextVar("provider_attempt", default=None)
 
 
-def audit_transport(client):
-    session = getattr(client, "session", None)
-    if session is None or not hasattr(session, "mount"):
-        raise MissingConfiguration("Provider has no auditable HTTP transport")
+def mark_transport(event):
+    """Durably charge one reserved attempt before authorizing the worker's HTTP send."""
+    if event.get("kind") != "transport":
+        raise PolicyError("Unexpected provider transport event")
+    metadata = provider_attempt.get()
+    if metadata is None:
+        raise PolicyError("Research HTTP request has no reserved attempt")
+    context, key = metadata
+    with context.budget_lock:
+        context.check_active()
+        row = context.attempt_ledger[key]
+        if row["status"] != "reserved":
+            raise PolicyError("Duplicate HTTP send for one provider attempt")
+        row.update(status="spent", sent_at=monotonic())
+        context.outbound.append(
+            dict(
+                run_id=context.run_id,
+                kind=row["kind"],
+                call_id=row["call_id"],
+                attempt=row["attempt"],
+                send_seq=len(context.outbound) + 1,
+                request_key=row["request_key"],
+            )
+        )
+        audit_path = context.work_dir / "transport.jsonl"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with audit_path.open("ab") as stream:
+            stream.write((json.dumps(context.outbound[-1], ensure_ascii=False) + "\r\n").encode("utf-8"))
+            stream.flush()
+            import os
 
-    class AuditedAdapter(HTTPAdapter):
-        def send(self, request, **kwargs):
-            metadata = provider_attempt.get()
-            if metadata is None:
-                raise PolicyError("Research HTTP request has no reserved attempt")
-            context, key = metadata
-            with context.budget_lock:
-                context.check_active()
-                row = context.attempt_ledger[key]
-                if row["status"] != "reserved":
-                    raise PolicyError("Duplicate HTTP send for one provider attempt")
-                row.update(status="spent", sent_at=monotonic())
-                context.outbound.append(
-                    dict(
-                        run_id=context.run_id,
-                        kind=row["kind"],
-                        call_id=row["call_id"],
-                        attempt=row["attempt"],
-                        send_seq=len(context.outbound) + 1,
-                        request_key=row["request_key"],
-                    )
-                )
-                audit_path = context.work_dir / "transport.jsonl"
-                audit_path.parent.mkdir(parents=True, exist_ok=True)
-                with audit_path.open("ab") as stream:
-                    stream.write((json.dumps(context.outbound[-1], ensure_ascii=False) + "\r\n").encode("utf-8"))
-                    stream.flush()
-                _checkpoint(context)
-            return super().send(request, **kwargs)
-
-    for scheme in ("http://", "https://"):
-        previous = session.get_adapter(scheme)
-        session.mount(scheme, AuditedAdapter(max_retries=0))
-        previous.close()
+            os.fsync(stream.fileno())
+        _checkpoint(context)
 
 
 def _checkpoint(context):
@@ -102,7 +93,8 @@ def available_actions(context, allowance):
     return dict(
         allowed_actions=actions,
         open_gaps=[
-            {k: g[k] for k in ("gid", "rid", "status")} | {"label": context.requirements[g["rid"]]["label"]}
+            {k: g[k] for k in ("gid", "rid", "status", "reason", "source_fact_id", "detail")}
+            | {"label": context.requirements[g["rid"]]["label"]}
             for g in gaps
         ],
         readable_sources=[
@@ -354,7 +346,8 @@ def _perform(action, gap_id, query, source_id, reason):
         if not within_task_domains(context, allowance.task_key, source["url"]):
             raise PolicyError("Source is outside the task's domain restriction")
         requirement = context.requirements[gap["rid"]]
-        focus = (requirement["label"] + "；" + requirement["anchor"])[:2000]
+        assertion = gap.get("source_assertion", {})
+        focus = (requirement["label"] + "；" + requirement["anchor"] + "；" + assertion.get("value", ""))[:2000]
         params = dict(url=source["url"], query=focus)
         provider, kind = read_web_page.func, "read"
     key_params = (
@@ -449,11 +442,7 @@ def _perform(action, gap_id, query, source_id, reason):
                 if ledger_key:
                     _release(context, allowance, ledger_key)
                     row = context.attempt_ledger[ledger_key]
-                    row["outcome"] = (
-                        "uncertain"
-                        if isinstance(error, TimeoutError | RequestsTimeout | TavilyTimeoutError) or context.stop_status
-                        else "failed"
-                    )
+                    row["outcome"] = "uncertain" if is_transport_timeout(error) or context.stop_status else "failed"
                     _evidence(
                         context,
                         allowance,

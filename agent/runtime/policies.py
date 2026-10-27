@@ -11,8 +11,6 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
-from tavily.errors import ForbiddenError, InvalidAPIKeyError, MissingAPIKeyError
-from tavily.errors import TimeoutError as TavilyTimeoutError
 
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
@@ -518,9 +516,14 @@ def require_db_credentials():
 
 
 def classify_tool_error(error):
+    from agent.runtime.workers import WorkerOperationError
+
+    if isinstance(error, WorkerOperationError):
+        return error.category
     if isinstance(error, MissingConfiguration | DependencyUnavailable):
         return "configuration"
-    if isinstance(error, MissingAPIKeyError):
+    provider_type = type(error).__module__ + "." + type(error).__name__
+    if provider_type == "tavily.errors.MissingAPIKeyError":
         return "configuration"
     if isinstance(error, SearchLimitReached):
         return "search_limit"
@@ -530,7 +533,7 @@ def classify_tool_error(error):
         return "reservation_unavailable"
     if isinstance(error, PermissionError):
         return "permission"
-    if isinstance(error, InvalidAPIKeyError | ForbiddenError):
+    if provider_type in ("tavily.errors.InvalidAPIKeyError", "tavily.errors.ForbiddenError"):
         return "permission"
     if isinstance(error, DecisionRejected):
         return "decision_rejected"
@@ -546,14 +549,12 @@ def classify_tool_error(error):
         return "transient"
     if status is not None and 400 <= status < 500:
         return "permanent"
-    if isinstance(
-        error,
-        TimeoutError
-        | ConnectionError
-        | httpx.TransportError
-        | requests.ConnectionError
-        | requests.Timeout
-        | TavilyTimeoutError,
+    if (
+        isinstance(
+            error,
+            TimeoutError | ConnectionError | httpx.TransportError | requests.ConnectionError | requests.Timeout,
+        )
+        or provider_type == "tavily.errors.TimeoutError"
     ):
         return "transient"
     if getattr(error, "errno", None) in (1205, 2003, 2006, 2013):
@@ -569,11 +570,7 @@ def validate_tool_call(call):
     if name in ("internet_search", "read_web_page"):
         raise PolicyError("Retired model entry; use research_step")
     context = get_run_context()
-    if (
-        context
-        and context.background_job
-        and name in ("generate_markdown", "convert_md_to_pdf", "write_file", "edit_file")
-    ):
+    if context and context.background_job and name in ("generate_markdown", "write_file", "edit_file"):
         raise PolicyError("当前持久化研究任务仅执行只读查询；文件交付由交互轮次单独执行")
     if context and not context.collecting and name in ("task", "research_step", "submit_research_job"):
         raise PolicyError("本轮已进入交付阶段，不再启动调查")
@@ -598,18 +595,15 @@ def validate_tool_call(call):
         if not filename.endswith(".md"):
             filename += ".md"
         resolve_run_path(str(Path(args.get("path") or "") / filename), write=True)
-    elif name == "convert_md_to_pdf":
-        source = resolve_run_path(str(Path(args.get("md_filename", "")).with_suffix(".md")))
-        resolve_run_path(
-            str(Path(args["pdf_filename"]).with_suffix(".pdf"))
-            if args.get("pdf_filename")
-            else str(source.with_suffix(".pdf")),
-            write=True,
-        )
     elif name in ("read_file_content", "read_document"):
         file = resolve_run_path(args.get("filename", ""))
-        if name == "read_document" and not file.is_relative_to((context.work_dir / "uploads").resolve()):
-            raise PolicyError("Document evidence accepts original uploads only")
+        if name == "read_document":
+            if not file.is_relative_to((context.work_dir / "uploads").resolve()):
+                raise PolicyError("Document evidence accepts original uploads only")
+            from agent.runtime.preflight import unavailable
+
+            if unavailable(context, "document:" + file.suffix.lower()):
+                raise PolicyError("This document reader is unavailable; retain the file as an explicit gap")
     elif name in ("read_file", "write_file", "edit_file", "ls", "glob", "grep"):
         value = args.get("file_path") if name in ("read_file", "write_file", "edit_file") else args.get("path") or "/"
         resolve_run_path(value, write=name in ("write_file", "edit_file"), virtual=True)

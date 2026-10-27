@@ -15,7 +15,6 @@ from agent.runtime.context import get_run_context
 from agent.runtime.delivery import collection_status, fact_pool, parse_delivery, response_format
 from agent.runtime.events import make_event
 from agent.runtime.policies import reserve_calls
-from agent.runtime.requirements import recompute_run
 from agent.runtime.review_state import deliverable
 from agent.subagent_registry import ReviewConfig
 
@@ -45,6 +44,8 @@ class AnswerReviewMiddleware(AgentMiddleware):
         context = get_run_context()
         if context and context.enforce_plan and context.task_contract is None:
             raise ValueError("Final delivery requires a locked task contract")
+        if context and context.pending_requirement_change is not None:
+            return None
         if context and (context.task_contract or context.search_tasks or context.approved_internal):
             from agent.runtime.capacity import begin_delivery
 
@@ -158,7 +159,9 @@ class AnswerReviewMiddleware(AgentMiddleware):
                 for block in context.delivery_draft["blocks"]
                 if block["kind"] == "analysis"
             ]
-            recompute_run(context)
+            from agent.runtime.requirements import update_gap_coverage
+
+            update_gap_coverage(context, review.coverage)
         else:
             context.coverage = "unknown"
         from agent.runtime.workflows import constrain_coverage

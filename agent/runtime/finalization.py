@@ -88,7 +88,9 @@ class SearchFinalizationMiddleware(AgentMiddleware):
             announce(context, "保留最终交付与审核额度")
         if context.collecting and not (context.search_tasks or context.approved_internal):
             return request
-        planned = set(context.task_scopes)
+        from agent.runtime.requirements import task_requirements
+
+        planned = {key for key in context.task_scopes if task_requirements(context, key)}
         task_done = (
             bool(context.search_tasks)
             and not any(t.active for t in context.search_tasks.values())

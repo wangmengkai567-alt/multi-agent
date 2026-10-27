@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from pydantic import BeforeValidator, Field
-from tavily import TavilyClient
 
 from agent.runtime.errors import DependencyUnavailable
 from agent.runtime.evidence import relevant_excerpt
@@ -126,20 +125,17 @@ def internet_search(
     limits = policy_for_run().search
     monitor.report_tool("网络搜索工具", {"query": query, "topic": topic, "max_results": max_results})
 
-    with TavilyClient(api_key=key) as client:
-        preserve_http_errors(client)
-        from agent.runtime.research import audit_transport
-
-        audit_transport(client)
-        payload = client.search(
-            query=query,
-            **({"include_domains": include_domains} if include_domains else {}),
-            topic=topic,
-            max_results=max_results,
-            include_raw_content=include_raw_content,
-            search_depth=search_depth,
-            timeout=request_timeout(limits.timeout_seconds),
-        )
+    payload = provider_operation(
+        "search",
+        key,
+        limits,
+        query=query,
+        **({"include_domains": include_domains} if include_domains else {}),
+        topic=topic,
+        max_results=max_results,
+        include_raw_content=include_raw_content,
+        search_depth=search_depth,
+    )
     return compact_search_response(payload, limits, query), payload
 
 
@@ -196,19 +192,9 @@ def read_web_page(
         raise DependencyUnavailable("Tavily API key is missing")
     limits = policy_for_run().search
     monitor.report_tool("网页正文读取工具", {"url": url, "query": query})
-    with TavilyClient(api_key=key) as client:
-        preserve_http_errors(client)
-        from agent.runtime.research import audit_transport
-
-        audit_transport(client)
-        payload = client.extract(
-            urls=[url],
-            query=query,
-            chunks_per_source=5,
-            extract_depth="advanced",
-            format="text",
-            timeout=request_timeout(limits.timeout_seconds),
-        )
+    payload = provider_operation(
+        "extract", key, limits, urls=[url], query=query, chunks_per_source=5, extract_depth="advanced", format="text"
+    )
     # Keep rejected rows as failure evidence, never as readable/citable page results.
     results = web_results(payload)
     rejected = [
@@ -235,3 +221,36 @@ def read_web_page(
     ]
     compact["read_status"] = payload["read_status"]
     return json.dumps(compact, ensure_ascii=False), payload
+
+
+def provider_operation(kind, key, limits, **parameters):
+    from agent.runtime.research import mark_transport
+    from agent.runtime.workers import run_operation
+
+    seconds = request_timeout(limits.timeout_seconds)
+    return run_operation(
+        "tavily",
+        dict(kind=kind, key=key, parameters=parameters, timeout=seconds),
+        seconds=seconds,
+        on_event=mark_transport,
+    )
+
+
+def execute_worker(payload, progress):
+    from requests.adapters import HTTPAdapter
+    from tavily import TavilyClient
+
+    class AuditedAdapter(HTTPAdapter):
+        def send(self, request, **kwargs):
+            progress("transport")
+            return super().send(request, **kwargs)
+
+    with TavilyClient(api_key=payload["key"]) as client:
+        preserve_http_errors(client)
+        for scheme in ("http://", "https://"):
+            previous = client.session.get_adapter(scheme)
+            client.session.mount(scheme, AuditedAdapter(max_retries=0))
+            previous.close()
+        if payload["kind"] not in ("search", "extract"):
+            raise ValueError("Unknown research provider operation")
+        return getattr(client, payload["kind"])(**payload["parameters"], timeout=payload["timeout"])

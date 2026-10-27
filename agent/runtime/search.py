@@ -40,7 +40,9 @@ def search_must_finish(context):
     with context.budget_lock:
         tasks = list(context.search_tasks.values())
         if context.enforce_plan and context.accepted_plan and tasks and not any(t.active for t in tasks):
-            planned = set(context.task_scopes)
+            from agent.runtime.requirements import task_requirements
+
+            planned = {key for key in context.task_scopes if task_requirements(context, key)}
             if context.plan_closed and planned.issubset(context.search_tasks):
                 return True
         return (
@@ -128,7 +130,12 @@ class SearchAllowance:
             group != self.group_key
             and not any(self.context.search_tasks.get(key) and self.context.search_tasks[key].calls for key in keys)
             and any(
-                key not in self.context.search_tasks or not self.context.search_tasks[key].closed_reason for key in keys
+                any(
+                    r["task_id"] == key and r["query_version"] == self.context.query_version
+                    for r in self.context.requirements.values()
+                )
+                and (key not in self.context.search_tasks or not self.context.search_tasks[key].closed_reason)
+                for key in keys
             )
             for group, keys in groups.items()
         )

@@ -51,15 +51,13 @@ def _saved_action(tool, args):
             )
         )
     if row.get("file_digest"):
-        path = context.work_dir / ("answer.md" if tool.name == "generate_markdown" else "answer.pdf")
+        path = context.work_dir / "answer.md"
         if not path.is_file() or sha256(path.read_bytes()).hexdigest() != row["file_digest"]:
             raise _artifact_error(context, tool.name, "Previously completed delivery file is missing or changed")
     return row
 
 
-def _artifact_error(
-    context, tool_name, message, *, category="artifact_integrity", stage="artifact_validation", task_id=None
-):
+def _artifact_error(context, tool_name, message, *, category="artifact_integrity", stage="artifact_validation"):
     row = context.delivery_draft["actions"][tool_name]
     details = dict(
         error_category=category,
@@ -68,8 +66,6 @@ def _artifact_error(
         call_id=row["call_id"],
         message=message,
     )
-    if task_id is not None:
-        details["task_id"] = task_id
     context.delivery_draft["delivery_error"] = details
     return DeliveryActionError(details)
 
@@ -87,9 +83,7 @@ def record_action(call):
         context.delivery_draft["delivery_error"] = row["error"]
     if call.result_status == "accepted" and isinstance(call.result, ToolMessage):
         row["result"] = call.result.content
-        filename = {"generate_markdown": "answer.md", "convert_md_to_pdf": "answer.pdf"}.get(
-            call.actor.rsplit(":", 1)[-1]
-        )
+        filename = "answer.md" if call.actor.rsplit(":", 1)[-1] == "generate_markdown" else None
         if filename and (context.work_dir / filename).is_file():
             row["file_digest"] = sha256((context.work_dir / filename).read_bytes()).hexdigest()
     from agent.runtime.checkpoints import save_job_checkpoint
@@ -191,18 +185,21 @@ def _artifact_input(text):
         or context.delivery_draft.get("reviewed_content_digest") != sha256(text.encode()).hexdigest()
     ):
         raise RuntimeError("Delivery file requires exactly the content that passed review")
-    return context, contract
+    return context
 
 
-def _save_artifact(context, text, data):
+def _save_artifact(context, text):
     from agent.runtime.checkpoints import save_job_checkpoint, write_json
 
     context.check_active()
-    if data["status"] == "completed":
-        data["file_digest"] = sha256((context.work_dir / data["path"]).read_bytes()).hexdigest()
-    tool_name = "generate_markdown" if data["kind"] == "markdown" else "convert_md_to_pdf"
-    data["call_id"] = context.delivery_draft["actions"][tool_name]["call_id"]
-    context.delivery_draft["artifact"] = dict(content_digest=sha256(text.encode()).hexdigest(), **data)
+    context.delivery_draft["artifact"] = dict(
+        kind="markdown",
+        path="answer.md",
+        status="completed",
+        content_digest=sha256(text.encode()).hexdigest(),
+        file_digest=sha256((context.work_dir / "answer.md").read_bytes()).hexdigest(),
+        call_id=context.delivery_draft["actions"]["generate_markdown"]["call_id"],
+    )
     write_json(context.work_dir / "delivery-artifact.json", context.delivery_draft["artifact"])
     save_job_checkpoint(context)
 
@@ -214,75 +211,33 @@ def _verify_markdown(context, text):
         raise _artifact_error(
             context, "generate_markdown", "Written Markdown differs from the content that passed review"
         )
-    context.delivery_draft["reviewed_markdown_digest"] = sha256(expected).hexdigest()
 
 
-def _render_artifact(context, contract, text, conversion=None):
-    if contract.file_output == "markdown":
-        _save_artifact(context, text, dict(kind="markdown", path="answer.md", status="completed"))
-        return text + "\n\n[下载 Markdown](" + artifact_url(context.run_id, "answer.md") + ")"
-    if context.job_service is not None:
-        job = json.loads(conversion)
-        if job["task_id"] not in context.pending_jobs or job["kind"] != "pdf_conversion":
-            raise _artifact_error(context, "convert_md_to_pdf", "PDF response is not an owned conversion task")
-        if job["status"] == "completed":
-            path = context.work_dir / "answer.pdf"
-            if not path.is_file() or not path.stat().st_size:
-                raise _artifact_error(context, "convert_md_to_pdf", "Completed conversion has no published PDF")
-            _save_artifact(context, text, dict(kind="pdf", path="answer.pdf", status="completed"))
-            return text + "\n\n[下载 PDF](" + artifact_url(context.run_id, "answer.pdf") + ")"
-        if job["status"] != "working":
-            raise _artifact_error(
-                context,
-                "convert_md_to_pdf",
-                "PDF conversion did not complete: " + str(job.get("error") or job["status"]),
-                category="conversion_failed",
-                stage="background_conversion",
-                task_id=job["task_id"],
-            )
-        _save_artifact(context, text, dict(kind="pdf", status=job["status"], task_id=job["task_id"]))
-        return text + "\n\nPDF 转换任务已提交，页面将更新转换结果。任务：" + job["task_id"]
-    path = context.work_dir / "answer.pdf"
-    if not path.is_file() or not path.stat().st_size:
-        raise _artifact_error(context, "convert_md_to_pdf", "PDF conversion did not produce the requested artifact")
-    _save_artifact(context, text, dict(kind="pdf", path="answer.pdf", status="completed"))
-    return text + "\n\n[下载 PDF](" + artifact_url(context.run_id, "answer.pdf") + ")"
+def _render_artifact(context, text):
+    _save_artifact(context, text)
+    return text + "\n\n[下载 Markdown](" + artifact_url(context.run_id, "answer.md") + ")"
 
 
 def deliver_file(text):
-    value = _artifact_input(text)
-    if value is None:
+    context = _artifact_input(text)
+    if context is None:
         return text
-    context, contract = value
     from tools.markdown_tools import generate_markdown
-    from tools.pdf_tools import convert_md_to_pdf
 
     invoke_action(generate_markdown, dict(content=text, filename="answer.md"))
     _verify_markdown(context, text)
-    conversion = (
-        invoke_action(convert_md_to_pdf, dict(md_filename="answer.md", pdf_filename="answer.pdf"))
-        if contract.file_output == "pdf"
-        else None
-    )
-    return _render_artifact(context, contract, text, conversion)
+    return _render_artifact(context, text)
 
 
 async def adeliver_file(text):
-    value = _artifact_input(text)
-    if value is None:
+    context = _artifact_input(text)
+    if context is None:
         return text
-    context, contract = value
     from tools.markdown_tools import generate_markdown
-    from tools.pdf_tools import convert_md_to_pdf
 
     await ainvoke_action(generate_markdown, dict(content=text, filename="answer.md"))
     _verify_markdown(context, text)
-    conversion = (
-        await ainvoke_action(convert_md_to_pdf, dict(md_filename="answer.md", pdf_filename="answer.pdf"))
-        if contract.file_output == "pdf"
-        else None
-    )
-    return _render_artifact(context, contract, text, conversion)
+    return _render_artifact(context, text)
 
 
 async def submit_background():

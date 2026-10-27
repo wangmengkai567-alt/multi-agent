@@ -1,32 +1,62 @@
-"""Bound synchronous waits without pretending a timed-out operation was rolled back."""
+"""Cooperative tool deadlines; blocking providers run in owned, killable processes."""
 
-from concurrent.futures import Future
-from concurrent.futures import TimeoutError as FutureTimeout
-from contextvars import copy_context
-from threading import BoundedSemaphore, Thread
+from contextlib import contextmanager
+from contextvars import ContextVar
+from threading import Event, RLock
+from time import monotonic
 
+from agent.runtime.context import get_run_context
 from agent.runtime.recovery import ToolCallTimeout
 
-_slots = BoundedSemaphore(8)
+active_tool_scope = ContextVar("active_tool_scope", default=None)
 
 
-def invoke_bounded(handler, request, seconds):
-    if not _slots.acquire(timeout=seconds):
-        raise ToolCallTimeout(request.tool_call["name"], seconds)
-    future, context = Future(), copy_context()
+class ToolScope:
+    def __init__(self, name, seconds):
+        self.name, self.seconds = name, seconds
+        self.deadline = monotonic() + seconds if seconds is not None else None
+        self.cancelled, self.lock, self.workers = Event(), RLock(), set()
 
-    def execute():
-        try:
-            future.set_result(context.run(handler, request))
-        except BaseException as error:
-            future.set_exception(error)
-        finally:
-            _slots.release()
+    def check(self):
+        context = get_run_context()
+        if context is not None:
+            context.check_active()
+        if self.cancelled.is_set() or self.deadline is not None and monotonic() >= self.deadline:
+            raise ToolCallTimeout(self.name, self.seconds or 0)
 
-    Thread(target=execute, daemon=True, name="bounded-tool").start()
+    def attach(self, worker):
+        with self.lock:
+            self.check()
+            self.workers.add(worker)
+
+    def detach(self, worker):
+        with self.lock:
+            self.workers.discard(worker)
+
+    def close(self):
+        self.cancelled.set()
+        with self.lock:
+            workers = list(self.workers)
+        failure = None
+        for worker in workers:
+            try:
+                worker.close()
+            except Exception as error:
+                failure = error
+        if failure is not None:
+            raise failure
+
+
+@contextmanager
+def bounded_tool(name, seconds):
+    scope = ToolScope(name, seconds)
+    token = active_tool_scope.set(scope)
     try:
-        return future.result(timeout=seconds)
-    except FutureTimeout as error:
-        if future.done():
-            raise
-        raise ToolCallTimeout(request.tool_call["name"], seconds) from error
+        scope.check()
+        yield scope
+        scope.check()
+    finally:
+        try:
+            scope.close()
+        finally:
+            active_tool_scope.reset(token)

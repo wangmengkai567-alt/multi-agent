@@ -1,6 +1,7 @@
 """Project the locked execution policy into model tools and actual admission."""
 
 from copy import deepcopy
+from pathlib import Path
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.tools import BaseTool
@@ -9,7 +10,7 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from agent.runtime.context import get_run_context
 from agent.runtime.evidence_protocol import adapter_for_tool
 
-FILE_ACTIONS = frozenset(("write_file", "edit_file", "generate_markdown", "convert_md_to_pdf"))
+FILE_ACTIONS = frozenset(("write_file", "edit_file", "generate_markdown"))
 RESEARCH_ACTIONS = frozenset(("task", "plan_research", "research_step", "submit_research_job"))
 NETWORK_ACTIONS = frozenset(
     ("plan_research", "research_step", "internet_search", "read_web_page", "submit_research_job")
@@ -24,6 +25,17 @@ def expert_available(context, target, spec):
     if target in context.unavailable_agents or not context.collecting:
         return False
     contract = context.task_contract
+    from agent.runtime.preflight import unavailable
+
+    if unavailable(context, spec.execution.source_kind):
+        return False
+    readers = [row for key, row in context.capability_preflight.items() if key.startswith("document:")]
+    if (
+        any(tool.name == "read_document" for tool in spec.tools)
+        and readers
+        and all(row["status"] == "unavailable" for row in readers)
+    ):
+        return False
     if spec.execution.network_access and (
         context.network_policy == "forbidden" or contract is not None and not contract.network_allowed
     ):
@@ -35,6 +47,12 @@ def tool_available(context, name, *, network=False, target_specs=None):
     if context is None:
         return True
     contract = context.task_contract
+    from agent.runtime.preflight import unavailable
+
+    if name in ("list_sql_tables", "get_table_data", "execute_sql_query") and unavailable(context, "db"):
+        return False
+    if (network or name in NETWORK_ACTIONS) and unavailable(context, "search"):
+        return False
     if contract is not None and (contract.delivery_kind != "grounded" or name in FILE_ACTIONS):
         return False
     if name == "execute":
@@ -81,6 +99,24 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 name, network = schema["function"]["name"], False
             if not tool_available(context, name, network=network, target_specs=self.target_specs):
                 continue
+            if name == "read_document" and context.task_contract is not None:
+                from agent.runtime.preflight import unavailable
+
+                filenames = [
+                    material.reference
+                    for material in context.task_contract.materials
+                    if material.kind == "upload"
+                    and not unavailable(context, "document:" + Path(material.reference).suffix.lower())
+                ]
+                if not filenames:
+                    continue
+                schema = deepcopy(convert_to_openai_tool(tool))
+                schema["function"]["parameters"]["properties"]["filename"]["enum"] = filenames
+                tool = (
+                    tool.model_copy(update={"args_schema": schema["function"]["parameters"]})
+                    if isinstance(tool, BaseTool)
+                    else schema
+                )
             if name == "task":
                 targets = {
                     target: spec

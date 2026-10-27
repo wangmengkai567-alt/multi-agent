@@ -70,10 +70,7 @@ async def _run_body(record, context):
     try:
         context.check_active()
         pipeline.emit("before_run", HookCall("main", context.run_id))
-        if context.resume_graph:
-            answer = await run_deep_agent(record["question"], context.thread_id, resume=True)
-        else:
-            answer = await run_deep_agent(record["question"], context.thread_id)
+        answer = await run_deep_agent(record["question"], context.thread_id)
         context.check_active()
         answer = await finalize_answer(context, answer)
         context.check_active()
@@ -191,7 +188,7 @@ async def runtime_lifespan(app):
         output_dir.mkdir(exist_ok=True)
         app.state.job_service = await JobService.open(
             run_db_path.with_name("jobs.db"),
-            {"research": _research_job, "pdf_conversion": _conversion_job},
+            {"research": _research_job},
             output_dir / "background-jobs",
             scheduler=app.state.scheduler,
             run_store=store,
@@ -535,12 +532,6 @@ async def resolve_user_goal(thread_id, message):
     return message
 
 
-async def _conversion_job(job):
-    from agent.runtime.artifact_jobs import convert_document
-
-    return await convert_document(job, app.state.job_service, output_dir)
-
-
 async def _research_job(job):
     from agent.runtime.checkpoints import save_job_checkpoint
     from agent.runtime.contracts import CONTRACT_VERSION, TaskContract, background_eligible
@@ -590,41 +581,50 @@ async def _research_job(job):
         scheduler=app.state.scheduler,
         research_scope_id=job["task_id"],
         enforce_plan=True,
-        resume_graph=job["attempts"] > 0,
         job_checkpoint_path=directory / "job-checkpoint.json",
     )
     app.state.job_service.contexts[job["task_id"]] = context
     checkpoint_loaded = False
     try:
+        if job["attempts"] > 0 and not context.job_checkpoint_path.is_file():
+            raise RunStopped("当前任务检查点缺失，无法证明剩余预算；拒绝自动重新开始")
         restore_job_checkpoint(context)
+        if not context.recovering:
+            from agent.runtime.capacity import initialize
+
+            initialize(context, saved_contract)
         if context.resume_source_run_id:
             previous = await app.state.run_store.get(context.resume_source_run_id)
             if not previous or previous["thread_id"] != context.thread_id:
                 raise RunStopped("Checkpoint source run does not belong to the owned execution thread")
-        checkpoint_loaded = True
+        from agent.runtime.recovery_state import reconcile_result_history
         from agent.runtime.review_state import ReviewState
 
-        for task in context.search_tasks.values():
+        await reconcile_result_history(context)
+        from agent.runtime.recovery_state import result_review_state
+
+        for task_id, task in context.search_tasks.items():
             if task.current_result_id:
                 persisted = await app.state.run_store.get_current_result(
                     task.current_result_id, task.result_run_id, context.thread_id
                 )
                 if (
                     persisted is None
-                    or ReviewState.from_record(persisted) != task.state
+                    or result_review_state(context, persisted, task_id) != task.state
                     or persisted["review"].get("accepted_report") != task.report
                 ):
                     context.stop("interrupted")
                     raise RunStopped("恢复结果与数据库权威快照不一致")
-            if not task.state.judged:
-                task.closed_reason = None
+                context.recovered_results[persisted["result_id"]] = persisted
         for item in context.approved_internal.values():
             import copy
 
             persisted = await app.state.run_store.get_current_result(
                 item["result_id"], item["result_run_id"], context.thread_id
             )
-            if persisted is None or ReviewState.from_record(persisted) != ReviewState.model_validate(item["state"]):
+            if persisted is None or result_review_state(
+                context, persisted, item["task_id"]
+            ) != ReviewState.model_validate(item["state"]):
                 context.stop("interrupted")
                 raise RunStopped("恢复内部结果与数据库当前快照不一致")
             report = copy.deepcopy(persisted["review"].get("accepted_report"))
@@ -638,6 +638,15 @@ async def _research_job(job):
             if report != item["report"]:
                 context.stop("interrupted")
                 raise RunStopped("恢复内部报告内容与数据库不一致")
+            context.recovered_results[persisted["result_id"]] = persisted
+        from agent.results import ResultService
+
+        for result_id in context.recovered_results:
+            await ResultService().read_raw(context, result_id)
+        from agent.runtime.measurement import persist
+
+        checkpoint_loaded = True
+        persist(context)
         await _execute_run(dict(record, question=context.user_query), context)
     except Exception as error:
         from agent.runtime.jobs import JobFailed
@@ -737,6 +746,55 @@ async def get_run(run_id: str):
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
     return await _with_completion(record)
+
+
+def _requirement_context(run_id):
+    context = app.state.run_contexts.get(run_id)
+    if context is None:
+        service = getattr(app.state, "job_service", None)
+        context = (
+            next((value for value in list(service.contexts.values()) if value.run_id == run_id), None)
+            if service is not None
+            else None
+        )
+    return context
+
+
+@app.get("/api/runs/{run_id}/requirements")
+async def get_requirements(run_id: str):
+    from agent.runtime.requirement_changes import requirement_snapshot
+
+    record = await app.state.run_store.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    context = _requirement_context(run_id)
+    if context is not None:
+        with context.budget_lock:
+            return requirement_snapshot(context)
+    path = resource_path("requirement-state.json", resource_path(record["workspace"], output_dir))
+    if not path.is_file():
+        raise HTTPException(status_code=409, detail="No persisted requirement snapshot is available")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+from agent.runtime.requirement_changes import RequirementChange  # noqa: E402
+
+
+@app.post("/api/runs/{run_id}/requirements")
+async def change_requirements(run_id: str, change: RequirementChange):
+    from agent.runtime.requirement_changes import stage_change
+
+    async with app.state.submission_lock:
+        record = await app.state.run_store.get(run_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        context = _requirement_context(run_id)
+        if record["status"] != "running" or context is None:
+            raise HTTPException(status_code=409, detail="Requirement changes need the live running context")
+        try:
+            return stage_change(context, change)
+        except (ValueError, RunStopped) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @app.post("/api/runs/{run_id}/cancel")

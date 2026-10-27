@@ -456,7 +456,7 @@ class DelegationRunnable(Runnable):
             from agent.runtime.experts import bind_registry
 
             bind_registry(context, self.registry)
-        if not context or not context.background_job or not context.resume_graph or not self.spec.execution.planned:
+        if not context or not context.background_job or not context.recovering or not self.spec.execution.planned:
             return None
         from agent.runtime.task_plan import resolve_task
 
@@ -529,6 +529,10 @@ class DelegationRunnable(Runnable):
                 dependency = None
                 try:
                     try:
+                        if not isinstance(current, ReviewOnly):
+                            from agent.runtime.preflight import ensure_expert
+
+                            ensure_expert(context, self.spec)
                         result = (
                             current.result
                             if isinstance(current, ReviewOnly)
@@ -639,6 +643,10 @@ class DelegationRunnable(Runnable):
                 dependency = None
                 try:
                     try:
+                        if not isinstance(current, ReviewOnly):
+                            from agent.runtime.preflight import aensure_expert
+
+                            await aensure_expert(context, self.spec)
                         result = (
                             current.result
                             if isinstance(current, ReviewOnly)

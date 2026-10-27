@@ -4,24 +4,69 @@ import json
 from dataclasses import asdict
 from hashlib import sha256
 from pathlib import Path
-from uuid import uuid4
+from tempfile import NamedTemporaryFile
 
 from agent.runtime.contracts import CHECKPOINT_VERSION
+
+CHECKPOINT_FIELDS = (
+    "call_counts",
+    "collection_states",
+    "answer_repair_attempted",
+    "answer_citation_repair_attempted",
+    "coverage",
+    "query_version",
+    "query_history",
+    "pending_requirement_change",
+    "upload_reads",
+    "document_coverage",
+    "objects",
+    "requirement_links",
+    "requirements",
+    "coverage_rows",
+    "gaps",
+    "research_cache",
+    "evidence_snapshots",
+    "quote_registry",
+    "request_ledger",
+    "attempt_ledger",
+    "outbound",
+    "review_cache",
+    "revision_reservations",
+    "capacity_reservations",
+    "expert_tasks",
+    "delivery_draft",
+    "collecting",
+    "turn_counts",
+    "original_call_ids",
+    "task_scopes",
+    "expert_contract",
+    "accepted_plan",
+    "plan_version",
+    "plan_expansions",
+    "plan_closed",
+    "approved_internal",
+)
 
 
 def write_json(path, value):
     from agent.results import clean
 
+    write_state_json(path, clean(value))
+
+
+def write_state_json(path, value):
+    """Persist exact internal state; redaction must never change digests or recovery inputs."""
     path = Path(path).resolve()
     import os
 
     if os.name == "nt" and not str(path).startswith("\\\\?\\"):
         path = Path("\\\\?\\" + str(path))
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(".write-" + uuid4().hex[:12] + ".tmp")
-    raw = json.dumps(clean(value), ensure_ascii=False, indent=2).replace("\n", "\r\n") + "\r\n"
+    temporary = None
+    raw = json.dumps(value, ensure_ascii=False, indent=2).replace("\n", "\r\n") + "\r\n"
     try:
-        with temporary.open("xb") as stream:
+        with NamedTemporaryFile(mode="wb", prefix=".write-", suffix=".tmp", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
             stream.write(raw.encode("utf-8"))
             stream.flush()
             import os
@@ -29,7 +74,8 @@ def write_json(path, value):
             os.fsync(stream.fileno())
         temporary.replace(path)
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def save_job_checkpoint(context):
@@ -42,45 +88,12 @@ def save_job_checkpoint(context):
             item["state"] = task.state.model_dump()
             item["calls"], item["page_calls"] = sorted(task.calls), sorted(task.page_calls)
             tasks[key] = item
-        fields = (
-            "call_counts",
-            "collection_states",
-            "answer_repair_attempted",
-            "answer_citation_repair_attempted",
-            "coverage",
-            "query_version",
-            "objects",
-            "requirement_links",
-            "requirements",
-            "coverage_rows",
-            "gaps",
-            "research_cache",
-            "evidence_snapshots",
-            "quote_registry",
-            "request_ledger",
-            "attempt_ledger",
-            "outbound",
-            "review_cache",
-            "revision_reservations",
-            "capacity_reservations",
-            "expert_tasks",
-            "delivery_draft",
-            "collecting",
-            "turn_counts",
-            "original_call_ids",
-            "task_scopes",
-            "expert_contract",
-            "accepted_plan",
-            "plan_version",
-            "plan_expansions",
-            "plan_closed",
-            "approved_internal",
-        )
         from agent.runtime.skills import save_skill_context
 
-        data = {key: getattr(context, key) for key in fields}
+        data = {key: getattr(context, key) for key in CHECKPOINT_FIELDS}
         data.update(
             skill_context=save_skill_context(context),
+            reference_time=context.reference_time.isoformat(),
             execution_run_id=context.run_id,
             terminal_failure=type(context.terminal_error).__name__ if context.terminal_error is not None else None,
             owner_id=context.owner_id,
@@ -96,7 +109,7 @@ def save_job_checkpoint(context):
             search_calls=sorted(context.search_calls),
             tasks=tasks,
         )
-        write_json(context.job_checkpoint_path, data)
+        write_state_json(context.job_checkpoint_path, data)
 
 
 def restore_job_checkpoint(context):
@@ -137,16 +150,35 @@ def restore_job_checkpoint(context):
     saved_contract = data["task_contract"]
     restored_contract = TaskContract.model_validate_json(json.dumps(saved_contract)) if saved_contract else None
     if context.task_contract is not None and context.task_contract != restored_contract:
-        context.stop("interrupted")
-        raise RunStopped("Checkpoint changed the originally authorized task contract")
+        history = data["query_history"]
+        same_permissions = restored_contract is not None and (
+            context.task_contract.model_dump(exclude={"instruction_text", "operation"})
+            == restored_contract.model_dump(exclude={"instruction_text", "operation"})
+        )
+        if not (
+            same_permissions
+            and history
+            and restored_contract.operation == restored_contract.instruction_text
+            and history[0]["instruction"] == context.task_contract.instruction_text
+            and all(entry["actor"] == "user" for entry in history)
+        ):
+            context.stop("interrupted")
+            raise RunStopped("Checkpoint changed the originally authorized task contract")
     context.task_contract = restored_contract
     if context.task_contract is not None:
         for material in context.task_contract.materials:
             if material.kind == "previous":
                 context.previous_run_id, context.previous_answer = material.reference, material.text
         assert_contract(context)
+    from datetime import datetime
+
+    context.reference_time = datetime.fromisoformat(data["reference_time"])
+    if context.reference_time.tzinfo is None:
+        raise RunStopped("Checkpoint reference time has no time zone")
     context.resume_source_run_id = data["execution_run_id"]
+    context.recovering = True
     special = {
+        "reference_time",
         "checkpoint_schema_version",
         "skill_context",
         "terminal_failure",
@@ -161,9 +193,12 @@ def restore_job_checkpoint(context):
         "task_contract",
         "source_policy_version",
     }
-    for key, value in data.items():
-        if key not in special:
-            setattr(context, key, value)
+    expected = set(CHECKPOINT_FIELDS) | special | {"input_text", "network_policy"}
+    if set(data) != expected:
+        context.stop("interrupted")
+        raise RunStopped("Checkpoint fields do not match the current canonical schema")
+    for key in CHECKPOINT_FIELDS:
+        setattr(context, key, data[key])
     from agent.runtime.policies import MissingConfiguration
     from agent.runtime.skills import restore_skill_context
 
@@ -207,8 +242,12 @@ def restore_job_checkpoint(context):
     if observed[: len(context.outbound)] != context.outbound:
         context.stop("interrupted")
         raise RunStopped("Checkpoint transport journal mismatch")
-    for entry in observed:
+    observed_ids = set()
+    for number, entry in enumerate(observed, 1):
         key = f"{entry['kind']}:{entry['call_id']}:{entry['attempt']}"
+        if entry["send_seq"] != number or key in observed_ids:
+            raise RunStopped("Transport journal contains duplicate or out-of-order sends")
+        observed_ids.add(key)
         row = context.attempt_ledger.get(key)
         if row is None or row["run_id"] != entry["run_id"] or row["request_key"] != entry["request_key"]:
             context.stop("interrupted")
@@ -221,8 +260,11 @@ def restore_job_checkpoint(context):
             row["status"] = "uncertain"
             row["outcome"] = "uncertain"
     from agent.runtime.capacity import validate_restored
-    from agent.runtime.measurement import persist
+    from agent.runtime.recovery_state import validate_accounting
 
+    validate_accounting(context)
     validate_restored(context)
+    from agent.runtime.requirement_changes import validate_versions
+
+    validate_versions(context)
     context.restored_reservation_owners = set(context.revision_reservations)
-    persist(context)

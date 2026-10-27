@@ -15,6 +15,18 @@ class ToolCallTimeout(TimeoutError):
         super().__init__(f"工具 {name} 单次调用超时（{seconds:g} 秒）；执行结果可能尚未确定")
 
 
+def is_transport_timeout(error):
+    import httpx
+    import requests
+
+    return (
+        isinstance(error, TimeoutError | requests.Timeout | httpx.TimeoutException)
+        or type(error).__module__ == "tavily.errors"
+        and type(error).__name__ == "TimeoutError"
+        or getattr(error, "timed_out", False) is True
+    )
+
+
 def http_status(error):
     response = getattr(error, "response", None)
     return getattr(response, "status_code", None) or getattr(error, "status_code", None)

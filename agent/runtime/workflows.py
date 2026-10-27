@@ -2,7 +2,6 @@
 
 import json
 from hashlib import sha256
-from pathlib import Path
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
@@ -12,7 +11,7 @@ from agent.runtime.events import EventPersistenceError, make_event
 from utils.secure_paths import confined_path, resolve_run_path, validate_filename
 
 SOURCES = ("db", "search")
-OUTPUT_TOOLS = ("generate_markdown", "convert_md_to_pdf", "write_file", "edit_file")
+OUTPUT_TOOLS = ("generate_markdown", "write_file", "edit_file")
 DEGRADED_NOTICE = (
     "【降级分析】数据库依赖不可用，本轮没有可用内部经营指标。以下仅为外部检索材料，不构成内部数据与市场的有效对照。"
 )
@@ -110,10 +109,12 @@ async def snapshot(context):
     run = await sink.store.get(context.run_id)
     if run is None or run["thread_id"] != context.thread_id or run["status"] not in ("queued", "running"):
         raise refusal("run_ended", "本轮已结束，不再启动新动作。")
-    usable = await sink.store.list_results(context.run_id, thread_id=context.thread_id, purpose="handoff")
+    from agent.runtime.recovery_state import owned_results
+
+    usable = await owned_results(context, purpose="handoff")
     for row in usable:
         await ResultService().read_raw(context, row["result_id"])
-    all_rows = await sink.store.list_results(context.run_id, thread_id=context.thread_id)
+    all_rows = await owned_results(context)
     tasks = await sink.store.list_subtasks(context.run_id)
     from agent.runtime.experts import source_kind
 
@@ -129,10 +130,17 @@ async def snapshot(context):
         and r["check_status"] == "dependency_unavailable"
         and r["call_id"] in ended
     ]
+    events = await sink.store.list_events(context.run_id)
+    failures.extend(
+        event["call_id"]
+        for event in events
+        if event["event"] == "capability_preflight"
+        and event["data"].get("capability") == "db"
+        and event["status"] == "unavailable"
+    )
     degraded = (
         context.business_mode == "internal_external" and not source_ids["db"] and bool(failures) and not active_db
     )
-    events = await sink.store.list_events(context.run_id)
     linked = set()
     for event in events:
         if event["event"] != "result_handoff":
@@ -279,10 +287,6 @@ def report_check(context, data, call=None):
             and sha256(call.args["content"].encode()).hexdigest() == draft["reviewed_content_digest"]
         ):
             return
-        if name == "convert_md_to_pdf":
-            source = resolve_run_path(str(Path(call.args["md_filename"]).with_suffix(".md")))
-            if source.is_file() and sha256(source.read_bytes()).hexdigest() == draft.get("reviewed_markdown_digest"):
-                return
         raise refusal("delivery_content_changed", "文件交付只能使用与终审一致的正文。")
     missing = data["missing_sources"] if data else required_sources(context)
     unread = data["unread_uploads"] if data else list(context.required_uploads)
@@ -304,6 +308,58 @@ def before_tool_workflow(call):
     emit(context, "report_allowed", call, source_ids=data["source_ids"], degraded=data["degraded"])
 
 
+def _range_covered(extent, ranges):
+    """Check a rectangle union by row boundaries, without enumerating empty cells."""
+    top, bottom, left, right = extent
+    if bottom < top or right < left:
+        return True
+    clipped = [
+        (max(top, a), min(bottom, b), max(left, c), min(right, d))
+        for a, b, c, d in ranges
+        if a <= bottom and b >= top and c <= right and d >= left
+    ]
+    boundaries = sorted({top, bottom + 1, *(r for a, b, _, _ in clipped for r in (a, b + 1))})
+    for start, end in zip(boundaries, boundaries[1:], strict=False):
+        cursor = left
+        for col_start, col_end in sorted((c, d) for a, b, c, d in clipped if a <= start and b >= end - 1):
+            if col_start > cursor:
+                return False
+            cursor = max(cursor, col_end + 1)
+        if cursor <= right:
+            return False
+    return True
+
+
+def _document_read_complete(context, file, digest, artifact):
+    from agent.runtime.evidence_protocol import DocumentArtifact, validate_input
+
+    data = DocumentArtifact.model_validate(artifact)
+    source = validate_input(data.document, context)
+    if source.path != file.relative_to(context.work_dir.resolve()).as_posix() or source.sha256 != digest:
+        raise ValueError("Document read does not match the current upload")
+    coverage = data.coverage
+    if coverage.scope == "catalog":
+        return False
+    if not coverage.extents:
+        return coverage.complete and not coverage.missing
+    with context.budget_lock:
+        key = str(file)
+        state = context.document_coverage.get(key)
+        if state is None or state["sha256"] != digest:
+            state = dict(sha256=digest, parser=source.parser, extents=coverage.extents, ranges={}, missing=[])
+            context.document_coverage[key] = state
+        if state["extents"] != coverage.extents or state["parser"] != source.parser:
+            raise ValueError("Document coverage metadata changed for the same input snapshot")
+        state["missing"] = sorted(set(state["missing"]) | set(coverage.missing))
+        for target, bounds in coverage.read_ranges.items():
+            ranges = state["ranges"].setdefault(target, [])
+            if bounds not in ranges:
+                ranges.append(bounds)
+        return not state["missing"] and all(
+            _range_covered(extent, state["ranges"].get(target, [])) for target, extent in state["extents"].items()
+        )
+
+
 def after_tool_workflow(call):
     context = get_run_context()
     if not guarded(context) or not call.executed or call.status != "completed":
@@ -323,6 +379,19 @@ def after_tool_workflow(call):
             return
         raw = file.read_bytes()
         digest = sha256(raw).hexdigest()
+        if name in ("read_document", "read_file_content"):
+            if name == "read_document":
+                from agent.runtime.checkpoints import save_job_checkpoint
+
+                artifacts = [m.artifact for m in messages if isinstance(m, ToolMessage) and m.artifact is not None]
+                if len(artifacts) != 1:
+                    return
+                complete = _document_read_complete(context, file, digest, artifacts[0])
+                if not complete:
+                    save_job_checkpoint(context)
+                    return
+            elif file.suffix.lower() in (".docx", ".pdf", ".xlsx", ".xls"):
+                return  # Inspection is not the document expert's located evidence.
         if name == "read_file":
             try:
                 total = len(raw.decode("utf-8").splitlines())
@@ -336,6 +405,9 @@ def after_tool_workflow(call):
                     return
         with context.budget_lock:
             context.upload_reads[str(file)] = digest
+        from agent.runtime.checkpoints import save_job_checkpoint
+
+        save_job_checkpoint(context)
         emit(context, "upload_read", call, file_sha256=digest)
 
 

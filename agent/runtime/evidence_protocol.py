@@ -9,7 +9,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PROTOCOL_VERSION = 1
 METADATA_KEY = "evidence_adapter"
@@ -42,10 +42,32 @@ class CalculationSection(DocumentSection):
     parameters: dict
 
 
+class DocumentCoverage(ArtifactModel):
+    complete: bool
+    scope: Literal["catalog", "selection", "supported_content"]
+    missing: list[str]
+    limitations: list[str]
+    catalog: list[dict]
+    extents: dict[str, list[int]]
+    read_ranges: dict[str, list[int]]
+
+    @model_validator(mode="after")
+    def coherent_ranges(self):
+        if set(self.read_ranges) - set(self.extents):
+            raise ValueError("Document reads must belong to declared coverage extents")
+        for bounds in [*self.extents.values(), *self.read_ranges.values()]:
+            if len(bounds) != 4 or bounds[0] < 1 or bounds[2] < 1 or bounds[1] < 0 or bounds[3] < 0:
+                raise ValueError("Document coverage requires four valid row/column bounds")
+        if self.scope == "catalog" and self.read_ranges:
+            raise ValueError("A catalog cannot contribute content coverage")
+        return self
+
+
 class DocumentArtifact(ArtifactModel):
     document: DocumentInput
     sections: list[DocumentSection]
     calculations: list[CalculationSection]
+    coverage: DocumentCoverage
 
 
 class CalculationArtifact(ArtifactModel):
@@ -258,7 +280,10 @@ def _document(content, artifact, call):
         if item.content.strip()
     ]
     rows.extend(_calculation_rows(data.calculations, [source]))
-    return rows, "" if rows else "No extractable text was returned; scanned pages are not OCR evidence"
+    if data.coverage.complete and (data.coverage.scope != "supported_content" or data.coverage.missing):
+        raise EvidenceError("Document extraction completeness contradicts its declared selection")
+    note = json.dumps(data.coverage.model_dump(), ensure_ascii=False)
+    return rows, note
 
 
 def _calculation(content, artifact, call):

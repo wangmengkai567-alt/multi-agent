@@ -126,7 +126,7 @@ async def shutdown_agent():
 project_root_path = Path(__file__).parents[1].resolve()
 
 
-async def run_deep_agent(task_query, session_id, *, resume=False):
+async def run_deep_agent(task_query, session_id):
     """Run the root graph using this round's context and output directory."""
     validate_identifier(session_id)
     context = get_run_context()
@@ -182,7 +182,8 @@ async def run_deep_agent(task_query, session_id, *, resume=False):
         if context.execution_mode == "foreground":
             path_instruction += "\n当前明确前台执行：不要提交后台任务；直接登记研究对象并完成查询和交付。"
         path_instruction += instruction(context)
-        config = {"configurable": {"thread_id": context.research_scope_id}}
+        # Each execution gets a new graph frame; the canonical checkpoint owns continuation.
+        config = {"configurable": {"thread_id": context.research_scope_id + ":" + context.run_id}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))
         stream_input = {
@@ -206,14 +207,6 @@ async def run_deep_agent(task_query, session_id, *, resume=False):
                     ]
                 )
             }
-        if resume:
-            previous = await agent.aget_state(config)
-            if previous.values:
-                if not previous.next:
-                    final = previous.values.get("messages", [])[-1]
-                    if isinstance(final, AIMessage) and not final.tool_calls:
-                        return final.text
-                stream_input = None
         stream = agent.astream(
             stream_input,
             config=config,

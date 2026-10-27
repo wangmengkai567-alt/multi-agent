@@ -23,6 +23,9 @@ class RunContext:
     deadline: datetime | None = None
     reference_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
     unavailable_agents: dict[str, str] = field(default_factory=dict, repr=False)
+    capability_preflight: dict = field(default_factory=dict, repr=False)
+    preflight_complete: bool = False
+    preflight_lock: object = field(default_factory=RLock, repr=False)
     deadline_clock: float | None = None
     stop_status: str | None = None
     terminal_error: ExecutionTerminated | None = field(default=None, repr=False)
@@ -38,6 +41,7 @@ class RunContext:
     workflow: dict | None = field(default=None, repr=False)
     upload_reads: dict = field(default_factory=dict, repr=False)
     upload_coverage: dict = field(default_factory=dict, repr=False)
+    document_coverage: dict = field(default_factory=dict, repr=False)
     skill_states: set = field(default_factory=set, repr=False)
     skill_reads: dict = field(default_factory=dict, repr=False)
     skill_versions: dict = field(default_factory=dict, repr=False)
@@ -50,6 +54,8 @@ class RunContext:
     answer_citation_repair_attempted: bool = False
     coverage: str = "unknown"
     query_version: int = 1
+    query_history: list = field(default_factory=list, repr=False)
+    pending_requirement_change: dict | None = field(default=None, repr=False)
     research_scope_id: str = ""
     resume_source_run_id: str | None = None
     objects: dict = field(default_factory=dict, repr=False)
@@ -92,7 +98,8 @@ class RunContext:
     job_checkpoint_path: Path | None = field(default=None, repr=False)
     job_checkpoint_closed: bool = False
     collecting: bool = True
-    resume_graph: bool = False
+    recovering: bool = False
+    recovered_results: dict = field(default_factory=dict, repr=False)
     partial_answer: bool = False
     accepted_plan: bool = False
     scheduler_ticket: str | None = None

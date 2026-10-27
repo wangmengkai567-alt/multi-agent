@@ -142,12 +142,22 @@ class ResultService:
                 review=clean(review.model_dump() if review is not None else dict(verdict=verdict)),
                 published=publishable(state, summary),
             )
+            from agent.runtime.recovery_state import task_identity
+
             event = make_event(
                 context.thread_id,
                 context.run_id,
                 "result_saved",
                 "查询结果与检查状态已保存",
-                dict(result_id=result_id, source=call.target, attempt=attempt, check_status=verdict),
+                dict(
+                    result_id=result_id,
+                    source=call.target,
+                    attempt=attempt,
+                    check_status=verdict,
+                    task_id=call.search_task_key,
+                    scope_version=context.query_version,
+                    task_identity=task_identity(context, call.search_task_key),
+                ),
                 actor=call.target,
                 status=verdict,
                 call_id=call.call_id,
@@ -167,7 +177,9 @@ class ResultService:
         if sink is None:
             return inputs
         await sink.flush(context.run_id)
-        records = await sink.store.list_results(context.run_id, thread_id=context.thread_id, purpose="handoff")
+        from agent.runtime.recovery_state import owned_results
+
+        records = await owned_results(context, purpose="handoff")
         from agent.runtime.experts import source_kind
 
         internal = [r for r in records if source_kind(context, r["source"]) == "db"]
@@ -245,7 +257,11 @@ class ResultService:
     async def read_raw(self, context, result_id):
         if context.event_sink is None:
             raise ValueError("Result storage is not configured")
-        record = await context.event_sink.store.get_result(result_id, context.run_id, context.thread_id)
+        record = (
+            context.recovered_results.get(result_id)
+            if result_id in context.recovered_results
+            else await context.event_sink.store.get_result(result_id, context.run_id, context.thread_id)
+        )
         if record is None:
             raise ValueError("Result is not in this run/session")
         raw = (

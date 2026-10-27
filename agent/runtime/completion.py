@@ -18,14 +18,9 @@ def validate_delivery(context, answer):
         raise RuntimeError("Requested artifact has not been delivered")
     if artifact["content_digest"] != draft["reviewed_content_digest"]:
         raise RuntimeError("Artifact does not belong to reviewed content")
-    if artifact["status"] == "working":
-        job = context.pending_jobs.get(artifact.get("task_id"))
-        if contract.file_output == "pdf" and job and job["kind"] == "pdf_conversion" and job["status"] == "working":
-            return
-        raise RuntimeError("Artifact is not linked to an owned pending conversion")
     if artifact["status"] != "completed":
         raise RuntimeError("Requested artifact did not complete")
-    path = context.work_dir / ("answer.md" if contract.file_output == "markdown" else "answer.pdf")
+    path = context.work_dir / "answer.md"
     if (
         not path.is_file()
         or not path.stat().st_size
@@ -41,15 +36,13 @@ def completion_snapshot(context, execution_status):
     review = "passed" if draft.get("reviewed_content_digest") else "not_passed"
     delivery = "not_requested" if contract and contract.file_output == "none" else "unknown"
     if artifact:
-        delivery = "pending" if artifact["status"] == "working" else artifact["status"]
+        delivery = artifact["status"]
     coverage = getattr(context, "coverage", "unknown")
     if execution_status != "completed":
         status = execution_status
     elif contract and contract.delivery_kind == "clarification":
         status = "input_required"
     elif any(job["kind"] == "research" for job in getattr(context, "pending_jobs", {}).values()):
-        status = "pending"
-    elif delivery == "pending":
         status = "pending"
     elif (
         review != "passed"
@@ -78,16 +71,6 @@ def resolve_completion(completion, jobs):
     for job in jobs:
         if job["status"] in ("failed", "cancelled", "timed_out", "interrupted"):
             value.update(status=job["status"], error=job.get("error"))
-            if job["kind"] == "pdf_conversion":
-                value["delivery_status"] = job["status"]
-                value["error"] = dict(
-                    error_category="conversion_failed",
-                    stage="background_conversion",
-                    tool_name="convert_md_to_pdf",
-                    call_id=(value.get("artifact") or {}).get("call_id"),
-                    task_id=job["task_id"],
-                    message=job.get("error") or job["status"],
-                )
             return value
     if any(job["status"] == "input_required" for job in jobs):
         value["status"] = "input_required"
@@ -104,19 +87,6 @@ def resolve_completion(completion, jobs):
             return value
         value.update(deepcopy(child))
         value["execution_status"] = "completed"
-    artifact = value.get("artifact")
-    if artifact and artifact.get("task_id"):
-        conversion = next((job for job in jobs if job["task_id"] == artifact["task_id"]), None)
-        if conversion is None:
-            value["status"] = "unknown"
-            return value
-        artifacts = (conversion.get("result") or {}).get("artifacts", [])
-        if conversion["status"] == "completed" and any(item.get("relative_path") == "answer.pdf" for item in artifacts):
-            value["artifact"].update(status="completed", path="answer.pdf")
-            value["delivery_status"] = "completed"
-        else:
-            value["status"] = "unknown"
-            return value
     if value["review_status"] == "passed" and value["delivery_status"] in ("completed", "not_requested"):
         value["status"] = {"complete": "complete", "partial": "partial", "unknown": "unknown"}[value["coverage"]]
     return value

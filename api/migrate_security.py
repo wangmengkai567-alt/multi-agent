@@ -188,11 +188,6 @@ async def migrate(data, root):
                 raise RuntimeError("Historical job has no matching parent run; restore/repair from the backups")
             work_dir = resource_path(row[1], root / "output")
             payload = json.loads(job["payload"])
-            if job["kind"] == "pdf_conversion" and "work_dir" in payload:
-                if confined_path(payload.pop("work_dir"), root / "output") != work_dir:
-                    raise RuntimeError("Historical conversion output directory is not owned by its parent run")
-                resource_path(payload["output_relative"], work_dir)
-                payload["conversion_version"] = 1
             result = json.loads(job["result"]) if job["result"] else None
             if result:
                 for artifact in result.get("artifacts", []):

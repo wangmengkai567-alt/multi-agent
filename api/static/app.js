@@ -491,7 +491,6 @@ async function syncJobs(session) {
     renderTabs();
     if (activeSessionId === session.runId) renderLog(session);
     const working = session.jobs.filter(j=>j.status === 'working');
-    if (session.jobs.some(job=>job.kind==='pdf_conversion' && job.status==='completed')) refreshFiles();
     if (working.length && typeof setTimeout === 'function') {
       clearTimeout(session.jobTimer);
       const delay = Math.max(1,...working.map(j=>j.poll_after_seconds || 3));
@@ -512,12 +511,11 @@ function renderJobs(session) {
   if (!area) return;
   const names = {working:'后台执行中',completed:'已完成',failed:'失败',cancelled:'已取消',input_required:'等待你的输入'};
   area.innerHTML = (session.jobs || []).map(job=>`<section class="agent-group" data-job="${escapeHtml(job.task_id)}">
-    <h3>${job.kind==='pdf_conversion'?'PDF 转换':'研究任务'} · ${escapeHtml(job.task_id.slice(0,8))} · ${escapeHtml(names[job.status] || job.status)}${job.result?.partial?' · 有限结果':''}</h3>
+    <h3>后台任务 · ${escapeHtml(job.task_id.slice(0,8))} · ${escapeHtml(names[job.status] || job.status)}${job.result?.partial?' · 有限结果':''}</h3>
     ${job.error?`<p>${escapeHtml(job.error)}</p>`:''}
     ${job.status==='working'?`<button class="btn" data-cancel-job="${escapeHtml(job.task_id)}">取消后台任务</button>`:''}
     ${job.status==='input_required'?`<label>补充信息 <input data-job-input="${escapeHtml(job.task_id)}"></label><button class="btn" data-resume-job="${escapeHtml(job.task_id)}">提交并继续</button>`:''}
     ${job.result?.answer?`<div data-job-answer="${escapeHtml(job.task_id)}"></div>`:''}
-    ${(job.result?.artifacts || []).map(file=>`<a class="btn" href="${escapeHtml(file.url)}" target="_blank" rel="noopener">下载 ${escapeHtml(file.name)}</a>`).join('')}
     ${job.execution_run_id?`<button class="btn" data-open-job="${escapeHtml(job.execution_run_id)}" data-job-thread="${escapeHtml(job.task_id)}">查看后台执行详情</button>`:''}
     </section>`).join('') + (session.jobError?`<p>${escapeHtml(session.jobError)}</p>`:'');
   for (const job of session.jobs || []) if (job.result?.answer) renderAnswer(area.querySelector(`[data-job-answer="${job.task_id}"]`),job.result.answer);

@@ -226,7 +226,7 @@ class JobService:
                     )
                     await self.connection.commit()
                 current["recovery_count"] = current.get("recovery_count", 0) + 1
-            heartbeat = asyncio.create_task(self.heartbeat(job["task_id"]))
+            heartbeat = asyncio.create_task(self.heartbeat(job["task_id"], asyncio.current_task()))
             try:
                 from agent.runtime.context import RunContext
                 from agent.runtime.policies import load_runtime_policy
@@ -256,15 +256,29 @@ class JobService:
                 await asyncio.gather(heartbeat, return_exceptions=True)
             return
 
-    async def heartbeat(self, task_id):
-        while True:
-            await asyncio.sleep(5)
-            async with self.lock:
-                await self.connection.execute(
-                    "UPDATE jobs SET lease_until=? WHERE task_id=? AND owner=? AND status='working'",
-                    ((datetime.now(UTC) + timedelta(seconds=15)).isoformat(), task_id, self.owner),
-                )
-                await self.connection.commit()
+    async def heartbeat(self, task_id, execution):
+        try:
+            while True:
+                await asyncio.sleep(5)
+                async with asyncio.timeout(9):
+                    async with self.lock:
+                        cursor = await self.connection.execute(
+                            "UPDATE jobs SET lease_until=? WHERE task_id=? AND owner=? AND status='working'",
+                            ((datetime.now(UTC) + timedelta(seconds=15)).isoformat(), task_id, self.owner),
+                        )
+                        renewed = cursor.rowcount == 1
+                        await cursor.close()
+                        await self.connection.commit()
+                if not renewed:
+                    raise JobFailed("后台任务执行租约已失效")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            context = self.contexts.get(task_id)
+            if context is not None:
+                context.stop("interrupted")
+            execution.cancel()
+            raise
 
     async def recover(self):
         async with self.lock:

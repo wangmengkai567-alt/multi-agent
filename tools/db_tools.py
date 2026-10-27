@@ -8,11 +8,11 @@ from contextlib import contextmanager
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
-from mysql.connector import connect
 
 from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.policies import (
     PolicyError,
+    SQLLimits,
     policy_for_run,
     request_timeout,
     require_db_credentials,
@@ -74,9 +74,9 @@ def validate_readonly_grants(grants, database):
 
 
 @contextmanager
-def readonly_cursor():
-    config = get_db_config()
-    limits = policy_for_run().sql
+def readonly_cursor(config, limits):
+    from mysql.connector import connect
+
     with connect(**config) as connection:
         try:
             with connection.cursor() as cursor:
@@ -90,13 +90,29 @@ def readonly_cursor():
             connection.rollback()
 
 
-def run_select(query):
-    bounded = validate_sql(query)
-    with readonly_cursor() as cursor:
-        cursor.execute(bounded)
+def execute_worker(payload):
+    limits = SQLLimits.model_validate(payload["limits"])
+    with readonly_cursor(payload["config"], limits) as cursor:
+        if payload["action"] in ("probe", "list"):
+            names = []
+            for name in limits.allowed_tables:
+                cursor.execute("SHOW TABLES LIKE %s", (name,))
+                row = cursor.fetchone()
+                if row and row[0] == name:
+                    names.append(name)
+            if payload["action"] == "probe":
+                if set(names) != set(limits.allowed_tables):
+                    from agent.runtime.errors import DependencyUnavailable
+
+                    raise DependencyUnavailable("Configured database tables are missing or inaccessible")
+                return {"tables_verified": len(names)}
+            return "可用的表有：" + ", ".join(names) if names else "没有可用的表"
+        if payload["action"] != "select":
+            raise ValueError("Unknown read-only database operation")
+        cursor.execute(validate_sql(payload["query"], limits))
         if not cursor.description:
             raise PolicyError("Query did not return a read-only result set")
-        rows = cursor.fetchmany(policy_for_run().sql.max_rows)
+        rows = cursor.fetchmany(limits.max_rows)
         output = io.StringIO(newline="")
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow([item[0] for item in cursor.description])
@@ -104,20 +120,27 @@ def run_select(query):
         return output.getvalue()
 
 
+def database_operation(action, **parameters):
+    from agent.runtime.workers import run_operation
+
+    limits = policy_for_run().sql
+    return run_operation(
+        "database",
+        dict(action=action, config=get_db_config(), limits=limits.model_dump(mode="json"), **parameters),
+        seconds=request_timeout(limits.timeout_seconds),
+    )
+
+
+def run_select(query):
+    return database_operation("select", query=validate_sql(query))
+
+
 @evidence_tool("sql.v1")
 @tool
 def list_sql_tables() -> str:
     """List only configured allowed tables in the current read-only database."""
     monitor.report_tool("数据库表名查询工具：list_sql_tables", {})
-    with readonly_cursor() as cursor:
-        # One exact lookup per permitted table; never return unrestricted metadata.
-        names = []
-        for name in policy_for_run().sql.allowed_tables:
-            cursor.execute("SHOW TABLES LIKE %s", (name,))
-            row = cursor.fetchone()
-            if row and row[0] == name:
-                names.append(name)
-        return "可用的表有：" + ", ".join(names) if names else "没有可用的表"
+    return database_operation("list")
 
 
 @evidence_tool("sql.v1")

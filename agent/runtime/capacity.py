@@ -88,7 +88,7 @@ def initialize(context, contract):
                         "main_model": 2,
                         "review": 2 if contract.delivery_kind == "direct" else 4,
                         "retry": 1 if contract.delivery_kind == "direct" else 3,
-                        "tool": {"none": 0, "markdown": 1, "pdf": 2}[contract.file_output],
+                        "tool": {"none": 0, "markdown": 1}[contract.file_output],
                     }
                 },
             )
@@ -140,7 +140,12 @@ def admit_plan(context, task_ids):
             for keys in groups.values():
                 used = sum(len(context.search_tasks[key].calls) for key in keys if key in context.search_tasks)
                 if not used and any(
-                    key not in context.search_tasks or not context.search_tasks[key].closed_reason for key in keys
+                    any(
+                        r["task_id"] == key and r["query_version"] == context.query_version
+                        for r in context.requirements.values()
+                    )
+                    and (key not in context.search_tasks or not context.search_tasks[key].closed_reason)
+                    for key in keys
                 ):
                     pending += 1
                 if used >= task_limit and set(keys).intersection(task_ids):
@@ -311,7 +316,7 @@ def eligible(context, category, phase=None):
             or category == "tool"
             and call is not None
             and action_authorized(call)
-            and call.actor.rsplit(":", 1)[-1] in ("generate_markdown", "convert_md_to_pdf")
+            and call.actor.rsplit(":", 1)[-1] == "generate_markdown"
         )
         stage = delivery["stages"]["delivery"]
         if permitted and stage.get(category, 0):

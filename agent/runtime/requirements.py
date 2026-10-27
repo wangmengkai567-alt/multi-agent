@@ -141,45 +141,151 @@ def _store_requirement(context, row):
     rid = row["rid"]
     context.requirements[rid] = row
     context.coverage_rows[rid] = {"status": "unknown", "fact_ids": [], "claim_ids": []}
-    if row["owner"] == "task":
-        gid = str(uuid4())
-        context.gaps[gid] = dict(
-            gid=gid,
-            rid=rid,
-            task_id=row["task_id"],
-            reason="plan",
-            source_fact_id=None,
-            status="open",
-            searches=0,
-            reads=0,
-            no_evidence_streak=0,
-            consecutive_technical_failures=0,
-            covered_by=[],
-            seen_sources=[],
-            drop_reason=None,
+    new_gap(context, row, reason="plan")
+
+
+def new_gap(context, requirement, *, reason, source_fact_id=None, source_fact_version=None, detail=""):
+    gid = str(uuid4())
+    gap = dict(
+        gid=gid,
+        rid=requirement["rid"],
+        task_id=requirement["task_id"],
+        reason=reason,
+        source_fact_id=source_fact_id,
+        source_fact_version=source_fact_version,
+        status="open",
+        searches=0,
+        reads=0,
+        no_evidence_streak=0,
+        consecutive_technical_failures=0,
+        covered_by=[],
+        seen_sources=[],
+        drop_reason=None,
+        drop_detail=None,
+        detail=detail,
+        transitions=[],
+    )
+    context.gaps[gid] = gap
+    return gap
+
+
+def drop_gap(context, gap, reason, detail):
+    if reason not in ("requirement_changed", "claim_resolved", "superseded") or not detail.strip():
+        raise ValueError("Dropped gaps need a specific audited reason")
+    if gap["status"] == "dropped":
+        raise ValueError("Dropped gaps cannot be rewritten")
+    gap["transitions"].append(
+        dict(
+            previous=gap["status"],
+            status="dropped",
+            reason=reason,
+            detail=detail,
+            query_version=context.query_version,
         )
+    )
+    gap.update(status="dropped", drop_reason=reason, drop_detail=detail, covered_by=[])
+
+
+def sync_claim_gaps(context, task_id, review, report, review_key, *, final=False):
+    """Track rejected individual assertions separately from requirement coverage."""
+    from copy import deepcopy
+
+    from agent.runtime.evidence_protocol import fingerprint
+
+    if not review.terminal or review.error is not None:
+        return
+    requirements = [
+        r
+        for r in context.requirements.values()
+        if r["query_version"] == context.query_version and (r["required"] if final else r["task_id"] == task_id)
+    ]
+    if final:
+        assertions = {b["claim_id"]: b for b in context.delivery_draft["blocks"] if b["kind"] != "limitation"}
+        decisions = {r["claim_id"]: r for r in review.claim_decisions}
+    else:
+        assertions = {f["id"]: f for f in report["facts"]}
+        decisions = {r["fact_id"]: r for r in review.fact_decisions}
+    if not set(assertions).issubset(decisions):
+        raise ValueError("Assertion gap tracking needs a complete review")
+    rejected = {key: value for key, value in assertions.items() if decisions[key]["verdict"] != "passed"}
+    owner = "final" if final else task_id
+    current_versions = {fingerprint(value): key for key, value in assertions.items()}
+    for gap in context.gaps.values():
+        if gap["reason"] != "claim" or gap.get("review_owner") != owner or gap["status"] == "dropped":
+            continue
+        key = current_versions.get(gap["source_assertion_version"])
+        if key is None:
+            drop_gap(context, gap, "superseded", "Assertion removed or replaced by review " + review_key)
+        elif key not in rejected:
+            drop_gap(context, gap, "claim_resolved", "Assertion passed review " + review_key)
+    for key, assertion in rejected.items():
+        version = fingerprint(assertion)
+        matching = {f["rid"] for f in review.findings if f.get("fact_id") == key and f.get("rid")}
+        for requirement in requirements:
+            if matching and requirement["rid"] not in matching:
+                continue
+            known = next(
+                (
+                    g
+                    for g in context.gaps.values()
+                    if g["reason"] == "claim"
+                    and g.get("review_owner") == owner
+                    and g["rid"] == requirement["rid"]
+                    and g["source_assertion_version"] == version
+                    and g["status"] != "dropped"
+                ),
+                None,
+            )
+            if known is None:
+                source_id = assertion["fact_ids"][0] if final else key
+                source_fact = next(f for f in report["facts"] if f["id"] == source_id) if final else assertion
+                gap = new_gap(
+                    context,
+                    requirement,
+                    reason="claim",
+                    source_fact_id=source_id if final else f"{owner}:{review_key}:{source_id}",
+                    source_fact_version=fingerprint(source_fact),
+                    detail=decisions[key]["reason"],
+                )
+                gap.update(
+                    review_owner=owner,
+                    review_key=review_key,
+                    local_fact_id=key,
+                    source_assertion=deepcopy(assertion),
+                    source_assertion_version=version,
+                    source_fact_snapshot=deepcopy(source_fact),
+                    association="review_finding" if matching else "review_scope",
+                    source_fact_ids=list(assertion["fact_ids"]) if final else [gap["source_fact_id"]],
+                )
+                # A rejected final claim is an editing obligation, never a new search authorization.
+                if final:
+                    gap["status"] = "blocked"
 
 
 def attach_support_requirements(context, task_ids):
     """Give research-only tasks auditable work without adding final-answer obligations."""
-    mains = [
-        r
-        for r in context.requirements.values()
-        if r["query_version"] == context.query_version and r["owner"] == "main" and r["required"]
+    required = [
+        r for r in context.requirements.values() if r["query_version"] == context.query_version and r["required"]
     ]
     for task_id in task_ids:
         if task_requirements(context, task_id):
             continue
         obj = context.objects[context.task_scopes[task_id]["object_id"]]
-        if not mains:
-            raise DecisionRejected("A research-only task needs an original main obligation to support")
-        for main in mains:
+        ancestors = set()
+        current = obj
+        while current is not None:
+            ancestors.add(current["object_id"])
+            current = context.objects.get(current.get("parent_object_id"))
+        parents = [r for r in required if r["object_id"] in ancestors or r["object_id"] is None]
+        if not parents:
+            raise DecisionRejected("A research-only task needs an original obligation within its object scope")
+        for parent in parents:
             row = {
-                **main,
+                **parent,
                 "rid": str(uuid4()),
-                "parent_rid": main["rid"],
+                "parent_rid": parent["rid"],
                 "kind": "fact",
-                "label": "研究支持（非完成门槛）：" + main["label"][:145],
+                "label": "研究支持（非完成门槛）：" + parent["label"][:145],
                 "owner": "task",
                 "task_id": task_id,
                 "object_id": obj["object_id"],
@@ -294,16 +400,25 @@ def apply_coverage(context, task_id, rows):
         raise ValueError("Coverage key set differs from assigned requirements")
     with context.budget_lock:
         context.coverage_rows.update(rows)
+        update_gap_coverage(context, rows)
+
+
+def update_gap_coverage(context, rows):
+    from agent.runtime.checkpoints import write_state_json
+    from agent.runtime.requirement_changes import requirement_snapshot
+
+    with context.budget_lock:
         for gap in context.gaps.values():
-            if gap["task_id"] != task_id or gap["status"] == "dropped":
+            if gap["status"] == "dropped" or gap["reason"] == "claim" or gap["rid"] not in rows:
                 continue
             row = rows[gap["rid"]]
-            gap["covered_by"] = list(row["fact_ids"])
+            gap["covered_by"] = list(row["fact_ids"]) + list(row["claim_ids"])
             if row["status"] == "covered":
                 gap["status"] = "covered"
             elif gap["status"] in ("covered", "searching"):
                 gap["status"] = "open"
         recompute_run(context)
+        write_state_json(context.work_dir / "requirement-state.json", requirement_snapshot(context))
 
 
 def request_description(context, task_id):

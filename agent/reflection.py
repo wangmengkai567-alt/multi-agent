@@ -558,7 +558,7 @@ class ResultReviewer:
         )
         return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
-    def _cached(self, key):
+    def _cached(self, key, contract):
         context = get_run_context()
         value = context.review_cache.get(key)
         if value is None:
@@ -579,7 +579,17 @@ class ResultReviewer:
         result = (FinalReviewResult if self.final_answer else ReviewResult).model_validate(value)
         if not result.terminal or result.error is not None:
             raise ReviewFormatError("Nonterminal review cannot enter cache")
+        self._track_gaps(key, contract, result)
         return result
+
+    def _track_gaps(self, key, contract, result):
+        from agent.runtime.requirements import sync_claim_gaps
+
+        context, call = get_run_context(), active_call.get()
+        with context.budget_lock:
+            sync_claim_gaps(
+                context, call.search_task_key if call else None, result, contract.report, key, final=self.final_answer
+            )
 
     def _adjudicate(self, key, response, contract):
         from uuid import uuid4
@@ -589,6 +599,7 @@ class ResultReviewer:
         parsed, error = None, None
         try:
             parsed = self._parse(response, contract)
+            self._track_gaps(key, contract, parsed)
             return self._remember(key, parsed)
         except ReviewFormatError as exc:
             error = str(exc)
@@ -628,7 +639,7 @@ class ResultReviewer:
         try:
             contract = self._contract(task, text, evidence)
             key = self._key(contract)
-            cached = self._cached(key)
+            cached = self._cached(key, contract)
             if cached is not None:
                 return cached
             result, messages = self._prepare(task, text, evidence, contract)
@@ -671,7 +682,7 @@ class ResultReviewer:
         try:
             contract = self._contract(task, text, evidence)
             key = self._key(contract)
-            cached = self._cached(key)
+            cached = self._cached(key, contract)
             if cached is not None:
                 return cached
             result, messages = self._prepare(task, text, evidence, contract)

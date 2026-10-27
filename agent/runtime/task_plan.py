@@ -75,7 +75,9 @@ def plan_snapshot(context):
             d and d.closed_reason and (not d.state.judged or d.state.facts_status == "none_passed") for d in deps
         )
         status = (
-            "blocked"
+            "withdrawn"
+            if not task_requirements(context, scope["task_id"])
+            else "blocked"
             if blocked
             else "finished"
             if task and task.closed_reason
@@ -87,7 +89,11 @@ def plan_snapshot(context):
         )
         tasks.append({**scope, "status": status, "check_status": task.state.check_status if task else "not_checked"})
     return dict(
-        version=context.plan_version, closed=context.plan_closed, expansions=context.plan_expansions, tasks=tasks
+        version=context.plan_version,
+        query_version=context.query_version,
+        closed=context.plan_closed,
+        expansions=context.plan_expansions,
+        tasks=tasks,
     )
 
 
@@ -222,7 +228,8 @@ def plan_research(
             pending = {
                 key
                 for key in context.task_scopes
-                if key not in context.search_tasks or not context.search_tasks[key].closed_reason
+                if task_requirements(context, key)
+                and (key not in context.search_tasks or not context.search_tasks[key].closed_reason)
             }
             blocked = set()
             while True:
@@ -325,6 +332,8 @@ def resolve_task(context, description):
     task_id = item.get("task_id") if isinstance(item, dict) else None
     if task_id in context.task_scopes:
         scope = context.task_scopes[task_id]
+        if not task_requirements(context, task_id):
+            raise HookRejected("This task has no current requirements; its previous work is retained only for audit")
         deps = [context.search_tasks.get(key) for key in scope["depends_on"]]
         if any(task is None or not task.closed_reason for task in deps):
             raise HookRejected("Task dependencies are still pending; dispatch the ready task IDs first")

@@ -392,12 +392,10 @@ class HookToolMiddleware(AgentMiddleware):
                     self._before(request, call)
                     seconds = self._timeout(call)
                     call.stage = "execution"
-                    if seconds is None:
-                        call.result = self._execute(request, call, handler)
-                    else:
-                        from agent.runtime.tool_timeout import invoke_bounded
+                    from agent.runtime.tool_timeout import bounded_tool
 
-                        call.result = invoke_bounded(lambda r: self._execute(r, call, handler), request, seconds)
+                    with bounded_tool(call.actor, seconds):
+                        call.result = self._execute(request, call, handler)
                     call.execution_status = "completed"
                     call.result_status = "pending"
                     call.stage = "result_validation"
@@ -477,18 +475,21 @@ class HookToolMiddleware(AgentMiddleware):
                     call.executed = True
                     call.execution_status = "running"
                     call.stage = "execution"
-                    if seconds is None:
-                        call.result = await handler(request)
-                    else:
-                        from agent.runtime.recovery import ToolCallTimeout
+                    from agent.runtime.tool_timeout import bounded_tool
 
-                        try:
-                            async with asyncio.timeout(seconds):
-                                call.result = await handler(request)
-                        except TimeoutError as error:
-                            if isinstance(error, ToolCallTimeout):
-                                raise
-                            raise ToolCallTimeout(request.tool_call["name"], seconds) from error
+                    with bounded_tool(call.actor, seconds):
+                        if seconds is None:
+                            call.result = await handler(request)
+                        else:
+                            from agent.runtime.recovery import ToolCallTimeout
+
+                            try:
+                                async with asyncio.timeout(seconds):
+                                    call.result = await handler(request)
+                            except TimeoutError as error:
+                                if isinstance(error, ToolCallTimeout):
+                                    raise
+                                raise ToolCallTimeout(request.tool_call["name"], seconds) from error
                     call.execution_status = "completed"
                     call.result_status = "pending"
                     call.stage = "result_validation"
