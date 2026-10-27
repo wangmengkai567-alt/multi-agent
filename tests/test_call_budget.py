@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from test_framework_contract import ScriptedModel, call
 
 from agent.runtime.context import RunContext, reset_run_context, set_run_context
+from agent.runtime.evidence_protocol import evidence_tool
 from agent.runtime.hooks import HookPipeline, HookToolMiddleware, default_pipeline
 from agent.runtime.models import budget_model
 from agent.runtime.policies import BudgetExceeded, RuntimePolicy, load_runtime_policy, reserve_calls
@@ -111,6 +112,7 @@ async def test_model_denied_before_underlying_invocation(context, asynchronous, 
 async def test_actual_task_model_tool_and_total_counts(context):
     executions = []
 
+    @evidence_tool("record.v1")
     @tool
     def evidence():
         """Fake evidence lookup."""
@@ -121,19 +123,25 @@ async def test_actual_task_model_tool_and_total_counts(context):
     parent = ScriptedModel(
         responses=[call("task", {"subagent_type": "expert", "description": "query"}), AIMessage(content="done")]
     )
-    agent = create_deep_agent(
+    from deepagents.middleware.subagents import SubAgentMiddleware
+    from langchain.agents import create_agent
+
+    from agent.runtime.backend import run_backend
+    from agent.runtime.contracts import bind_contract
+    from agent.runtime.evidence_protocol import bind_framework_tools
+    from agent.subagent_factory import build_subagents
+    from agent.subagent_registry import SubagentRegistry, SubagentSpec
+
+    registry = SubagentRegistry([SubagentSpec("expert", "Expert", "Find", "Use actual results", (evidence,))])
+    bind_contract(context)
+    agent = create_agent(
         model=budget_model(parent, "main_model"),
-        subagents=[
-            {
-                "name": "expert",
-                "description": "expert",
-                "system_prompt": "query",
-                "tools": [evidence],
-                "model": budget_model(child, "sub_model"),
-                "middleware": [HookToolMiddleware("expert")],
-            }
+        middleware=[
+            bind_framework_tools(
+                SubAgentMiddleware(backend=run_backend, subagents=build_subagents(registry, {"SUB": child}))
+            ),
+            HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
         ],
-        middleware=[HookToolMiddleware(allowed_targets=["expert"])],
     )
     state = await agent.ainvoke({"messages": [("user", "query")]})
     assert state["messages"][-1].content == "done" and executions == [1]

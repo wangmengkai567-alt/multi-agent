@@ -11,6 +11,7 @@ from langgraph.types import Overwrite
 from test_run_concurrency import complete, service_runtime, wait_started
 
 from agent.runtime.context import get_run_context
+from api import server
 from api.monitor import monitor
 from api.run_store import RunStore
 
@@ -27,6 +28,7 @@ async def test_run_history_available_without_websocket(history_service, monkeypa
 
     client, agent, _ = history_service
     monkeypatch.setattr(runtime, "monitor", monitor)
+    await server.app.state.run_store.create_thread("history")
     record = (await client.post("/api/task", json={"query": "question", "thread_id": "history"})).json()
     await wait_started(agent)
     await complete(agent, record["run_id"])
@@ -36,7 +38,13 @@ async def test_run_history_available_without_websocket(history_service, monkeypa
     events = history["events"]
     assert events[0]["event"] == "run_queued" and events[1]["event"] == "run_started"
     assert any(event["event"] == "session_created" for event in events)
-    assert len([event for event in events if event["event"] == "tool_start"]) == 2
+    # This fixture has no business tool calls. The runtime, not a model-facing
+    # generation/read tool pair, delivers the final artifact.
+    assert not [event for event in events if event["event"] == "tool_start"]
+    artifact = history["run"]["completion"]["artifact"]
+    assert artifact["path"] == "answer.md" and artifact["status"] == "completed"
+    downloaded = await client.get(f"/api/runs/{record['run_id']}/files/download?path=answer.md")
+    assert downloaded.status_code == 200 and downloaded.content == history["run"]["answer"].encode("utf-8")
     assert events[-1]["data"]["result"] == history["run"]["answer"]
     assert [event["event_seq"] for event in events] == list(range(1, len(events) + 1))
     assert all(event["thread_id"] == record["thread_id"] and event["run_id"] == record["run_id"] for event in events)
@@ -51,6 +59,7 @@ async def test_two_rounds_two_sessions_history_does_not_mix(history_service, mon
     monkeypatch.setattr(runtime, "monitor", monitor)
     histories = []
     for thread in ("same", "same", "other"):
+        await server.app.state.run_store.create_thread(thread)
         record = (await client.post("/api/task", json={"query": f"question {thread}", "thread_id": thread})).json()
         await wait_started(agent)
         await complete(agent, record["run_id"])
@@ -75,6 +84,7 @@ async def test_actual_websocket_send_failure_keeps_successful_record(history_ser
     client, agent, _ = history_service
     monkeypatch.setattr(runtime, "monitor", monitor)
     server.manager.active_connections["socket"] = BrokenSocket()
+    await server.app.state.run_store.create_thread("socket")
     record = (await client.post("/api/task", json={"query": "question", "thread_id": "socket"})).json()
     await wait_started(agent)
     await complete(agent, record["run_id"])
@@ -95,6 +105,7 @@ async def test_failure_reason_is_saved_once_and_redacted(history_service, monkey
     client, agent, _ = history_service
     monkeypatch.setattr(runtime, "monitor", monitor)
     agent.failures.add("broken")
+    await server.app.state.run_store.create_thread("broken")
     record = (await client.post("/api/task", json={"query": "failure question", "thread_id": "broken"})).json()
     await wait_started(agent)
     await complete(agent, record["run_id"])
@@ -144,7 +155,7 @@ async def test_proposal_return_and_business_start_have_distinct_meanings(history
             yield {
                 "overwrite": {
                     "messages": Overwrite(
-                        value=[historical, HumanMessage(content=inputs["messages"][0]["content"]), proposal, result]
+                        value=[historical, HumanMessage(content=inputs["messages"].value[0].content), proposal, result]
                     )
                 }
             }
@@ -156,6 +167,7 @@ async def test_proposal_return_and_business_start_have_distinct_meanings(history
     # The lifespan owns cleanup of this runtime pointer. A monkeypatch here
     # would restore a closed fake agent after lifespan shutdown.
     runtime.main_agent = agent
+    await server.app.state.run_store.create_thread("calls")
     response = (await client.post("/api/task", json={"query": "question", "thread_id": "calls"})).json()
     task = server.app.state.run_tasks[response["run_id"]]
     await asyncio.gather(task, return_exceptions=True)
@@ -207,6 +219,7 @@ async def test_real_framework_tool_records_proposal_execution_and_return(history
     # would restore a closed fake agent after lifespan shutdown.
     runtime.main_agent = agent
     monkeypatch.setattr(runtime, "monitor", monitor)
+    await server.app.state.run_store.create_thread("framework")
     record = (await client.post("/api/task", json={"query": "question", "thread_id": "framework"})).json()
     await asyncio.gather(server.app.state.run_tasks[record["run_id"]], return_exceptions=True)
     history = (await client.get(f"/api/runs/{record['run_id']}/history")).json()

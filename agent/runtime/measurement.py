@@ -26,13 +26,12 @@ PHASE_LABELS = {
 
 
 def persist(context):
-    from agent.runtime.checkpoints import save_job_checkpoint, write_json
+    from agent.runtime.checkpoints import write_json
 
     write_json(
         context.work_dir / "model-requests.json",
-        dict(scope_id=context.research_scope_id, requests=context.request_ledger, totals=totals(context)),
+        dict(scope_id=context.run_id, requests=context.request_ledger, totals=totals(context)),
     )
-    save_job_checkpoint(context)
 
 
 def totals(context):
@@ -69,7 +68,7 @@ class RequestMeasurement:
             category=category,
             phase=phase,
             actor=call.target if call and call.target else "main",
-            task_id=call.search_task_key if call else None,
+            task_id=call.task_id if call else None,
             parent_call_id=call.call_id if call else self.context.run_id,
             status="queued",
             created_at=datetime.now(UTC).isoformat(),
@@ -249,7 +248,7 @@ def restore_measurements(context):
     path = context.work_dir / "model-requests.json"
     if path.exists():
         saved = json.loads(path.read_text("utf-8"))
-        if saved["scope_id"] != context.research_scope_id:
+        if saved["scope_id"] != context.run_id:
             context.stop("interrupted")
             raise RunStopped("Model request ledger belongs to another research scope")
         observed = saved["requests"]

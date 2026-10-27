@@ -96,6 +96,12 @@ def domain_array(value):
     return value
 
 
+def result_count(value):
+    if isinstance(value, bool):
+        raise ValueError("max_results must be an integer")
+    return value
+
+
 DomainList = Annotated[
     list[str] | None,
     BeforeValidator(domain_array),
@@ -108,12 +114,12 @@ DomainList = Annotated[
 def internet_search(
     query: str,
     topic: Literal["news", "finance", "general"] = "general",
-    max_results: int = 3,
+    max_results: Annotated[int, BeforeValidator(result_count), Field(ge=1, le=20)] = 3,
     include_raw_content: bool = False,
     include_domains: DomainList = None,
     search_depth: Literal["basic", "advanced"] = "basic",
 ):
-    """Internal provider search. Model-visible decisions use research_step."""
+    """Search public information for the current delegated task; return actual sources and bounded excerpts."""
     require_network_permission()
     include_domains = domain_array(include_domains)
     if not query.strip() or not 1 <= max_results <= 20:
@@ -224,16 +230,44 @@ def read_web_page(
 
 
 def provider_operation(kind, key, limits, **parameters):
-    from agent.runtime.research import mark_transport
+    from agent.runtime.context import get_run_context
+    from agent.runtime.events import make_event
+    from agent.runtime.hooks import active_call
+    from agent.runtime.scheduler import account_group
     from agent.runtime.workers import run_operation
 
-    seconds = request_timeout(limits.timeout_seconds)
-    return run_operation(
-        "tavily",
-        dict(kind=kind, key=key, parameters=parameters, timeout=seconds),
-        seconds=seconds,
-        on_event=mark_transport,
-    )
+    context = get_run_context()
+    attempts = 0
+
+    def authorize_transport(event):
+        nonlocal attempts
+        context.check_active()
+        if event.get("kind") != "transport" or attempts:
+            raise PolicyError("Unexpected provider send; implicit retries are forbidden")
+        attempts += 1
+        call = active_call.get()
+        if context.event_sink is not None:
+            context.event_sink.submit(
+                make_event(
+                    context.thread_id,
+                    context.run_id,
+                    "tool_transport",
+                    "搜索服务请求已获准发送",
+                    actor=call.actor if call else "search",
+                    status="started",
+                    call_id=call.call_id if call else None,
+                    parent_call_id=call.parent_call_id if call else context.run_id,
+                )
+            )
+
+    with context.scheduler.provider(context, "search", account_group("tavily", "https://api.tavily.com", key)):
+        seconds = request_timeout(limits.timeout_seconds)
+        return run_operation(
+            "tavily",
+            dict(kind=kind, key=key, parameters=parameters, timeout=seconds),
+            seconds=seconds,
+            on_event=authorize_transport,
+        )
 
 
 def execute_worker(payload, progress):

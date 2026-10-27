@@ -119,9 +119,9 @@ def scope_identity():
     call = active_call.get()
     actor = skill_scope.get()[0]
     owner = (call.parent_call_id if ":" in call.actor else call.call_id) if call else None
-    owner = owner or context.research_scope_id
-    if actor == "main" and owner in (context.run_id, context.resume_source_run_id):
-        owner = context.research_scope_id
+    owner = owner or context.run_id
+    if actor == "main" and owner == context.run_id:
+        owner = context.run_id
     return actor, owner, call
 
 
@@ -344,83 +344,6 @@ def loaded_skill_context(allowed=None, *, actor=None, owner=None):
                 )
             records.append(dict(path=f"/skills/{path}", complete=complete, contents=contents))
     return records
-
-
-def save_skill_context(context):
-    """Persist provenance and accepted line coverage; never persist raw Skill instructions."""
-    return dict(
-        states=[list(key) for key in sorted(context.skill_states)],
-        resources=[
-            dict(
-                actor=key[0],
-                owner=key[1],
-                skill_id=key[2],
-                resource=key[3],
-                sha256=digest,
-                lines=sorted(context.skill_reads[key]),
-            )
-            for key, digest in sorted(context.skill_versions.items())
-        ],
-    )
-
-
-def restore_skill_context(context, data):
-    """Reconstruct exactly the read snapshots, rejecting changed or unregistered source files."""
-    if not isinstance(data, dict) or set(data) != {"states", "resources"}:
-        raise ValueError("Invalid saved Skill context")
-    root = Path(context.skill_dir or PROJECT_ROOT / context.policy.files.skill_directory).resolve()
-    bodies, resources, versions, reads = {}, {}, {}, {}
-    for item in data["resources"]:
-        actor, owner, skill_id, resource = (item[key] for key in ("actor", "owner", "skill_id", "resource"))
-        if not all(isinstance(value, str) and value for value in (actor, owner, skill_id, resource)):
-            raise ValueError("Invalid Skill snapshot ownership")
-        file = authorize_skill_path(confined_path(f"{skill_id}/{resource}", root), root, allowed=SKILL_IDS)
-        content = skill_text(file)
-        if sha256(content.encode("utf-8")).hexdigest() != item["sha256"]:
-            raise ValueError("Skill source changed since the checkpoint")
-        if resource == "SKILL.md":
-            parse_metadata(content, skill_id)
-        lines, coverage = content.splitlines(), item["lines"]
-        if not isinstance(coverage, list) or any(
-            type(index) is not int or not 0 <= index < len(lines) for index in coverage
-        ):
-            raise ValueError("Invalid saved Skill read coverage")
-        if len(set(coverage)) != len(coverage):
-            raise ValueError("Duplicate saved Skill read coverage")
-        key = actor, owner, skill_id, resource
-        if key in versions:
-            raise ValueError("Duplicate saved Skill resource")
-        versions[key], reads[key] = item["sha256"], set(coverage)
-        complete = len(coverage) == len(lines)
-        if resource == "SKILL.md" and complete:
-            bodies[(actor, owner, skill_id)] = content
-        elif resource != "SKILL.md" and coverage:
-            resources[key] = dict(
-                total_lines=len(lines),
-                lines={i: lines[i] for i in sorted(coverage)},
-                content=content if complete else None,
-            )
-    states = set()
-    for row in data["states"]:
-        if not isinstance(row, list) or len(row) != 5 or any(not isinstance(value, str) for value in row):
-            raise ValueError("Invalid saved Skill state")
-        if row[2] not in SKILL_IDS or row[3] not in {"selected", "loaded", "resource_loaded", "unavailable"}:
-            raise ValueError("Invalid saved Skill state")
-        actor, owner, skill_id, state, resource = row
-        if not actor or not owner:
-            raise ValueError("Invalid saved Skill state ownership")
-        if state == "loaded" and (resource != "SKILL.md" or (actor, owner, skill_id) not in bodies):
-            raise ValueError("Loaded Skill state has no complete body snapshot")
-        if state == "resource_loaded" and (
-            (actor, owner, skill_id, resource) not in resources
-            or resources[(actor, owner, skill_id, resource)]["content"] is None
-        ):
-            raise ValueError("Loaded resource state has no complete read coverage")
-        if state in {"selected", "unavailable"} and resource:
-            raise ValueError("Unexpected resource in Skill selection state")
-        states.add(tuple(row))
-    context.skill_bodies, context.skill_resources = bodies, resources
-    context.skill_versions, context.skill_reads, context.skill_states = versions, reads, states
 
 
 class SkillBackend(GuardedFilesystemBackend):

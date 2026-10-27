@@ -43,14 +43,14 @@ class RecordingMonitor:
 
 
 @pytest_asyncio.fixture
-async def isolated_runtime(sandbox_dir, monkeypatch):
-    monkeypatch.setattr(runtime, "checkpoint_db_path", sandbox_dir / "data" / "checkpoints.db")
+async def isolated_runtime(sandbox_dir, monkeypatch, migrated_environment):
+    monkeypatch.setattr(runtime, "checkpoint_db_path", sandbox_dir / "checkpoints.db")
     monkeypatch.setattr(runtime, "project_root_path", sandbox_dir)
     recorder = RecordingMonitor()
     monkeypatch.setattr(runtime, "monitor", recorder)
     monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
     monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
-    monkeypatch.setattr(server, "run_db_path", sandbox_dir / "data" / "runs.db")
+    monkeypatch.setattr(server, "run_db_path", migrated_environment.runs)
     yield recorder
     await server.manager.shutdown()
     await runtime.shutdown_agent()
@@ -94,9 +94,11 @@ async def test_concurrent_initialization_and_reopen(isolated_runtime, monkeypatc
     agents = await asyncio.gather(*(runtime.initialize_agent() for _ in range(8)))
     assert all(agent is agents[0] for agent in agents)
     assert len(calls) == 1
-    config = {"configurable": {"thread_id": "persisted"}}
     assert await runtime.run_deep_agent("question", "persisted") == "FIRST"
     saver = runtime.checkpointer
+    checkpoints = [entry async for entry in saver.alist(None)]
+    assert checkpoints
+    config = checkpoints[0].config
     await runtime.shutdown_agent()
     assert runtime.main_agent is None and runtime.checkpointer is None
     with pytest.raises(ValueError, match="closed|active"):
@@ -196,6 +198,7 @@ async def test_background_completion_and_exception(isolated_runtime, monkeypatch
     agent = ControlledAgent(fail=fail)
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: agent)
     async with server.lifespan(server.app):
+        await server.app.state.run_store.create_thread("background")
         response = await server.run_task(server.TaskRequest(query="question", thread_id="background"))
         assert response["status"] == "started" and response["thread_id"] == "background"
         assert response["run_id"]
@@ -219,6 +222,7 @@ async def test_shutdown_cancels_before_closing_database(isolated_runtime, monkey
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: agent)
     async with server.lifespan(server.app):
         saver = runtime.checkpointer
+        await server.app.state.run_store.create_thread("cancelled")
         response = await server.run_task(server.TaskRequest(query="question", thread_id="cancelled"))
         task = next(iter(server.app.state.agent_tasks))
         await agent.started.wait()

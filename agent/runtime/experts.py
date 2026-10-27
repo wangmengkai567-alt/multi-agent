@@ -1,7 +1,7 @@
 """Bind expert contracts to runs and enforce serial, allowlisted nested delegation."""
 
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import SystemMessage
 
 from agent.runtime.context import RunStopped, get_run_context
 
@@ -23,9 +23,6 @@ def bind_registry(context, registry):
             context.stop("interrupted")
             raise RunStopped("Expert definitions changed; retain the checkpoint and start a new reviewed run")
         context.expert_contract = contract
-        from agent.runtime.checkpoints import save_job_checkpoint
-
-        save_job_checkpoint(context)
 
 
 def source_kind(context, target):
@@ -44,24 +41,13 @@ class ExpertRegistryMiddleware(AgentMiddleware):
 
 
 class SerialDelegationMiddleware(AgentMiddleware):
-    """A waiting parent shares its execution branch slot with one nested task."""
+    """Ask for one tool at a time; the runtime also serializes batched tasks."""
 
     def prepare(self, request):
         return request.override(model_settings={**request.model_settings, "parallel_tool_calls": False})
 
-    @staticmethod
-    def checked(response):
-        for message in response.result:
-            if (
-                isinstance(message, AIMessage)
-                and any(c["name"] == "task" for c in message.tool_calls)
-                and len(message.tool_calls) != 1
-            ):
-                raise ValueError("Nested delegation must be the only tool in this model turn")
-        return response
-
     def wrap_model_call(self, request, handler):
-        return self.checked(handler(self.prepare(request)))
+        return handler(self.prepare(request))
 
     async def awrap_model_call(self, request, handler):
-        return self.checked(await handler(self.prepare(request)))
+        return await handler(self.prepare(request))

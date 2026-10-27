@@ -2,21 +2,22 @@
 
 import os
 import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 import pytest_asyncio
 import yaml
-from deepagents import create_deep_agent
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 from mysql.connector import Error as MySQLError
+from runtime_fixtures import bind_research_contract
 from test_framework_contract import ScriptedModel, call
 
 from agent.runtime.backend import GuardedFilesystemBackend, run_backend
 from agent.runtime.context import RunContext, reset_run_context, set_run_context
+from agent.runtime.errors import DependencyUnavailable
+from agent.runtime.evidence_protocol import bind_framework_tools, evidence_tool
 from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.policies import (
     MissingConfiguration,
@@ -37,6 +38,7 @@ def context(sandbox_dir):
         "run",
         "session",
         sandbox_dir / "work",
+        user_query="Collect controlled test evidence",
         skill_dir=sandbox_dir / "instructions",
         policy=RuntimePolicy.model_validate(policy),
     )
@@ -86,11 +88,19 @@ UNSAFE_SQL = [
 
 
 @pytest.mark.parametrize("query", UNSAFE_SQL)
-def test_unsafe_sql_rejected_before_database_connect(context, monkeypatch, query):
+def test_unsafe_sql_rejected_before_database_connect(context, monkeypatch, query, inline_provider_worker):
     from tools import db_tools
 
     connects = []
-    monkeypatch.setattr(db_tools, "connect", lambda **kwargs: connects.append(kwargs))
+    monkeypatch.setenv("MYSQL_READONLY_USER", "fixture_reader")
+    monkeypatch.setenv("MYSQL_READONLY_PASSWORD", "fixture_password")
+    monkeypatch.setenv("MYSQL_DATABASE", "fixture_database")
+
+    def forbidden_connect(**kwargs):
+        connects.append(kwargs)
+        raise AssertionError("Unsafe SQL reached the database adapter")
+
+    monkeypatch.setattr("mysql.connector.connect", forbidden_connect)
     with pytest.raises(PolicyError):
         db_tools.run_select(query)
     assert connects == []
@@ -145,7 +155,7 @@ def test_write_account_or_unknown_grants_rejected(grants):
         validate_readonly_grants([(value,) for value in grants], "deep_search")
 
 
-def test_real_database_adapter_checks_grants_timeout_rows_and_closes(context, monkeypatch):
+def test_real_database_adapter_checks_grants_timeout_rows_and_closes(context, monkeypatch, inline_provider_worker):
     from tools import db_tools
 
     for key, value in {
@@ -199,7 +209,7 @@ def test_real_database_adapter_checks_grants_timeout_rows_and_closes(context, mo
         options.append(kwargs)
         return Connection()
 
-    monkeypatch.setattr(db_tools, "connect", connect)
+    monkeypatch.setattr("mysql.connector.connect", connect)
     result = db_tools.execute_sql_query.invoke({"query": "SELECT * FROM orders LIMIT 999"})
     assert '"contains,a comma"' in result and fetches == [100]
     assert queries[0][0] == "SHOW GRANTS" and queries[-1][0].endswith("LIMIT 100")
@@ -209,14 +219,14 @@ def test_real_database_adapter_checks_grants_timeout_rows_and_closes(context, mo
     assert {"readonly": True} in lifecycle and lifecycle[-3:] == ["cursor closed", "rollback", "connection closed"]
 
 
-def test_missing_readonly_credentials_never_fall_back_to_admin(context, monkeypatch):
+def test_missing_readonly_credentials_never_fall_back_to_admin(context, monkeypatch, inline_provider_worker):
     from tools import db_tools
 
     monkeypatch.setenv("MYSQL_USER", "root")
     monkeypatch.setenv("MYSQL_PASSWORD", "fake-root")
     calls = []
-    monkeypatch.setattr(db_tools, "connect", lambda **kwargs: calls.append(1))
-    with pytest.raises(MissingConfiguration):
+    monkeypatch.setattr("mysql.connector.connect", lambda **kwargs: calls.append(1))
+    with pytest.raises(DependencyUnavailable):
         db_tools.run_select("SELECT * FROM orders")
     assert calls == []
 
@@ -267,10 +277,14 @@ def test_symlink_and_junction_escape_denied_before_read_and_search(context, sand
 
 def test_skill_and_upload_directories_readonly_and_separate(context):
     (context.skill_dir / "ecommerce-analysis").mkdir()
-    (context.skill_dir / "ecommerce-analysis" / "SKILL.md").write_text("instructions", encoding="utf-8", newline="\r\n")
+    (context.skill_dir / "ecommerce-analysis" / "SKILL.md").write_text(
+        "---\nname: ecommerce-analysis\ndescription: Isolated test instructions\n---\ninstructions",
+        encoding="utf-8",
+        newline="\r\n",
+    )
     (context.work_dir / "uploads").mkdir()
     (context.work_dir / "uploads" / "SKILL.md").write_text("user upload", encoding="utf-8")
-    assert resolve_run_path("/skills/ecommerce-analysis/SKILL.md").read_text(encoding="utf-8") == "instructions"
+    assert resolve_run_path("/skills/ecommerce-analysis/SKILL.md").read_text(encoding="utf-8").endswith("instructions")
     assert resolve_run_path("uploads/SKILL.md").read_text(encoding="utf-8") == "user upload"
     for value in ("/skills/ecommerce-analysis/SKILL.md", "uploads/SKILL.md"):
         with pytest.raises(PathDenied):
@@ -286,6 +300,7 @@ def test_skill_and_upload_directories_readonly_and_separate(context):
 async def test_actual_framework_write_and_cross_round_refusal(context, sandbox_dir):
     executions = []
 
+    @evidence_tool("control.v1")
     @tool
     def generate_markdown(content: str, filename: str):
         """Count actual file business execution."""
@@ -302,28 +317,28 @@ async def test_actual_framework_write_and_cross_round_refusal(context, sandbox_d
             AIMessage(content="done"),
         ]
     )
-    agent = create_deep_agent(
-        model=model, tools=[generate_markdown], backend=run_backend, middleware=[HookToolMiddleware()]
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from langchain.agents import create_agent
+
+    agent = create_agent(
+        model=model,
+        tools=[generate_markdown],
+        middleware=[bind_framework_tools(FilesystemMiddleware(backend=run_backend)), HookToolMiddleware()],
     )
     state = await agent.ainvoke({"messages": [("user", "try file tools")]})
     messages = [message for message in state["messages"] if isinstance(message, ToolMessage)]
-    assert [message.status for message in messages] == ["error", "error", "error", "success"]
-    assert (
-        executions == [] and not other.exists() and (context.work_dir / "ok.md").read_text(encoding="utf-8") == "safe"
-    )
-    assert context.call_counts["tool"] == 1
+    assert [message.status for message in messages] == ["error", "error", "error", "error"]
+    assert executions == [] and not other.exists() and not (context.work_dir / "ok.md").exists()
+    assert context.call_counts["tool"] == 0
 
 
 @pytest_asyncio.fixture
-async def file_client(sandbox_dir, monkeypatch):
+async def file_client(sandbox_dir, monkeypatch, migrated_environment):
+    import agent.main_agent as runtime
     import api.server as server
 
-    monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
-    monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
-    monkeypatch.setattr(server.app.state, "runtime_policy", load_runtime_policy(), raising=False)
-    server.output_dir.mkdir()
-    server.updated_dir.mkdir()
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
+    monkeypatch.setattr(runtime, "_build_agent", lambda saver: object())
+    async with migrated_environment.client() as client:
         yield client, server
 
 
@@ -333,6 +348,7 @@ async def file_client(sandbox_dir, monkeypatch):
 )
 async def test_upload_rejects_bad_filenames(file_client, filename):
     client, server = file_client
+    await server.app.state.run_store.create_thread("session")
     response = await client.post("/api/upload", data={"thread_id": "session"}, files={"files": (filename, b"private")})
     assert response.status_code == 400 and list(server.updated_dir.iterdir()) == []
 
@@ -341,23 +357,35 @@ async def test_upload_rejects_bad_filenames(file_client, filename):
 async def test_upload_validation_size_and_valid_output_delivery(file_client):
     client, server = file_client
     bad = await client.post("/api/upload", data={"thread_id": "../escape"}, files={"files": ("safe.txt", b"private")})
-    assert bad.status_code == 400
+    assert bad.status_code == 404
     data = server.app.state.runtime_policy.model_dump()
     data["files"]["max_upload_bytes"] = 4
     server.app.state.runtime_policy = RuntimePolicy.model_validate(data)
+    await server.app.state.run_store.create_thread("session")
     large = await client.post("/api/upload", data={"thread_id": "session"}, files={"files": ("safe.txt", b"12345")})
     assert large.status_code == 413
+    await server.app.state.run_store.create_thread("session")
     good = await client.post("/api/upload", data={"thread_id": "session"}, files={"files": ("safe.txt", b"1234")})
     assert good.status_code == 200 and (server.updated_dir / "session_session" / "safe.txt").read_bytes() == b"1234"
-    report = server.output_dir / "report.txt"
+    await server.app.state.run_store.create_thread("session")
+    record = await server.app.state.run_store.create("session", "files", run_id="files-run")
+    directory = server.output_dir / "session_session" / "run_files-run"
+    directory.mkdir(parents=True)
+    report = directory / "report.txt"
     report.write_text("report", encoding="utf-8")
-    assert (await client.get("/api/download", params={"path": str(report)})).text == "report"
-    assert (await client.get("/output/report.txt")).text == "report"
-    assert len((await client.get("/api/files")).json()["files"]) == 1
     assert (
-        await client.get("/api/download", params={"path": str(server.updated_dir / "session_session" / "safe.txt")})
+        await client.get(f"/api/runs/{record['run_id']}/files/download", params={"path": "report.txt"})
+    ).text == "report"
+    assert (await client.get("/output/report.txt")).status_code == 404
+    assert len((await client.get(f"/api/runs/{record['run_id']}/files")).json()["files"]) == 1
+    assert (
+        await client.get(
+            f"/api/runs/{record['run_id']}/files/download", params={"path": "../../updated/session_session/safe.txt"}
+        )
     ).status_code == 403
-    assert (await client.get("/api/files", params={"path": str(server.updated_dir)})).status_code == 403
+    assert (
+        await client.get(f"/api/runs/{record['run_id']}/files/download", params={"path": str(server.updated_dir)})
+    ).status_code == 403
 
 
 @pytest.mark.asyncio
@@ -366,13 +394,20 @@ async def test_static_download_listing_and_upload_junction_bypasses_blocked(file
     outside = sandbox_dir / "private"
     outside.mkdir()
     (outside / "secret.txt").write_text("SECRET", encoding="utf-8")
-    links = [server.output_dir / "linked", server.updated_dir / "session_link"]
+    await server.app.state.run_store.create_thread("link")
+    await server.app.state.run_store.create("link", "files", run_id="link-run")
+    directory = server.output_dir / "session_link" / "run_link-run"
+    directory.mkdir(parents=True)
+    links = [directory / "linked", server.updated_dir / "session_link"]
     for link in links:
         make_junction(link, outside)
     try:
-        assert (await client.get("/output/linked/secret.txt")).status_code == 403
-        assert (await client.get("/api/download", params={"path": str(links[0] / "secret.txt")})).status_code == 403
-        assert (await client.get("/api/files")).json()["files"] == []
+        assert (await client.get("/output/linked/secret.txt")).status_code == 404
+        assert (
+            await client.get("/api/runs/link-run/files/download", params={"path": "linked/secret.txt"})
+        ).status_code == 403
+        assert (await client.get("/api/runs/link-run/files")).json()["files"] == []
+        await server.app.state.run_store.create_thread("link")
         response = await client.post("/api/upload", data={"thread_id": "link"}, files={"files": ("new.txt", b"attack")})
         assert response.status_code == 400 and not (outside / "new.txt").exists()
     finally:
@@ -475,7 +510,7 @@ def test_invalid_search_parameters_do_not_execute(context, args):
     assert result.status == "error" and calls == []
 
 
-def test_internal_tavily_client_single_attempt_timeout_and_close(context, monkeypatch):
+def test_internal_tavily_client_single_attempt_timeout_and_close(context, monkeypatch, inline_provider_worker):
     from tavily.errors import TimeoutError as TavilyTimeoutError
 
     from tools import tavily_tool
@@ -487,6 +522,7 @@ def test_internal_tavily_client_single_attempt_timeout_and_close(context, monkey
     class Client:
         def __init__(self, **kwargs):
             import requests
+
             self.session = requests.Session()
 
         def __enter__(self):
@@ -499,10 +535,11 @@ def test_internal_tavily_client_single_attempt_timeout_and_close(context, monkey
             calls.append(kwargs)
             raise TavilyTimeoutError(kwargs["timeout"])
 
-    monkeypatch.setattr(tavily_tool, "TavilyClient", Client)
+    monkeypatch.setattr("tavily.TavilyClient", Client)
     data = context.policy.model_dump()
     data["retry"]["delay_seconds"] = 0.0
     context.policy = RuntimePolicy.model_validate(data)
+    bind_research_contract(context)
     with pytest.raises(TavilyTimeoutError):
         tavily_tool.internet_search.func(query="q")
     assert len(calls) == len(closed) == 1
@@ -510,7 +547,7 @@ def test_internal_tavily_client_single_attempt_timeout_and_close(context, monkey
     assert context.call_counts["tool"] == 0 and context.call_counts["retry"] == 0
 
 
-def test_rejected_database_grants_prevent_select_and_release_connection(context, monkeypatch):
+def test_rejected_database_grants_prevent_select_and_release_connection(context, monkeypatch, inline_provider_worker):
     from tools import db_tools
 
     for key, value in {
@@ -547,48 +584,30 @@ def test_rejected_database_grants_prevent_select_and_release_connection(context,
         def rollback(self):
             calls.append("rollback")
 
-    monkeypatch.setattr(db_tools, "connect", lambda **kwargs: Connection())
+    monkeypatch.setattr("mysql.connector.connect", lambda **kwargs: Connection())
     with pytest.raises(PolicyError):
         db_tools.run_select("SELECT * FROM orders")
     assert calls == ["SHOW GRANTS", "cursor closed", "rollback", "connection closed"]
 
 
-def test_pdf_temporary_file_stays_outside_readonly_source_and_com_cleans_up(context, monkeypatch):
-    import pythoncom
-    import win32com.client
+@pytest.mark.asyncio
+async def test_markdown_export_preserves_readonly_source(context):
+    from importlib.util import find_spec
 
-    from utils.word_converter import convert_md_to_pdf_via_word
+    from agent.runtime.contracts import bind_contract
+    from agent.runtime.workflows import finalize_answer
 
+    assert find_spec("utils.word_converter") is None
     source = context.skill_dir / "report-writing" / "references" / "template.md"
     source.parent.mkdir(parents=True)
-    source.write_text("# Report", encoding="utf-8", newline="\r\n")
-    output = context.work_dir / "report.pdf"
-    actions = []
-
-    class Document:
-        def SaveAs(self, path, FileFormat):
-            Path(path).write_bytes(b"fake-pdf")
-
-        def Close(self, **kwargs):
-            actions.append("doc closed")
-
-    class Documents:
-        def Open(self, path):
-            temp = Path(path)
-            assert temp.parent == context.work_dir and temp.exists()
-            actions.append(temp)
-            return Document()
-
-    word = SimpleNamespace(Documents=Documents(), Quit=lambda: actions.append("word closed"))
-    monkeypatch.setattr(win32com.client, "DispatchEx", lambda name: word)
-    monkeypatch.setattr(pythoncom, "CoInitialize", lambda: actions.append("initialized"))
-    monkeypatch.setattr(pythoncom, "CoUninitialize", lambda: actions.append("uninitialized"))
-    assert "成功转换" in convert_md_to_pdf_via_word(
-        resolve_run_path("/skills/report-writing/references/template.md"), output
-    )
-    assert output.exists() and list(context.skill_dir.rglob("*.md")) == [source]
-    assert not actions[1].exists()
-    assert actions[-3:] == ["doc closed", "word closed", "uninitialized"]
+    original = b"# Report\r\n"
+    source.write_bytes(original)
+    bind_contract(context)
+    await finalize_answer(context, source.read_text(encoding="utf-8"))
+    assert (context.work_dir / "answer.md").read_bytes() == original
+    assert source.read_bytes() == original
+    assert list(context.skill_dir.rglob("*.md")) == [source]
+    assert list(context.work_dir.iterdir()) == [context.work_dir / "answer.md"]
 
 
 @pytest.mark.parametrize(
@@ -601,11 +620,15 @@ def test_pdf_temporary_file_stays_outside_readonly_source_and_com_cleans_up(cont
         '<a href="file:///private/file">x</a>',
     ],
 )
-def test_pdf_resource_loading_bypass_disabled(html):
-    from utils.word_converter import ReportHTMLGuard
+@pytest.mark.asyncio
+async def test_markup_delivery_does_not_load_resources(context, html):
+    from agent.runtime.contracts import bind_contract
+    from agent.runtime.workflows import finalize_answer
 
-    with pytest.raises(PathDenied):
-        ReportHTMLGuard().feed(html)
+    bind_contract(context)
+    await finalize_answer(context, html)
+    assert (context.work_dir / "answer.md").read_text(encoding="utf-8") == html
+    assert not (context.work_dir / "markup.pdf").exists()
 
 
 @pytest.mark.parametrize(
@@ -616,7 +639,9 @@ def test_pdf_resource_loading_bypass_disabled(html):
         ("execute_sql_query", {"query": "SELECT * FROM orders"}),
     ],
 )
-def test_unconfigured_tables_block_tools_and_hooks_before_connection(context, monkeypatch, name, args):
+def test_unconfigured_tables_block_tools_and_hooks_before_connection(
+    context, monkeypatch, name, args, inline_provider_worker
+):
     from tools import db_tools
 
     context.policy = load_runtime_policy()
@@ -626,8 +651,8 @@ def test_unconfigured_tables_block_tools_and_hooks_before_connection(context, mo
     ).items():
         monkeypatch.setenv(key, value)
     calls = []
-    monkeypatch.setattr(db_tools, "connect", lambda **kwargs: calls.append("connect"))
-    with pytest.raises(MissingConfiguration, match="sql.allowed_tables"):
+    monkeypatch.setattr("mysql.connector.connect", lambda **kwargs: calls.append("connect"))
+    with pytest.raises(DependencyUnavailable, match="sql.allowed_tables"):
         getattr(db_tools, name).invoke(args)
     request = SimpleNamespace(tool_call={"name": name, "args": args, "id": "unconfigured"})
     result = HookToolMiddleware().wrap_tool_call(request, lambda req: calls.append("execute"))

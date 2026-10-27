@@ -1,22 +1,9 @@
 /* Concurrent same-kind agent calls must remain distinguishable after replay. */
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const elements = new Map();
-const element = selector => {
-  if (!elements.has(selector)) elements.set(selector,{value:'',innerHTML:'',textContent:'',hidden:false,checked:false,
-    scrollHeight:0,scrollTop:0,clientHeight:0,addEventListener(){},querySelectorAll(){return [];},querySelector(){return {innerHTML:'',textContent:''};}});
-  return elements.get(selector);
-};
-class Stream { close(){} }
-const context = {document:{querySelector:element},localStorage:{getItem(){return null;},setItem(){}},
-  RunEventStream:Stream,WebSocket:{OPEN:1},URLSearchParams,console,
-  fetch:async()=>({ok:true,json:async()=>({files:[]})})};
-vm.createContext(context);
-vm.runInContext(fs.readFileSync(path.join(__dirname,'../../api/static/app.js'),'utf8')+
-  ';this.test={callGroups,renderCallGroups,createSession,applyEvent,displayStatus,renderJobs};',context);
-const ui=context.test, session=ui.createSession('thread','城市比较','run');
+const {harness} = require('./browser-fixtures.cjs');
+async function main() {
+const {context,element,ui}=await harness();
+const session=ui.createSession('thread','城市比较','run');
 let seq=0;
 const event=(kind,call,parent,actor,status,data={})=>({thread_id:'thread',run_id:'run',event_seq:++seq,
   event:kind,call_id:call,parent_call_id:parent,actor,status,data,timestamp:'2026-10-19T09:00:00Z'});
@@ -50,15 +37,11 @@ assert.equal((html.match(/data-call="search-a"/g)||[]).length,1);
 assert.equal((html.match(/data-call="search-b"/g)||[]).length,1);
 const before=session.logs.length;ui.applyEvent(session,events[0]);assert.equal(session.logs.length,before);
 // Same-kind success cannot erase another instance's failed state.
-session.status='completed';session.coverage='partial';assert.equal(ui.displayStatus(session),'partial');
+session.status='completed';session.completion={status:'partial'};assert.equal(ui.displayStatus(session),'partial');
 ui.applyEvent(session,event('run_timed_out','run',null,'main','timed_out',{partial_result:'已经核实的部分',error:'总时长耗尽'}));
 assert.equal(session.answer,'已经核实的部分');assert.equal(session.status,'timed_out');
-session.jobs=[{task_id:'job-a',status:'working',poll_after_seconds:3}];ui.renderJobs(session);
-assert.match(element('#jobArea').innerHTML,/后台执行中/);assert.doesNotMatch(element('#jobArea').innerHTML,/研究任务.*已完成/);
-session.jobs=[{task_id:'job-a',status:'completed',result:{answer:'真实完成结果'}}];ui.renderJobs(session);
-assert.match(element('#jobArea').innerHTML,/已完成/);
 // Server-owned partial coverage stays partial even when all child agents finished.
-session.status='completed';session.jobs=[];session.coverage='partial';
+session.status='completed';session.completion={status:'partial'};
 assert.equal(ui.displayStatus(session),'partial');
 // A registered third expert carries its own display name and task ownership.
 const custom=ui.createSession('thread','第三专家','custom-run');
@@ -75,4 +58,7 @@ assert.equal(auditGroups[0].target,'auditor');
 assert.ok(auditGroups[0].events.some(e=>e.call_id==='audit-tool'));
 assert.match(ui.renderCallGroups(custom),/审计专家 · 复核额度 · audit-a · 通过/);
 assert.doesNotMatch(ui.renderCallGroups(custom),/联网搜索助手|数据库查询助手/);
-console.log('PASS: concurrent agent ownership, tool aggregation, reverse replay, failed-instance retention, partial timeout and background status');
+console.log('PASS: concurrent agent ownership, tool aggregation, reverse replay, failed-instance retention, partial timeout and completion status');
+
+}
+main().catch(error=>{console.error(error);process.exitCode=1;});

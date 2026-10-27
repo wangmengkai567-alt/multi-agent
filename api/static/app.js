@@ -50,18 +50,18 @@ function persist() {
       runs:Object.values(sessions).map(s => ({threadId:s.id, runId:s.runId, query:s.query}))}));
   } catch (_) { notify('浏览器无法保存任务列表；刷新后可通过运行详情恢复。'); }
 }
-function lockAuthentication(message = '请登录后继续。后台任务仍会运行。') {
+function lockAuthentication(message = '请登录后继续。已提交的任务仍会运行。') {
   authenticated = false; csrfToken = null; authEpoch++; fileRequest++;
   clearTimeout(authTimer); authTimer = null;
   for (const session of Object.values(sessions)) {
-    session.stream?.close(); clearTimeout(session.jobTimer);
+    session.stream?.close();
     delete sessions[session.runId];
   }
   activeSessionId = null; skillCatalog = null; submitting = false;
   $('#workspace').hidden = true; $('#loginPanel').hidden = false; $('#logoutBtn').hidden = true;
   $('#authMessage').textContent = message;
   $('#queryInput').value = ''; $('#inputText').value = ''; $('#sendBtn').disabled = true;
-  $('#answer').textContent = ''; $('#jobArea').textContent = ''; $('#logArea').textContent = '';
+  $('#answer').textContent = ''; $('#logArea').textContent = '';
   $('#tabBar').textContent = ''; $('#runSummary').textContent = ''; $('#fileList').textContent = '';
   $('#skillChoices').textContent = '登录后加载技能目录';
   for (const id of Object.keys(skills)) delete skills[id];
@@ -228,7 +228,6 @@ function applyEvent(session, event) {
   if (event.event === 'workflow_state' && ['degraded','completed_degraded'].includes(event.status)) session.degraded = true;
   if (currentState && event.event === 'task_result') {
     session.status = 'completed'; session.answer = data.result;
-    if (data.jobs && authenticated) syncJobs(session);
     session.recordingIncomplete = data.recording_status === 'incomplete';
   }
   if (currentState && ['error','run_cancelled','run_timed_out','run_interrupted'].includes(event.event)) {
@@ -282,17 +281,15 @@ async function syncSession(session) {
   if (!authenticated || sessions[session.runId] !== session) return;
   renderTabs();
   if (activeSessionId === session.runId) renderLog(session);
-  if (typeof setTimeout === 'function') syncJobs(session);
 }
 function switchSession(runId) {
   activeSessionId = runId;
-  renderTabs(); renderLog(sessions[runId]); renderJobs(sessions[runId]); persist(); refreshFiles(); updateWSStatus();
+  renderTabs(); renderLog(sessions[runId]); persist(); refreshFiles(); updateWSStatus();
 }
 function closeSession(runId) {
   const session = sessions[runId];
   if (!session) return;
   if (session.stream) session.stream.close();
-  if (session.jobTimer && typeof clearTimeout === 'function') clearTimeout(session.jobTimer);
   delete sessions[runId];
   if (activeSessionId === runId) activeSessionId = Object.keys(sessions).at(-1) || null;
   renderTabs(); renderLog(sessions[activeSessionId]); persist(); refreshFiles(); updateWSStatus();
@@ -360,7 +357,7 @@ function describeEvent(event) {
   if (event.event === 'result_handoff') return '已将本轮查询摘要传给后续助手';
   if (event.event === 'before_tool') return '执行前检查 · ' + (d.tool_name || event.actor?.split(':').at(-1) || '工具');
   if (event.event === 'before_delegate') return `${who}执行前检查`;
-  if (event.event === 'after_subagent') return `${who}处理结束：${verdicts[d.check_status] || event.status}`;
+  if (event.event === 'after_subagent') return `${who}处理结束：${verdicts[d.check_status] || statusNames[event.status] || event.status}`;
   if (event.event === 'before_run') return '准备本轮任务与限制';
   if (event.event === 'after_run') return '本轮执行与清理结束';
   if (event.event === 'task_result') return '本轮结果已保存';
@@ -373,7 +370,7 @@ function renderLog(session) {
   const answer = $('#answer');
   if (!session) {
     $('#runSummary').textContent = '选择任务可查看进度和结果'; answer.hidden = true; answer.textContent = '';
-    $('#logArea').innerHTML = '<div class="empty-state">输入问题并发送任务</div>'; if ($('#jobArea')) $('#jobArea').innerHTML = ''; return;
+    $('#logArea').innerHTML = '<div class="empty-state">输入问题并发送任务</div>'; return;
   }
   const state = displayStatus(session);
   const partialWork = !activeStates.has(session.status) && session.status !== 'completed' && session.logs.some(e => e.event === 'subagent_completed');
@@ -386,7 +383,6 @@ function renderLog(session) {
     ${session.recordingIncomplete ? '<p>部分执行记录未保存，详情见最终事件。</p>' : ''}
     ${session.clarification ? '<p>请在问题栏补充完整任务后重新提交。</p>' : ''}
     <details><summary>运行详情</summary><pre>${escapeHtml(JSON.stringify({thread_id:session.id,run_id:session.runId,status:session.status},null,2))}</pre></details>`;
-  renderJobs(session);
   answer.hidden = session.answer === null || session.answer === undefined;
   renderAnswer(answer, session.answer ?? '');
   const area = $('#logArea');
@@ -450,7 +446,7 @@ function renderCallGroups(session, openDetails = new Set()) {
       const last = events.at(-1), d = last.data || {};
       const failed = !isSearchControl(d) && ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(last.status);
       const name = events.find(e=>e.data?.tool_name)?.data.tool_name || events.find(e=>e.actor?.includes(':'))?.actor.split(':').at(-1);
-      const toolNames = {internet_search:'网络搜索',read_web_page:'网页正文读取',read_file:'读取文件',write_todos:'更新计划',plan_research:'登记分工',task:'委派任务'};
+      const toolNames = {internet_search:'网络搜索',read_web_page:'网页正文读取',read_file:'读取文件',task:'委派任务'};
       const caption = name ? `${toolNames[name] || name} #${++toolNumber} · ${last.event==='after_tool' && last.status==='completed'?'已完成':describeEvent(last)}` : describeEvent(last);
       const budget = [...events].reverse().find(e=>e.data?.search_budget)?.data.search_budget;
       const quota = budget ? ` · 本任务 ${budget.task_used}/${budget.task_limit}，整轮 ${budget.run_used}/${budget.run_limit}` : '';
@@ -479,47 +475,6 @@ function renderCallGroups(session, openDetails = new Set()) {
       <summary>${escapeHtml(title)} · ${toolNumber} 次工具调用</summary>${rows}</details>`;
   }).join('');
 }
-async function syncJobs(session) {
-  if (!authenticated || session.jobSyncing || sessions[session.runId] !== session) return;
-  session.jobSyncing = true;
-  try {
-    const data = await request('/api/runs/'+encodeURIComponent(session.runId)+'/jobs');
-    if (sessions[session.runId] !== session) return;
-    session.jobs = data.jobs || [];
-    if (data.completion && data.status_seq >= session.statusSeq) session.completion = data.completion;
-    session.jobError = '';
-    renderTabs();
-    if (activeSessionId === session.runId) renderLog(session);
-    const working = session.jobs.filter(j=>j.status === 'working');
-    if (working.length && typeof setTimeout === 'function') {
-      clearTimeout(session.jobTimer);
-      const delay = Math.max(1,...working.map(j=>j.poll_after_seconds || 3));
-      session.jobTimer = setTimeout(()=>syncJobs(session),delay*1000);
-    }
-  } catch (error) {
-    if (!authenticated || sessions[session.runId] !== session) return;
-    session.jobError = '后台任务状态读取失败：'+error.message;
-    renderJobs(session);
-    if (session.jobs?.some(j=>j.status==='working') && typeof setTimeout === 'function') {
-      session.jobTimer = setTimeout(()=>syncJobs(session),5000);
-    }
-  } finally { session.jobSyncing = false; }
-}
-function renderJobs(session) {
-  if (!authenticated || !session || sessions[session.runId] !== session || activeSessionId !== session.runId) return;
-  const area = $('#jobArea');
-  if (!area) return;
-  const names = {working:'后台执行中',completed:'已完成',failed:'失败',cancelled:'已取消',input_required:'等待你的输入'};
-  area.innerHTML = (session.jobs || []).map(job=>`<section class="agent-group" data-job="${escapeHtml(job.task_id)}">
-    <h3>后台任务 · ${escapeHtml(job.task_id.slice(0,8))} · ${escapeHtml(names[job.status] || job.status)}${job.result?.partial?' · 有限结果':''}</h3>
-    ${job.error?`<p>${escapeHtml(job.error)}</p>`:''}
-    ${job.status==='working'?`<button class="btn" data-cancel-job="${escapeHtml(job.task_id)}">取消后台任务</button>`:''}
-    ${job.status==='input_required'?`<label>补充信息 <input data-job-input="${escapeHtml(job.task_id)}"></label><button class="btn" data-resume-job="${escapeHtml(job.task_id)}">提交并继续</button>`:''}
-    ${job.result?.answer?`<div data-job-answer="${escapeHtml(job.task_id)}"></div>`:''}
-    ${job.execution_run_id?`<button class="btn" data-open-job="${escapeHtml(job.execution_run_id)}" data-job-thread="${escapeHtml(job.task_id)}">查看后台执行详情</button>`:''}
-    </section>`).join('') + (session.jobError?`<p>${escapeHtml(session.jobError)}</p>`:'');
-  for (const job of session.jobs || []) if (job.result?.answer) renderAnswer(area.querySelector(`[data-job-answer="${job.task_id}"]`),job.result.answer);
-}
 async function sendTask() {
   const epoch = authEpoch;
   const input = $('#queryInput'), query = input.value.trim();
@@ -535,7 +490,7 @@ async function sendTask() {
     const data = await request('/api/task', {method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({query, input_text:$('#inputText').value || null,
         network_policy:$('#forbidNetwork').checked ? 'forbidden' : 'allowed',
-        execution_mode:$('#executionSelect').value || 'auto', skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
+        skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
     const session = createSession(data.thread_id, query, data.run_id);
     session.status = 'queued'; input.value = ''; $('#inputText').value = ''; notify('任务已接收');
     await syncSession(session);
@@ -608,22 +563,3 @@ $('#retrySkillsBtn').addEventListener('click', () => loadSkillCatalog().catch(er
 $('#queryInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); } });
 initializeAuthentication().catch(error => { $('#authMessage').textContent = error.message; });
 
-if ($('#jobArea')) $('#jobArea').addEventListener('click', async event => {
-  const session = sessions[activeSessionId];
-  if (!session) return;
-  const target = event.target;
-  try {
-    if (target.dataset.cancelJob) await request('/api/jobs/'+encodeURIComponent(target.dataset.cancelJob)+'/cancel?thread_id='+encodeURIComponent(session.id),{method:'POST'});
-    if (target.dataset.resumeJob) {
-      const id = target.dataset.resumeJob;
-      const input = $('#jobArea').querySelector(`[data-job-input="${id}"]`).value;
-      await request('/api/jobs/'+encodeURIComponent(id)+'/resume',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({thread_id:session.id,user_input:input})});
-    }
-    if (target.dataset.openJob) {
-      const view = createSession(target.dataset.jobThread,'后台研究执行',target.dataset.openJob);
-      await syncSession(view);
-      return;
-    }
-    await syncJobs(session);
-  } catch (error) { notify(error.message); }
-});

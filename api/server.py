@@ -23,13 +23,11 @@ sys.path.insert(0, str(project_root))
 
 # Import agent runner and monitor
 from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
-from agent.runtime.checkpoints import restore_job_checkpoint  # noqa: E402
 from agent.runtime.context import RunContext, RunStopped, reset_run_context, set_run_context  # noqa: E402
 from agent.runtime.events import EventSink  # noqa: E402
 from agent.runtime.hooks import HookCall, finish_run, pipeline  # noqa: E402
-from agent.runtime.jobs import JobService  # noqa: E402
 from agent.runtime.policies import load_runtime_policy  # noqa: E402
-from agent.runtime.skills import SKILL_IDS, required_skill_ids, skill_catalog, validate_skill_ids  # noqa: E402
+from agent.runtime.skills import SKILL_IDS, skill_catalog, validate_skill_ids  # noqa: E402
 from agent.runtime.workflows import finalize_answer  # noqa: E402
 from api.monitor import manager  # noqa: E402
 from api.run_store import RunConflict, RunStore  # noqa: E402
@@ -166,7 +164,6 @@ async def runtime_lifespan(app):
     app.state.execution_tasks = set()
     app.state.submission_lock = asyncio.Lock()
     app.state.stopping = False
-    app.state.job_service = None
     store = None
     sink = None
     try:
@@ -186,24 +183,14 @@ async def runtime_lifespan(app):
         sink = EventSink(store, manager.schedule_delivery)
         app.state.event_sink = sink
         output_dir.mkdir(exist_ok=True)
-        app.state.job_service = await JobService.open(
-            run_db_path.with_name("jobs.db"),
-            {"research": _research_job},
-            output_dir / "background-jobs",
-            scheduler=app.state.scheduler,
-            run_store=store,
-        )
         await initialize_agent()
         await sink.interrupt_active("Service restarted; previous execution was interrupted")
-        await app.state.job_service.recover()
         updated_dir.mkdir(exist_ok=True)
         manager.set_loop(asyncio.get_running_loop())
         manager.store = store
         yield
     finally:
         app.state.stopping = True
-        if getattr(app.state, "job_service", None):
-            await app.state.job_service.close()
         # Wait for an admission already in progress before snapshotting tasks.
         async with app.state.submission_lock:
             tasks = list(app.state.agent_tasks)
@@ -360,7 +347,6 @@ class TaskRequest(BaseModel):
     network_policy: Literal["allowed", "forbidden"] = "allowed"
     skill_ids: list[StrictStr] | None = Field(default=None, max_length=len(SKILL_IDS))
     business_mode: Literal["ordinary", "internal_external"] = "ordinary"
-    execution_mode: Literal["auto", "foreground", "background"] = "auto"
     required_sources: list[Literal["db", "search"]] = Field(default_factory=list, max_length=2)
     required_uploads: list[StrictStr] = Field(default_factory=list, max_length=20)
     thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,128}$")
@@ -394,16 +380,9 @@ class TaskRequest(BaseModel):
     @model_validator(mode="after")
     def explicit_workflow(self):
         if self.network_policy == "forbidden" and (
-            self.execution_mode == "background"
-            or "search" in self.required_sources
-            or self.business_mode == "internal_external"
+            "search" in self.required_sources or self.business_mode == "internal_external"
         ):
             raise ValueError("禁止联网与公开研究要求冲突；请调整显式执行约束")
-        if self.execution_mode == "background" and (self.business_mode != "ordinary" or self.required_uploads):
-            raise ValueError("后台公开调研不接收内部业务流程或上传文件；请使用前台执行")
-        missing = set(required_skill_ids(self.business_mode)) - set(self.skill_ids or ())
-        if missing:
-            raise ValueError(f"{self.business_mode} requires explicit skill selection: {', '.join(sorted(missing))}")
         return self
 
 
@@ -450,50 +429,14 @@ async def run_task(request: TaskRequest):
             event_sink=app.state.event_sink,
             policy=app.state.runtime_policy,
             scheduler=app.state.scheduler,
-            user_query=request.query
-            if request.input_text is not None
-            else await resolve_user_goal(thread_id, request.query),
+            user_query=request.query,
             input_text=request.input_text,
             network_policy=request.network_policy,
-            latest_message=request.query,
-            job_service=getattr(app.state, "job_service", None),
-            enforce_plan=True,
-            execution_mode=request.execution_mode,
             skill_ids=tuple(request.skill_ids or ()),
             business_mode=request.business_mode,
             required_sources=tuple(request.required_sources),
             required_uploads=tuple(request.required_uploads),
         )
-        for previous_id in reversed(await app.state.run_store.thread_runs(thread_id)):
-            previous = await app.state.run_store.get(previous_id)
-            if previous_id == run_id or previous["status"] != "completed" or not previous.get("answer"):
-                continue
-            events = await app.state.run_store.list_events(previous_id)
-            if any(e["event"] == "answer_validation" and e["status"] == "passed" for e in events):
-                context.previous_run_id, context.previous_answer = previous_id, previous["answer"]
-                break
-        previous_jobs = (
-            await app.state.job_service.list_thread(thread_id) if context.user_query != request.query else []
-        )
-        matching = [job for job in previous_jobs if job["payload"].get("user_query") == context.user_query]
-        if matching:
-            from tools.job_tools import public_job
-
-            job = matching[0]
-            await app.state.job_service.subscribe(job["task_id"], run_id)
-            context.pending_jobs[job["task_id"]] = public_job(job)
-            await context.event_sink.start(context)
-            answer = (job.get("result") or {}).get("answer") or (
-                "后台研究仍在进行中。" if job["status"] == "working" else "后台任务状态：" + job["status"]
-            )
-            await context.event_sink.finish(context, "completed", answer=answer)
-            return {
-                "status": job["status"],
-                "thread_id": thread_id,
-                "run_id": run_id,
-                "task_id": job["task_id"],
-                "poll_after_seconds": job["poll_after_seconds"],
-            }
         app.state.run_contexts[run_id] = context
         record = dict(record, question=context.user_query)
         from agent.runtime.scheduler import QueueFull
@@ -513,288 +456,12 @@ async def run_task(request: TaskRequest):
     return {"status": "started", "thread_id": thread_id, "run_id": run_id}
 
 
-async def resolve_user_goal(thread_id, message):
-    # Status follow-ups inherit the actual request, which remains in durable history.
-    import re
-
-    if not re.fullmatch(r"\s*(完成了吗|好了吗|做完了吗|继续|继续执行|进度如何|现在怎么样了)[？?！!。\s]*", message):
-        return message
-    for run_id in reversed(await app.state.run_store.thread_runs(thread_id)):
-        previous = await app.state.run_store.get(run_id)
-        if (
-            previous
-            and previous["question"] != message
-            and not re.fullmatch(
-                r"\s*(完成了吗|好了吗|做完了吗|继续|继续执行|进度如何|现在怎么样了)[？?！!。\s]*", previous["question"]
-            )
-        ):
-            return previous["question"]
-    return message
-
-
-async def _research_job(job):
-    from agent.runtime.checkpoints import save_job_checkpoint
-    from agent.runtime.contracts import CONTRACT_VERSION, TaskContract, background_eligible
-    from agent.runtime.jobs import JobFailed
-
-    if job["payload"].get("contract_version") != CONTRACT_VERSION:
-        raise JobFailed("旧后台任务缺少当前执行契约，保留记录并停止；请新建任务")
-    saved_contract = TaskContract.model_validate_json(json.dumps(job["payload"]["task_contract"]))
-    if not background_eligible(saved_contract):
-        raise JobFailed("后台研究契约不允许执行")
-    run_id = str(uuid.uuid4())
-    if job["resource_owner_id"] != app.state.run_store.owner_id:
-        raise JobFailed("Background task resource owner mismatch")
-    await app.state.run_store.create_thread(job["task_id"])
-    record = await app.state.event_sink.create(
-        job["task_id"], job["payload"]["user_query"], run_id, job_id=job["task_id"]
-    )
-    async with app.state.job_service.lock:
-        await app.state.job_service.connection.execute(
-            "UPDATE jobs SET execution_run_id=? WHERE task_id=?", (run_id, job["task_id"])
-        )
-        await app.state.job_service.connection.commit()
-    policy = app.state.runtime_policy
-    seconds = max(0.001, (datetime.fromisoformat(job["expires_at"]) - datetime.now(UTC)).total_seconds())
-    policy = policy.model_copy(
-        update={
-            "timeouts": policy.timeouts.model_copy(update={"total_seconds": seconds}),
-            "budgets": policy.job_budgets,
-        }
-    )
-    directory = app.state.job_service.directory / job["task_id"]
-    context = RunContext(
-        run_id,
-        job["task_id"],
-        directory,
-        owner_id=job["resource_owner_id"],
-        deadline=datetime.now(UTC) + timedelta(seconds=seconds),
-        deadline_clock=monotonic() + seconds,
-        event_sink=app.state.event_sink,
-        policy=policy,
-        user_query=job["payload"]["user_query"],
-        input_text=job["payload"]["input_text"],
-        network_policy=job["payload"]["network_policy"],
-        required_sources=tuple(job["payload"]["required_sources"]),
-        task_contract=saved_contract,
-        background_job=True,
-        scheduler=app.state.scheduler,
-        research_scope_id=job["task_id"],
-        enforce_plan=True,
-        job_checkpoint_path=directory / "job-checkpoint.json",
-    )
-    app.state.job_service.contexts[job["task_id"]] = context
-    checkpoint_loaded = False
-    try:
-        if job["attempts"] > 0 and not context.job_checkpoint_path.is_file():
-            raise RunStopped("当前任务检查点缺失，无法证明剩余预算；拒绝自动重新开始")
-        restore_job_checkpoint(context)
-        if not context.recovering:
-            from agent.runtime.capacity import initialize
-
-            initialize(context, saved_contract)
-        if context.resume_source_run_id:
-            previous = await app.state.run_store.get(context.resume_source_run_id)
-            if not previous or previous["thread_id"] != context.thread_id:
-                raise RunStopped("Checkpoint source run does not belong to the owned execution thread")
-        from agent.runtime.recovery_state import reconcile_result_history
-        from agent.runtime.review_state import ReviewState
-
-        await reconcile_result_history(context)
-        from agent.runtime.recovery_state import result_review_state
-
-        for task_id, task in context.search_tasks.items():
-            if task.current_result_id:
-                persisted = await app.state.run_store.get_current_result(
-                    task.current_result_id, task.result_run_id, context.thread_id
-                )
-                if (
-                    persisted is None
-                    or result_review_state(context, persisted, task_id) != task.state
-                    or persisted["review"].get("accepted_report") != task.report
-                ):
-                    context.stop("interrupted")
-                    raise RunStopped("恢复结果与数据库权威快照不一致")
-                context.recovered_results[persisted["result_id"]] = persisted
-        for item in context.approved_internal.values():
-            import copy
-
-            persisted = await app.state.run_store.get_current_result(
-                item["result_id"], item["result_run_id"], context.thread_id
-            )
-            if persisted is None or result_review_state(
-                context, persisted, item["task_id"]
-            ) != ReviewState.model_validate(item["state"]):
-                context.stop("interrupted")
-                raise RunStopped("恢复内部结果与数据库当前快照不一致")
-            report = copy.deepcopy(persisted["review"].get("accepted_report"))
-            if report is None:
-                raise RunStopped("恢复内部结果缺少已审核报告")
-            mapping = {f["id"]: f"{item['task_id']}:{item['report_attempt']}:{f['id']}" for f in report["facts"]}
-            for fact in report["facts"]:
-                fact["id"] = mapping[fact["id"]]
-            for analysis in report["analysis"]:
-                analysis["fact_ids"] = [mapping[k] for k in analysis["fact_ids"]]
-            if report != item["report"]:
-                context.stop("interrupted")
-                raise RunStopped("恢复内部报告内容与数据库不一致")
-            context.recovered_results[persisted["result_id"]] = persisted
-        from agent.results import ResultService
-
-        for result_id in context.recovered_results:
-            await ResultService().read_raw(context, result_id)
-        from agent.runtime.measurement import persist
-
-        checkpoint_loaded = True
-        persist(context)
-        await _execute_run(dict(record, question=context.user_query), context)
-    except Exception as error:
-        from agent.runtime.jobs import JobFailed
-
-        saved = await app.state.run_store.get(run_id)
-        if saved and saved["status"] in ("queued", "running"):
-            await context.event_sink.finish(context, "interrupted", error=str(error))
-        raise JobFailed(
-            str(error),
-            {"answer": saved["answer"], "execution_run_id": run_id, "partial": True}
-            if saved and saved["answer"]
-            else None,
-        ) from error
-    finally:
-        with context.budget_lock:
-            if checkpoint_loaded:
-                save_job_checkpoint(context)
-            context.job_checkpoint_closed = True
-        app.state.job_service.contexts.pop(job["task_id"], None)
-    result = await app.state.run_store.get(run_id)
-    if result["status"] != "completed":
-        raise RuntimeError(result["error"] or "后台任务未完成")
-    return {
-        "answer": result["answer"],
-        "execution_run_id": run_id,
-        "partial": context.coverage != "complete",
-        "coverage": context.coverage,
-        "completion": result["completion"],
-    }
-
-
-async def _with_completion(record, jobs=None):
-    from agent.runtime.completion import resolve_completion
-
-    if record is None:
-        return None
-    if jobs is None:
-        jobs = await app.state.job_service.list_run(record["run_id"])
-    return dict(record, completion=resolve_completion(record["completion"], jobs))
-
-
-@app.get("/api/runs/{run_id}/jobs")
-async def list_run_jobs(run_id: str):
-    record = await app.state.run_store.get(run_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Run not found")
-    from tools.job_tools import public_job
-
-    jobs = await app.state.job_service.list_run(run_id)
-    record = await _with_completion(record, jobs)
-    return {
-        "jobs": [public_job(job) for job in jobs],
-        "completion": record["completion"],
-        "status_seq": record["terminal_event_seq"],
-    }
-
-
-@app.get("/api/jobs/{task_id}")
-async def get_job(task_id: str, thread_id: str):
-    from tools.job_tools import public_job
-
-    job = await app.state.job_service.get(task_id, thread_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return public_job(job)
-
-
-@app.post("/api/jobs/{task_id}/cancel")
-async def cancel_job(task_id: str, thread_id: str):
-    from tools.job_tools import public_job
-
-    job = await app.state.job_service.cancel(task_id, thread_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return public_job(job)
-
-
-class JobResume(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    thread_id: StrictStr = Field(pattern=r"^[A-Za-z0-9_-]{1,128}$")
-    user_input: StrictStr = Field(min_length=1, max_length=8000)
-
-
-@app.post("/api/jobs/{task_id}/resume")
-async def resume_job(task_id: str, request: JobResume):
-    from tools.job_tools import public_job
-
-    try:
-        return public_job(await app.state.job_service.resume(task_id, request.thread_id, request.user_input))
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-
-
 @app.get("/api/runs/{run_id}")
 async def get_run(run_id: str):
     record = await app.state.run_store.get(run_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    return await _with_completion(record)
-
-
-def _requirement_context(run_id):
-    context = app.state.run_contexts.get(run_id)
-    if context is None:
-        service = getattr(app.state, "job_service", None)
-        context = (
-            next((value for value in list(service.contexts.values()) if value.run_id == run_id), None)
-            if service is not None
-            else None
-        )
-    return context
-
-
-@app.get("/api/runs/{run_id}/requirements")
-async def get_requirements(run_id: str):
-    from agent.runtime.requirement_changes import requirement_snapshot
-
-    record = await app.state.run_store.get(run_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="Run not found")
-    context = _requirement_context(run_id)
-    if context is not None:
-        with context.budget_lock:
-            return requirement_snapshot(context)
-    path = resource_path("requirement-state.json", resource_path(record["workspace"], output_dir))
-    if not path.is_file():
-        raise HTTPException(status_code=409, detail="No persisted requirement snapshot is available")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-from agent.runtime.requirement_changes import RequirementChange  # noqa: E402
-
-
-@app.post("/api/runs/{run_id}/requirements")
-async def change_requirements(run_id: str, change: RequirementChange):
-    from agent.runtime.requirement_changes import stage_change
-
-    async with app.state.submission_lock:
-        record = await app.state.run_store.get(run_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Run not found")
-        context = _requirement_context(run_id)
-        if record["status"] != "running" or context is None:
-            raise HTTPException(status_code=409, detail="Requirement changes need the live running context")
-        try:
-            return stage_change(context, change)
-        except (ValueError, RunStopped) as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+    return record
 
 
 @app.post("/api/runs/{run_id}/cancel")
@@ -814,7 +481,7 @@ async def cancel_run(run_id: str):
             task = app.state.run_tasks.get(run_id)
             if status in ("cancelled", "timed_out", "interrupted") and task is not None and not task.done():
                 task.cancel()
-        return await _with_completion(await app.state.run_store.get(run_id))
+        return await app.state.run_store.get(run_id)
 
 
 @app.get("/api/runs/{run_id}/events")
@@ -839,7 +506,6 @@ async def get_run_history(run_id: str):
     history = await app.state.run_store.history(run_id)
     if history is None:
         raise HTTPException(status_code=404, detail="Run not found")
-    history["run"] = await _with_completion(history["run"])
     return history
 
 

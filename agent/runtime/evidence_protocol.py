@@ -298,7 +298,6 @@ def _calculation(content, artifact, call):
 ADAPTERS = MappingProxyType(
     {
         "control.v1": EvidenceAdapter("control.v1", "control", _control),
-        "research.v1": EvidenceAdapter("research.v1", "control", _control, network=True, capture=False),
         "network-control.v1": EvidenceAdapter("network-control.v1", "control", _control, network=True),
         "sql.v1": EvidenceAdapter("sql.v1", "sql", _text("sql")),
         "record.v1": EvidenceAdapter("record.v1", "record", _text("record")),
@@ -360,7 +359,7 @@ def bind_framework_tools(middleware):
     return middleware
 
 
-def make_record(call, content, artifact=None, *, cache=None, parameters=None):
+def make_record(call, content, artifact=None):
     """Identity comes from the runtime; adapters may only normalize actual payloads."""
     from agent.results import clean
     from agent.runtime.context import get_run_context
@@ -368,7 +367,7 @@ def make_record(call, content, artifact=None, *, cache=None, parameters=None):
     context = get_run_context()
     if context is None:
         raise EvidenceError("Evidence collection requires a run")
-    owner = call.search_task_key
+    owner = call.task_id
     adapter = adapter_by_id(call.evidence_adapter) if call.evidence_adapter is not None else None
     if adapter is None and (call.executed or call.status == "completed"):
         raise EvidenceError("Executed evidence has no declared adapter")
@@ -378,7 +377,7 @@ def make_record(call, content, artifact=None, *, cache=None, parameters=None):
         dict(
             protocol_version=PROTOCOL_VERSION,
             adapter=adapter.adapter_id if adapter else None,
-            scope_id=context.research_scope_id,
+            scope_id=context.run_id,
             run_id=context.run_id,
             thread_id=context.thread_id,
             task_id=owner,
@@ -389,18 +388,15 @@ def make_record(call, content, artifact=None, *, cache=None, parameters=None):
             status=call.status,
             content=content,
             artifact=artifact,
-            request_parameters=dict(call.args) if parameters is None else parameters,
+            request_parameters=dict(call.args),
             query_reference={key: value for key, value in call.args.items() if key in ("table_name", "query")}
             if adapter is not None and adapter.kind == "sql"
             else {},
-            cache_hit=cache is not None,
-            origin_call_id=cache["call_id"] if cache else None,
-            origin_attempt=cache["attempt"] if cache else None,
             sources=[],
             evidence_note="",
         )
     )
-    if call.status == "completed" and (call.executed or cache is not None):
+    if call.status == "completed" and (call.executed):
         context.check_active()
         sources, note = adapter.normalize(record["content"], record["artifact"], call)
         keys = [source["key"] for source in sources]
@@ -445,30 +441,15 @@ def validate_record(record, context):
         adapter = None
     else:
         adapter = adapter_by_id(record["adapter"])
-    if context is None or record["scope_id"] != context.research_scope_id:
+    if context is None or record["scope_id"] != context.run_id or record["run_id"] != context.run_id:
         raise EvidenceError("Evidence belongs to another logical run")
     if record["thread_id"] != context.thread_id:
         raise EvidenceError("Evidence belongs to another thread")
     if record["integrity"] != fingerprint(
-        {
-            key: value
-            for key, value in record.items()
-            if key
-            not in (
-                "integrity",
-                "via",
-                "gap_id",
-                "rid",
-                "source_assessments",
-                "error",
-                "error_category",
-                "model_intent",
-                "delegated_from",
-            )
-        }
+        {key: value for key, value in record.items() if key not in ("integrity", "error_category")}
     ):
         raise EvidenceError("Tool evidence record changed after collection")
-    if record["sources"] and (not record["task_id"] or record["status"] != "completed"):
+    if record["sources"] and (record["task_id"] not in context.task_results or record["status"] != "completed"):
         raise EvidenceError("Only a completed owned result can provide sources")
     keys = []
     for value in record["sources"]:
@@ -486,32 +467,3 @@ def source_rows(evidence):
         if evidence_available(item):
             for row in item["sources"]:
                 yield item, copy.deepcopy(row), row["content"]
-
-
-def is_web_evidence(item):
-    """Classify an attempted call without claiming that it returned usable evidence."""
-    return item["adapter"] is not None and adapter_by_id(item["adapter"]).kind == "web"
-
-
-def source_identity(row):
-    if row["kind"] == "web":
-        from agent.runtime.source_policy import page_tier
-
-        return page_tier(row)
-    return dict(
-        publisher=row["title"],
-        channel_type=row["kind"],
-        identity_basis="Runtime-owned tool/file evidence",
-        applicability=json.dumps(row["locator"], ensure_ascii=False, sort_keys=True),
-        tier="unknown",
-        identity_status="not_applicable",
-        content_version=row["digest"],
-    )
-
-
-def source_citation(source):
-    if source["kind"] == "web":
-        return "[来源](" + source["url"] + ")"
-    label = {"sql": "SQL执行", "document": "上传材料", "calculation": "程序计算", "record": "工具结果"}[source["kind"]]
-    detail = source["title"].replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    return "[" + label + "：" + detail + "；" + source["source_id"] + "]"

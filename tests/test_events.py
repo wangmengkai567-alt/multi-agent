@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
+from runtime_fixtures import legacy_snapshot
 
 from agent.runtime.context import RunContext, reset_run_context, set_run_context
 from agent.runtime.events import EventPersistenceError, EventSink, make_event
@@ -15,7 +16,7 @@ from api.run_store import RunStore
 
 
 @pytest_asyncio.fixture
-async def outlet(sandbox_dir):
+async def outlet(sandbox_dir, migrated_environment):
     store = await RunStore.open(sandbox_dir / "runs.db")
     deliveries = []
     sink = EventSink(store, lambda payload, thread: deliveries.append((payload, thread)))
@@ -27,7 +28,7 @@ async def outlet(sandbox_dir):
 
 
 @pytest.mark.asyncio
-async def test_persisted_before_every_delivery_including_final_answer(sandbox_dir):
+async def test_persisted_before_every_delivery_including_final_answer(sandbox_dir, migrated_environment):
     path = sandbox_dir / "runs.db"
     store = await RunStore.open(path)
     observed = []
@@ -47,6 +48,7 @@ async def test_persisted_before_every_delivery_including_final_answer(sandbox_di
 
     sink = EventSink(store, deliver)
     try:
+        await store.create_thread("session")
         await sink.create("session", "question", "round")
         context = RunContext("round", "session", sandbox_dir, event_sink=sink)
         await sink.start(context)
@@ -65,6 +67,7 @@ async def test_persisted_before_every_delivery_including_final_answer(sandbox_di
 @pytest.mark.asyncio
 async def test_thread_and_async_events_get_unique_increasing_sequences(outlet, sandbox_dir):
     store, sink, _ = outlet
+    await store.create_thread("thread")
     await sink.create("thread", "query", "run")
     context = RunContext("run", "thread", sandbox_dir, event_sink=sink)
     token = set_run_context(context)
@@ -86,6 +89,7 @@ async def test_thread_and_async_events_get_unique_increasing_sequences(outlet, s
 @pytest.mark.asyncio
 async def test_parameter_strings_document_and_credentials_are_redacted(outlet, sandbox_dir):
     store, sink, deliveries = outlet
+    await store.create_thread("session")
     await sink.create("session", "query api_key=secret-key", "run")
     context = RunContext("run", "session", sandbox_dir, event_sink=sink)
     token = set_run_context(context)
@@ -124,9 +128,11 @@ async def test_parameter_strings_document_and_credentials_are_redacted(outlet, s
 
 
 @pytest.mark.asyncio
-async def test_sequence_resets_between_runs_and_persists_on_reopen(outlet, sandbox_dir):
+async def test_sequence_resets_between_runs_and_persists_on_reopen(outlet, sandbox_dir, migrated_environment):
     store, sink, _ = outlet
+    await store.create_thread("one")
     await sink.create("one", "q1", "run1")
+    await store.create_thread("two")
     await sink.create("two", "q2", "run2")
     await sink.finish(RunContext("run1", "one", sandbox_dir), "completed", answer="one answer")
     await sink.finish(RunContext("run2", "two", sandbox_dir), "failed", error="two error")
@@ -146,24 +152,25 @@ async def test_sequence_resets_between_runs_and_persists_on_reopen(outlet, sandb
 
 
 @pytest.mark.asyncio
-async def test_version_one_migrates_without_losing_runs(sandbox_dir):
+async def test_version_one_migrates_without_losing_runs(sandbox_dir, migrated_environment):
     path = sandbox_dir / "runs.db"
     store = await RunStore.open(path)
+    await store.create_thread("preserved")
     record = await store.create("preserved", "keep this question")
     await store.finish(record["run_id"], "completed", answer="keep this answer")
     before = await store.get(record["run_id"])
     await store.close()
-    with sqlite3.connect(path) as connection:
-        connection.execute("DROP TABLE results")
-        connection.execute("DROP TABLE events")
-        connection.execute("DROP TABLE subtasks")
-        connection.execute("PRAGMA user_version = 1")
+    environment = legacy_snapshot(path, sandbox_dir / "legacy", 1)
+    with pytest.raises(RuntimeError, match="Security database migration required"):
+        await RunStore.open(environment.runs)
+    await environment.migrate()
+    path = environment.runs
     store = await RunStore.open(path)
     try:
         assert await store.get(record["run_id"]) == before
         assert await store.list_events(record["run_id"]) == []
         async with store.connection.execute("PRAGMA user_version") as cursor:
-            assert (await cursor.fetchone())[0] == 5
+            assert (await cursor.fetchone())[0] == 8
     finally:
         await store.close()
 
@@ -171,6 +178,7 @@ async def test_version_one_migrates_without_losing_runs(sandbox_dir):
 @pytest.mark.asyncio
 async def test_event_failure_rolls_back_terminal_transition(outlet, sandbox_dir, monkeypatch):
     store, sink, deliveries = outlet
+    await store.create_thread("session")
     await sink.create("session", "question", "run")
     context = RunContext("run", "session", sandbox_dir)
     await sink.start(context)
@@ -191,6 +199,7 @@ async def test_background_recording_failure_is_explicit_and_business_answer_surv
     outlet, sandbox_dir, monkeypatch, caplog
 ):
     store, sink, deliveries = outlet
+    await store.create_thread("session")
     await sink.create("session", "question", "run")
     original = store.append_event
 
@@ -211,6 +220,7 @@ async def test_background_recording_failure_is_explicit_and_business_answer_surv
 @pytest.mark.asyncio
 async def test_wrong_session_event_is_rejected(outlet):
     store, _, _ = outlet
+    await store.create_thread("session")
     record = await store.create("session", "question")
     with pytest.raises(ValueError, match="session"):
         await store.append_event(make_event("wrong-session", record["run_id"], "bad", "bad"))
@@ -221,6 +231,7 @@ async def test_wrong_session_event_is_rejected(outlet):
 @pytest.mark.parametrize("status", ["completed", "failed"])
 async def test_notification_failure_does_not_change_business_state(outlet, sandbox_dir, caplog, status):
     store, sink, _ = outlet
+    await store.create_thread("session")
     await sink.create("session", "question", "run")
 
     def fail(*args):
@@ -239,6 +250,7 @@ async def test_notification_failure_does_not_change_business_state(outlet, sandb
 @pytest.mark.asyncio
 async def test_full_final_answer_is_not_truncated_and_late_terminal_event_is_rejected(outlet, sandbox_dir):
     store, sink, _ = outlet
+    await store.create_thread("session")
     await sink.create("session", "question", "run")
     context = SimpleNamespace(run_id="run", thread_id="session")
     answer = "final answer " * 200
@@ -252,7 +264,9 @@ async def test_full_final_answer_is_not_truncated_and_late_terminal_event_is_rej
 @pytest.mark.asyncio
 async def test_recording_failures_are_scoped_to_run_and_do_not_undo_final_answer(outlet, sandbox_dir, monkeypatch):
     store, sink, _ = outlet
+    await store.create_thread("one")
     await sink.create("one", "q1", "run1")
+    await store.create_thread("two")
     await sink.create("two", "q2", "run2")
     original = store.append_event
 

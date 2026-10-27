@@ -3,8 +3,6 @@ timeouts:
   request_seconds: 60.0
   shutdown_seconds: 5.0
   tool_seconds: 25.0
-  finalize_seconds: 45.0
-  job_seconds: 1800.0
 context:
   # Project request budget, measured over the complete UTF-8 JSON payload.
   # This is a conservative local guard, not a supplier token-usage measurement.
@@ -27,11 +25,6 @@ context:
       max_thinking_input_tokens: 983616
       max_output_tokens: 131072
       max_thinking_tokens: 262144
-review:
-  # Current provider supports strict JSON Schema; disable strict_schema for JSON-object-only providers.
-  json_mode: true
-  strict_schema: true
-  on_check_failure: reject
 budgets:
   total: 80
   main_model: 20
@@ -41,19 +34,6 @@ budgets:
   retry: 12
   tools_per_turn: 8
   near_ratio: 0.85
-collection:
-  # Per expert task, shared across evidence refinements; report/review calls are separate.
-  model_calls: 12
-  tool_calls: 12
-job_budgets:
-  total: 240
-  main_model: 40
-  sub_model: 90
-  review: 24
-  tool: 120
-  retry: 24
-  tools_per_turn: 8
-  near_ratio: 0.85
 sql:
   # Empty by default. Add only actual business tables approved for querying.
   allowed_tables: []
@@ -61,21 +41,15 @@ sql:
   timeout_seconds: 10
   max_query_chars: 12000
 search:
-  # Per-task initial searches; refinement slots open only after an insufficient review.
+  # Direct search and page-reading hard caps, counted by the runtime.
   calls_per_task: 2
-  refinement_calls_per_task: 2
-  research_calls_per_task: 6
   max_tasks_per_run: 8
-  max_concurrent_tasks: 2
-  max_plan_expansions: 3
-  # Whole-run hard caps cover all admitted tasks, including their reserved refinements.
+  # Whole-run cap includes every provider attempt.
   calls_per_run: 12
-  research_calls_per_run: 24
   timeout_seconds: 20
   result_chars: 1000
   content_chars: 6000
   page_reads_per_task: 3
-  model_context_chars: 24000
 files:
   skill_directory: skills
   max_upload_bytes: 10485760
@@ -83,28 +57,13 @@ retry:
   max_retries: 1
   delay_seconds: 0.25
   max_delay_seconds: 20.0
-  tools: [research_step, list_sql_tables, get_table_data, execute_sql_query]
+  tools: [internet_search, read_web_page, list_sql_tables, get_table_data, execute_sql_query]
 
 scheduler:
   # Identical model endpoint/key pairs share a pool automatically.
-  # Map MAIN/SUB/REVIEW to the same account ID when one account has different API keys.
+  # Map MAIN/SUB to the same account ID when one account has different API keys.
   model_accounts: {}
   runs: {concurrency: 2, queue_capacity: 16}
   children: {concurrency: 4, queue_capacity: 64}
   models: {concurrency: 2, queue_capacity: 32, requests_per_second: 2.0}
   search: {concurrency: 2, queue_capacity: 32, requests_per_second: 3.0}
-sources:
-  # Operator-confirmed publisher mappings. A search-domain restriction alone is not an identity.
-  identities:
-    - {publisher: Python, host: python.org, include_subdomains: true, tier: official, verification: "https://www.python.org/"}
-    - {publisher: Tavily, host: tavily.com, include_subdomains: true, tier: official, verification: "https://tavily.com/"}
-    - {publisher: Apple, host: apple.com, include_subdomains: true, tier: official, verification: "https://www.apple.com/"}
-    - {publisher: Apple, host: apple.com.cn, include_subdomains: true, tier: official, verification: "https://www.apple.com.cn/"}
-    - {publisher: Huawei, host: huawei.com, include_subdomains: true, tier: official, verification: "https://www.huawei.com/"}
-    - {publisher: Huawei, host: vmall.com, include_subdomains: true, tier: official, verification: "https://www.vmall.com/"}
-    - {publisher: Xiaomi, host: mi.com, include_subdomains: true, tier: official, verification: "https://www.mi.com/"}
-    - {publisher: Xiaomi, host: xiaomi.com, include_subdomains: true, tier: official, verification: "https://www.xiaomi.com/"}
-    - {publisher: Deep Agents, host: github.com, path_prefix: /langchain-ai/deepagents, tier: official, verification: "https://github.com/langchain-ai/deepagents"}
-    - {publisher: Open Deep Research, host: github.com, path_prefix: /langchain-ai/open_deep_research, tier: official, verification: "https://github.com/langchain-ai/open_deep_research"}
-    - {publisher: smolagents, host: github.com, path_prefix: /huggingface/smolagents, tier: official, verification: "https://github.com/huggingface/smolagents"}
-    - {publisher: GPT Researcher, host: github.com, path_prefix: /assafelovic/gpt-researcher, tier: official, verification: "https://github.com/assafelovic/gpt-researcher"}

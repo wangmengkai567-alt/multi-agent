@@ -14,19 +14,7 @@ def evidence_available(item):
     validate_record(item, context)
     if not item["sources"]:
         return False
-    if item["executed"]:
-        return True
-    if not item["cache_hit"] or not item["origin_call_id"]:
-        return False
-    from agent.results import clean
-
-    return any(
-        entry.get("status") == "served"
-        and entry.get("call_id") == item["origin_call_id"]
-        and entry.get("attempt") == item["origin_attempt"]
-        and clean(entry.get("payload")) == item["artifact"]
-        for entry in context.research_cache.values()
-    )
+    return bool(item["executed"])
 
 
 def source_key(url):

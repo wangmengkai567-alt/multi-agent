@@ -1,4 +1,4 @@
-"""Server-owned prerequisites for explicitly requested workflows and report inputs."""
+"""Track actual upload reads and deliver exactly the final user-visible answer."""
 
 import json
 from hashlib import sha256
@@ -7,305 +7,9 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from agent.runtime.context import get_run_context
-from agent.runtime.events import EventPersistenceError, make_event
-from utils.secure_paths import confined_path, resolve_run_path, validate_filename
-
-SOURCES = ("db", "search")
-OUTPUT_TOOLS = ("generate_markdown", "write_file", "edit_file")
-DEGRADED_NOTICE = (
-    "【降级分析】数据库依赖不可用，本轮没有可用内部经营指标。以下仅为外部检索材料，不构成内部数据与市场的有效对照。"
-)
-
-
-def guarded(context):
-    return context is not None and bool(
-        context.business_mode == "internal_external" or context.required_sources or context.required_uploads
-    )
-
-
-def initialize_workflow(context=None):
-    context = context or get_run_context()
-    if context is None:
-        return
-    if context.business_mode not in ("ordinary", "internal_external"):
-        raise ValueError("Unknown business mode")
-    if guarded(context) and context.event_sink is None:
-        raise refusal("storage_required", "当前流程需要可追溯的本轮结果存储。")
-    if context.business_mode == "internal_external" and "ecommerce-analysis" not in context.skill_ids:
-        raise ValueError("internal_external requires explicit ecommerce-analysis selection")
-    if set(context.required_sources) - set(SOURCES) or len(set(context.required_sources)) != len(
-        context.required_sources
-    ):
-        raise ValueError("Invalid required sources")
-    for name in context.required_uploads:
-        validate_filename(name)
-    with context.budget_lock:
-        if context.workflow is None and guarded(context):
-            context.workflow = dict(mode=context.business_mode, db="pending", search="pending")
-            emit(
-                context,
-                "initialized",
-                required_sources=required_sources(context),
-                required_uploads=list(context.required_uploads),
-            )
-
-
-def before_run_workflow(call):
-    initialize_workflow()
-
-
-def required_sources(context):
-    return sorted(
-        set(context.required_sources) | ({"db", "search"} if context.business_mode == "internal_external" else set())
-    )
-
-
-def emit(context, status, call=None, **data):
-    if context.event_sink is not None:
-        context.event_sink.submit(
-            make_event(
-                context.thread_id,
-                context.run_id,
-                "workflow_state",
-                "流程状态：" + status,
-                dict(business_mode=context.business_mode, **data),
-                actor=call.actor if call else "main",
-                status=status,
-                call_id=call.call_id if call else context.run_id,
-                parent_call_id=call.parent_call_id if call else None,
-            )
-        )
-
-
-def refusal(code, next_step, **details):
-    from agent.runtime.hooks import HookRejected
-
-    return HookRejected(
-        json.dumps(dict(error="workflow_precondition", code=code, next_step=next_step, **details), ensure_ascii=False)
-    )
-
-
-def upload_requirements(context):
-    required = set(context.required_uploads)
-    directory = confined_path("uploads", context.work_dir)
-    if context.business_mode == "internal_external" and directory.exists():
-        required.update(file.name for file in directory.iterdir() if file.is_file())
-    unread = []
-    for name in sorted(required):
-        file = confined_path("uploads/" + name, context.work_dir)
-        if not file.is_file() or context.upload_reads.get(str(file)) != sha256(file.read_bytes()).hexdigest():
-            unread.append(name)
-    return unread
-
-
-async def snapshot(context):
-    """Rebuild facts from this run's durable results; never trust model descriptions or state flags."""
-    from agent.results import ResultService
-
-    sink = context.event_sink
-    if sink is None:
-        raise EventPersistenceError("Workflow prerequisites require durable run results")
-    await sink.flush(context.run_id)
-    run = await sink.store.get(context.run_id)
-    if run is None or run["thread_id"] != context.thread_id or run["status"] not in ("queued", "running"):
-        raise refusal("run_ended", "本轮已结束，不再启动新动作。")
-    from agent.runtime.recovery_state import owned_results
-
-    usable = await owned_results(context, purpose="handoff")
-    for row in usable:
-        await ResultService().read_raw(context, row["result_id"])
-    all_rows = await owned_results(context)
-    tasks = await sink.store.list_subtasks(context.run_id)
-    from agent.runtime.experts import source_kind
-
-    active_db = any(source_kind(context, t["target"]) == "db" and t["status"] in ("queued", "running") for t in tasks)
-    ended = {t["call_id"] for t in tasks if t["status"] in ("completed", "failed")}
-    source_ids = {
-        source: [r["result_id"] for r in usable if source_kind(context, r["source"]) == source] for source in SOURCES
-    }
-    failures = [
-        r["result_id"]
-        for r in all_rows
-        if source_kind(context, r["source"]) == "db"
-        and r["check_status"] == "dependency_unavailable"
-        and r["call_id"] in ended
-    ]
-    events = await sink.store.list_events(context.run_id)
-    failures.extend(
-        event["call_id"]
-        for event in events
-        if event["event"] == "capability_preflight"
-        and event["data"].get("capability") == "db"
-        and event["status"] == "unavailable"
-    )
-    degraded = (
-        context.business_mode == "internal_external" and not source_ids["db"] and bool(failures) and not active_db
-    )
-    linked = set()
-    for event in events:
-        if event["event"] != "result_handoff":
-            continue
-        data = event["data"]
-        if (degraded and data.get("degraded") and set(data.get("db_failure_ids", [])) & set(failures)) or (
-            source_ids["db"] and set(data.get("result_ids", [])) & set(source_ids["db"])
-        ):
-            linked.add(event["call_id"])
-    searches = [r for r in usable if source_kind(context, r["source"]) == "search" and r["call_id"] in linked]
-    missing = [s for s in required_sources(context) if not source_ids[s] and not (s == "db" and degraded)]
-    if context.business_mode == "internal_external" and not searches and "search" not in missing:
-        missing.append("search")
-    if context.workflow is not None and context.business_mode == "internal_external":
-        with context.budget_lock:
-            context.workflow.update(
-                db="passed" if source_ids["db"] else "degraded" if degraded else "pending",
-                search="passed" if searches else "pending",
-            )
-    return dict(
-        db_result_ids=source_ids["db"],
-        db_failure_ids=failures if degraded else [],
-        degraded=degraded,
-        source_ids=source_ids,
-        missing_sources=missing,
-        unread_uploads=upload_requirements(context),
-    )
-
-
-async def prepare_delegate(context, call):
-    initialize_workflow(context)
-    if context.business_mode == "internal_external" and call.source_kind == "search":
-        call.workflow_data = await snapshot(context)
-
-
-def before_delegate_workflow(call):
-    context = get_run_context()
-    if context is None or context.business_mode != "internal_external" or call.source_kind != "search":
-        return
-    data = call.workflow_data
-    if not data or not (data.get("db_result_ids") or data.get("degraded")):
-        emit(context, "blocked", call, code="database_required")
-        raise refusal(
-            "database_required",
-            "先调用 task(db) 并等待本轮数据库结果检查通过，再调用 search；不得用口述或旧轮次 ID 代替。",
-        )
-    with context.budget_lock:
-        context.workflow.update(db="degraded" if data["degraded"] else "passed", search="running")
-    emit(
-        context,
-        "degraded" if data["degraded"] else "search_allowed",
-        call,
-        db_result_ids=data["db_result_ids"],
-        db_failure_ids=data["db_failure_ids"],
-    )
-
-
-def output_call(call):
-    return call.actor.rsplit(":", 1)[-1] in OUTPUT_TOOLS
-
-
-async def prepare_tool(call):
-    context = get_run_context()
-    if guarded(context) and output_call(call):
-        initialize_workflow(context)
-        call.workflow_data = await snapshot(context)
-
-
-def prepare_tool_sync(call):
-    from agent.results import sync_result
-
-    context = get_run_context()
-    if guarded(context) and output_call(call):
-        if context.event_sink is None:
-            raise refusal("storage_required", "当前流程需要可追溯的本轮结果存储。")
-        sync_result(prepare_tool(call), context.event_sink)
-
-
-def _source_status(data):
-    return {
-        "missing_sources": sorted(data["missing_sources"]),
-        "unread_uploads": sorted(data["unread_uploads"]),
-        "degraded": data["degraded"],
-        "db_failure_ids": sorted(data["db_failure_ids"]),
-        "source_ids": {kind: sorted(ids) for kind, ids in data["source_ids"].items()},
-    }
-
-
-def sources_incomplete(status):
-    return bool(status and (status["missing_sources"] or status["unread_uploads"] or status["degraded"]))
-
-
-async def delivery_sources(context):
-    if not guarded(context):
-        return None
-    initialize_workflow(context)
-    return _source_status(await snapshot(context))
-
-
-def disclose_sources(context, text, status):
-    if status is None:
-        return text
-    context.delivery_draft["source_status"] = status
-    if not sources_incomplete(status):
-        return text
-    notices = ["【未完成核验】"]
-    if status["degraded"]:
-        notices.append(DEGRADED_NOTICE)
-    if status["missing_sources"]:
-        labels = {"db": "业务数据库", "search": "公开资料检索"}
-        notices.append("尚无本轮合格结果的必需来源：" + "、".join(labels[k] for k in status["missing_sources"]) + "。")
-    if status["unread_uploads"]:
-        notices.append("尚未完成读取的必需文件：" + json.dumps(status["unread_uploads"], ensure_ascii=False) + "。")
-    notices.append("以上缺口未被视为已完成，已有结论仅限于实际取得且通过审核的依据。")
-    return text + "\n\n" + "\n\n".join(notices)
-
-
-def constrain_coverage(context):
-    draft = context.delivery_draft
-    if draft and sources_incomplete(draft.get("source_status")):
-        if not draft["used_fact_ids"]:
-            context.coverage = "unknown"
-        elif context.coverage == "complete":
-            context.coverage = "partial"
-
-
-def _reviewed_sources(context, data):
-    draft = context.delivery_draft
-    if not draft or not draft.get("reviewed_content_digest") or draft.get("source_status") != _source_status(data):
-        raise refusal("delivery_not_reviewed", "交付内容及当前来源缺口必须共同通过终审，不能绕过审核结束任务。")
-    return draft
-
-
-def report_check(context, data, call=None):
-    if data and not sources_incomplete(_source_status(data)):
-        return
-    from agent.runtime.delivery_actions import action_authorized
-
-    if data and call is not None and action_authorized(call):
-        draft = _reviewed_sources(context, data)
-        name = call.actor.rsplit(":", 1)[-1]
-        if (
-            name == "generate_markdown"
-            and sha256(call.args["content"].encode()).hexdigest() == draft["reviewed_content_digest"]
-        ):
-            return
-        raise refusal("delivery_content_changed", "文件交付只能使用与终审一致的正文。")
-    missing = data["missing_sources"] if data else required_sources(context)
-    unread = data["unread_uploads"] if data else list(context.required_uploads)
-    emit(context, "blocked", call, code="report_not_ready", missing_sources=missing, unread_uploads=unread)
-    raise refusal(
-        "report_not_ready",
-        "先调查所需来源；无法补齐时，将已有依据与真实缺口交给终审，再由程序交付。",
-        missing_sources=missing,
-        unread_uploads=unread,
-    )
-
-
-def before_tool_workflow(call):
-    context = get_run_context()
-    if not guarded(context) or not output_call(call):
-        return
-    data = call.workflow_data
-    report_check(context, data, call)
-    emit(context, "report_allowed", call, source_ids=data["source_ids"], degraded=data["degraded"])
+from agent.runtime.events import redact_text
+from agent.runtime.output import cited_urls, source_page
+from utils.secure_paths import confined_path, resolve_run_path
 
 
 def _range_covered(extent, ranges):
@@ -362,7 +66,7 @@ def _document_read_complete(context, file, digest, artifact):
 
 def after_tool_workflow(call):
     context = get_run_context()
-    if not guarded(context) or not call.executed or call.status != "completed":
+    if context is None or not call.executed or call.status != "completed":
         return
     messages = [call.result] if isinstance(call.result, ToolMessage) else []
     if isinstance(call.result, Command) and isinstance(call.result.update, dict):
@@ -381,14 +85,11 @@ def after_tool_workflow(call):
         digest = sha256(raw).hexdigest()
         if name in ("read_document", "read_file_content"):
             if name == "read_document":
-                from agent.runtime.checkpoints import save_job_checkpoint
-
                 artifacts = [m.artifact for m in messages if isinstance(m, ToolMessage) and m.artifact is not None]
                 if len(artifacts) != 1:
                     return
                 complete = _document_read_complete(context, file, digest, artifacts[0])
                 if not complete:
-                    save_job_checkpoint(context)
                     return
             elif file.suffix.lower() in (".docx", ".pdf", ".xlsx", ".xls"):
                 return  # Inspection is not the document expert's located evidence.
@@ -405,69 +106,87 @@ def after_tool_workflow(call):
                     return
         with context.budget_lock:
             context.upload_reads[str(file)] = digest
-        from agent.runtime.checkpoints import save_job_checkpoint
 
-        save_job_checkpoint(context)
-        emit(context, "upload_read", call, file_sha256=digest)
+
+def required_sources(context):
+    return set(context.required_sources) | ({"db", "search"} if context.business_mode == "internal_external" else set())
 
 
 async def finalize_answer(context, answer):
-    if context.task_contract is not None:
-        from agent.runtime.contracts import assert_contract
+    from agent.runtime.completion import validate_delivery
+    from agent.runtime.contracts import assert_contract
 
-        contract = assert_contract(context)
-        if contract.delivery_kind == "clarification":
-            if context.search_tasks or context.approved_internal or answer != contract.clarification:
-                raise ValueError("Clarification cannot carry business results")
-            return answer
-        if any(job["kind"] == "research" for job in context.pending_jobs.values()):
-            if contract.delivery_kind != "grounded" or not contract.network_allowed:
-                raise ValueError("Pending research contradicts the locked contract")
-            return answer
-        from agent.runtime.completion import validate_delivery
-
-        validate_delivery(context, answer)
-    if not guarded(context):
-        return answer
-    initialize_workflow(context)
-    data = await snapshot(context)
-    status = _source_status(data)
-    if sources_incomplete(status):
-        draft = _reviewed_sources(context, data)
-        if draft.get("delivered_content_digest") != sha256(answer.encode()).hexdigest():
-            raise refusal("delivery_content_changed", "最终答复必须与通过终审并交付的内容一致。")
-        constrain_coverage(context)
-    emit(
-        context,
-        "completed_degraded"
-        if data["degraded"]
-        else "completed_partial"
-        if sources_incomplete(status)
-        else "completed",
-        source_ids=data["source_ids"],
-        db_failure_ids=data["db_failure_ids"],
-        missing_sources=data["missing_sources"],
-        unread_uploads=data["unread_uploads"],
-        coverage=context.coverage,
-    )
+    context.check_active()
+    assert_contract(context)
+    rows = list(context.task_results.values())
+    successes = [row for row in rows if row["status"] == "completed"]
+    failures = [row for row in rows if row["status"] != "completed"]
+    if (rows or context.task_rejections) and not successes:
+        raise RuntimeError("所有委派均未取得有效结果，本轮调查失败；详见子任务错误记录")
+    obtained = {context.expert_contract[row["target"]]["execution"]["source_kind"] for row in successes}
+    missing = sorted(required_sources(context) - obtained)
+    unread = [
+        name
+        for name in context.required_uploads
+        if str(confined_path("uploads/" + name, context.work_dir)) not in context.upload_reads
+    ]
+    allowed = set(cited_urls(context.user_query))
+    for row in successes:
+        for source in row["sources"]:
+            if source["url"]:
+                allowed.add(source["url"])
+            allowed.update(cited_urls(source["content"]))
+    if context.input_text:
+        allowed.update(cited_urls(context.input_text))
+    if {source_page(url) for url in cited_urls(answer)} - {source_page(url) for url in allowed}:
+        raise ValueError("最终答复包含实际输入和工具结果中不存在的来源 URL")
+    notices = []
+    if failures:
+        notices.append(
+            "未完成的分工："
+            + "；".join(row["display_name"] + "（" + (row["error"] or row["status"]) + "）" for row in failures)
+        )
+    if missing:
+        notices.append("尚未取得结果的必需来源：" + "、".join(missing))
+    if unread:
+        notices.append("尚未完整读取的必需文件：" + "、".join(unread))
+    if notices:
+        answer += "\n\n【部分完成】\n\n" + "\n\n".join(notices)
+    answer = redact_text(answer).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
+    if not answer.strip():
+        raise ValueError("Final answer must not be empty")
+    raw = answer.encode("utf-8")
+    context.work_dir.mkdir(parents=True, exist_ok=True)
+    path = confined_path("answer.md", context.work_dir)
+    temporary = confined_path(".answer.tmp", context.work_dir)
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(raw)
+        with context.budget_lock:
+            context.check_active()
+            temporary.replace(path)
+            context.coverage = "partial" if notices else "complete"
+            digest = sha256(raw).hexdigest()
+            context.delivery_draft = dict(
+                delivered_content_digest=digest,
+                artifact=dict(
+                    kind="markdown", path="answer.md", status="completed", content_digest=digest, file_digest=digest
+                ),
+            )
+    finally:
+        temporary.unlink(missing_ok=True)
+    validate_delivery(context, answer)
     return answer
 
 
 def instruction(context):
-    if not guarded(context):
-        return ""
-    return "\n【服务端业务要求】" + json.dumps(
+    return "\n【本轮输入与权限】" + json.dumps(
         dict(
-            business_mode=context.business_mode,
-            required_sources=required_sources(context),
+            network_policy=context.network_policy,
+            required_sources=sorted(required_sources(context)),
             required_uploads=list(context.required_uploads),
-            rule=(
-                "本轮内外对照先取得合格数据库 result_id 再搜索；依赖不可用时仅做明确降级。"
-                if context.business_mode == "internal_external"
-                else "本轮普通任务自由选择助手。"
-            )
-            + "调查阶段先完成所需查询与上传文件读取；无法补齐时保留已核实结果并如实披露缺口。"
-            "来源未齐影响任务覆盖状态，不等同于运行失败；最终内容与缺口必须共同通过审核。",
+            input_text_reference="input_text" if context.input_text is not None else None,
+            rule="按任务需要逐个委派；成功结果与失败分工分别说明。缺失资料不得编造。",
         ),
         ensure_ascii=False,
     )

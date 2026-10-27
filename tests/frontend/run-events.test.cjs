@@ -7,7 +7,7 @@ const sockets = [], timers = new Map();
 let nextTimer = 0;
 class Socket {
   constructor(url) { this.url = url; sockets.push(this); }
-  close() { if (this.onclose) this.onclose(); }
+  close(code=1006) { if (this.onclose) this.onclose({code}); }
   emit(event) { this.onmessage({data: JSON.stringify(event)}); }
 }
 const sandbox = {
@@ -18,8 +18,9 @@ const sandbox = {
 };
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(path.join(__dirname, '../../api/static/run-events.js'), 'utf8') + ';this.Stream = RunEventStream;', sandbox);
+async function main() {
 const received = [], states = [];
-const stream = new sandbox.Stream('thread', 'run', e => received.push(e), s => states.push(s));
+const stream = new sandbox.Stream('thread', 'run', e => received.push(e), s => states.push(s), async()=>true);
 stream.connect();
 const first = sockets[0];
 assert.match(first.url, /run_id=run&after_seq=0/);
@@ -32,7 +33,7 @@ assert.equal(received.length, 2);
 first.close();
 assert.equal(timers.size, 1);
 assert.equal(states.at(-1), null);
-const reconnect = [...timers.values()][0]; timers.clear(); reconnect();
+const reconnect = [...timers.values()][0]; timers.clear(); await reconnect();
 const second = sockets[1];
 assert.match(second.url, /after_seq=1/);
 second.emit(event(2)); second.emit(event(3));
@@ -46,3 +47,6 @@ stream.close();
 assert.equal(timers.size, 0);
 assert.equal(sockets.length, 2);
 console.log('PASS: cursor gaps, reconnect cursor, duplicate and cross-run filtering, terminal events, explicit close');
+
+}
+main().catch(error=>{console.error(error);process.exitCode=1;});

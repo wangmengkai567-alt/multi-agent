@@ -23,13 +23,9 @@ class RunContext:
     deadline: datetime | None = None
     reference_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
     unavailable_agents: dict[str, str] = field(default_factory=dict, repr=False)
-    capability_preflight: dict = field(default_factory=dict, repr=False)
-    preflight_complete: bool = False
-    preflight_lock: object = field(default_factory=RLock, repr=False)
     deadline_clock: float | None = None
     stop_status: str | None = None
     terminal_error: ExecutionTerminated | None = field(default=None, repr=False)
-    collection_states: dict = field(default_factory=dict, repr=False)
     event_sink: object | None = field(default=None, repr=False)
     hook_failures: list[str] = field(default_factory=list, repr=False)
     policy: object | None = field(default=None, repr=False)
@@ -38,7 +34,6 @@ class RunContext:
     business_mode: str = "ordinary"
     required_sources: tuple[str, ...] = ()
     required_uploads: tuple[str, ...] = ()
-    workflow: dict | None = field(default=None, repr=False)
     upload_reads: dict = field(default_factory=dict, repr=False)
     upload_coverage: dict = field(default_factory=dict, repr=False)
     document_coverage: dict = field(default_factory=dict, repr=False)
@@ -47,77 +42,31 @@ class RunContext:
     skill_versions: dict = field(default_factory=dict, repr=False)
     skill_bodies: dict = field(default_factory=dict, repr=False)
     skill_resources: dict = field(default_factory=dict, repr=False)
-    search_calls: set[tuple[str, str]] = field(default_factory=set, repr=False)
-    search_tasks: dict = field(default_factory=dict, repr=False)
-    search_finalization_announced: bool = False
-    answer_repair_attempted: bool = False
-    answer_citation_repair_attempted: bool = False
     coverage: str = "unknown"
-    query_version: int = 1
-    query_history: list = field(default_factory=list, repr=False)
-    pending_requirement_change: dict | None = field(default=None, repr=False)
-    research_scope_id: str = ""
-    resume_source_run_id: str | None = None
-    objects: dict = field(default_factory=dict, repr=False)
-    requirement_links: dict = field(default_factory=dict, repr=False)
-    requirements: dict = field(default_factory=dict, repr=False)
-    coverage_rows: dict = field(default_factory=dict, repr=False)
-    gaps: dict = field(default_factory=dict, repr=False)
     stop_event: object = field(default_factory=Event, repr=False)
-    research_waiters: dict = field(default_factory=dict, repr=False)
-    research_cache: dict = field(default_factory=dict, repr=False)
-    evidence_snapshots: dict = field(default_factory=dict, repr=False)
-    quote_registry: dict = field(default_factory=dict, repr=False)
     request_ledger: dict = field(default_factory=dict, repr=False)
-    attempt_ledger: dict = field(default_factory=dict, repr=False)
-    outbound: list = field(default_factory=list, repr=False)
-    review_cache: dict = field(default_factory=dict, repr=False)
-    revision_reservations: dict = field(default_factory=dict, repr=False)
-    capacity_reservations: dict = field(default_factory=dict, repr=False)
-    expert_tasks: dict = field(default_factory=dict, repr=False)
-    restored_reservation_owners: set = field(default_factory=set, repr=False)
     delivery_draft: dict | None = field(default=None, repr=False)
     original_call_ids: dict = field(default_factory=dict, repr=False)
-    approved_internal: dict = field(default_factory=dict, repr=False)
-    internal_result_version: int = 0
     user_query: str = field(default="", repr=False)
     input_text: str | None = field(default=None, repr=False)
     network_policy: str = "allowed"
     task_contract: object | None = field(default=None, repr=False)
     expert_contract: dict = field(default_factory=dict, repr=False)
-    previous_run_id: str | None = None
-    previous_answer: str = field(default="", repr=False)
-    latest_message: str = field(default="", repr=False)
     tool_turns: dict = field(default_factory=dict, repr=False)
     turn_counts: dict = field(default_factory=dict, repr=False)
-    task_scopes: dict = field(default_factory=dict, repr=False)
     call_labels: dict = field(default_factory=dict, repr=False)
-    pending_jobs: dict = field(default_factory=dict, repr=False)
-    job_service: object | None = field(default=None, repr=False)
-    background_job: bool = False
-    job_checkpoint_path: Path | None = field(default=None, repr=False)
-    job_checkpoint_closed: bool = False
-    collecting: bool = True
-    recovering: bool = False
-    recovered_results: dict = field(default_factory=dict, repr=False)
-    partial_answer: bool = False
-    accepted_plan: bool = False
     scheduler_ticket: str | None = None
-    plan_version: int = 0
-    plan_expansions: int = 0
-    plan_closed: bool = False
     scheduler: object | None = field(default=None, repr=False)
-    enforce_plan: bool = False
-    execution_mode: str = "auto"
     budget_lock: object = field(default_factory=RLock, repr=False)
+    task_rejections: list = field(default_factory=list, repr=False)
+    search_counts: dict = field(default_factory=dict, repr=False)
+    task_results: dict = field(default_factory=dict, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
     )
 
     def __post_init__(self):
-        if not self.research_scope_id:
-            self.research_scope_id = self.run_id
         if self.scheduler is None:
             from agent.runtime.policies import load_runtime_policy
             from agent.runtime.scheduler import ServiceScheduler

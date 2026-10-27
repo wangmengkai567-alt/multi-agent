@@ -55,9 +55,10 @@ def read_file_content(
     if not file.is_file():
         raise FileNotFoundError("Requested file does not exist")
     monitor.report_tool("文件内容读取工具", {"filename": filename, "instruction": instruction})
-    _, (content, _, _, _, _, _) = _read(file)
+    raw, (content, _, _, _, _, _) = _read(file)
     if file.suffix.lower() not in (".docx", ".pdf", ".xlsx", ".xls"):
-        stage_read(file, content, numbered=False)
+        original = raw.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+        stage_read(file, original, numbered=False)
     return content
 
 

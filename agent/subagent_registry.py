@@ -26,61 +26,23 @@ RESERVED_NAMES = {
 @dataclass(frozen=True)
 class ModelConfig:
     profile: str = "SUB"
-    review_profile: str = "REVIEW"
     max_retries: int = 0
 
     def __post_init__(self):
-        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", p) for p in (self.profile, self.review_profile)):
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", p) for p in (self.profile,)):
             raise ValueError("Model profiles must be explicit environment role names")
         if type(self.max_retries) is not int or self.max_retries != 0:
             raise ValueError("Model SDK retries must be zero")
 
 
 @dataclass(frozen=True)
-class ReviewConfig:
-    enabled: bool = False
-    max_refinements: int = 1
-    model_check: bool = False
-    required_tools: tuple[str, ...] = ()
-    required_fields: tuple[str, ...] = ()
-    require_sources: bool = False
-    grounded_report: bool = False
-
-    def __post_init__(self):
-        if type(self.max_refinements) is not int or self.max_refinements not in (0, 1):
-            raise ValueError("At most one refinement is allowed")
-        if any(
-            type(v) is not bool for v in (self.enabled, self.model_check, self.require_sources, self.grounded_report)
-        ):
-            raise ValueError("Review flags must be booleans")
-        if self.grounded_report and not (self.enabled and self.model_check):
-            raise ValueError("Grounded reports require enabled semantic review")
-        for values in (self.required_tools, self.required_fields):
-            if not isinstance(values, tuple) or any(not isinstance(v, str) or not v.strip() for v in values):
-                raise ValueError("Review requirements must be immutable non-empty strings")
-
-
-@dataclass(frozen=True)
 class ExecutionConfig:
-    input_kind: str = "task"
-    output_kind: str = "fact_report"
     source_kind: str = "other"
     network_access: bool = False
-    receive_internal_results: bool = False
 
     def __post_init__(self):
-        if self.input_kind not in ("task", "planned_research") or self.output_kind != "fact_report":
-            raise ValueError("Unsupported expert input/output protocol")
-        if self.source_kind not in ("db", "search", "other"):
-            raise ValueError("Unsupported workflow source category")
-        if any(type(v) is not bool for v in (self.network_access, self.receive_internal_results)):
-            raise ValueError("Execution permissions must be booleans")
-        if self.input_kind == "planned_research" and not self.network_access:
-            raise ValueError("Planned public research requires network access")
-
-    @property
-    def planned(self):
-        return self.input_kind == "planned_research"
+        if self.source_kind not in ("db", "search", "other") or type(self.network_access) is not bool:
+            raise ValueError("Invalid expert execution permissions")
 
 
 @dataclass(frozen=True)
@@ -131,12 +93,10 @@ class SubagentSpec:
     system_prompt: str
     tools: tuple
     model_config: ModelConfig = field(default_factory=ModelConfig)
-    review_config: ReviewConfig | None = None
     allowed_skill_ids: tuple[str, ...] = ()
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
-    delegate_targets: tuple[str, ...] = ()
 
     def validate(self):
         for value, expected in (
@@ -157,37 +117,14 @@ class SubagentSpec:
             not isinstance(v, str) or not v.strip() for v in (self.display_name, self.description, self.system_prompt)
         ):
             raise ValueError("Expert display name, description and prompt are required")
-        if not all(isinstance(v, tuple) for v in (self.tools, self.allowed_skill_ids, self.delegate_targets)):
+        if not all(isinstance(v, tuple) for v in (self.tools, self.allowed_skill_ids)):
             raise ValueError("Registry collections must be immutable tuples")
-        if (
-            not isinstance(self.review_config, ReviewConfig)
-            or not self.review_config.enabled
-            or not self.review_config.model_check
-        ):
-            raise ValueError("Every expert requires an explicit enabled semantic review policy")
         if any(not isinstance(t, BaseTool) for t in self.tools):
             raise ValueError("Expert tools must have a registered BaseTool schema")
-        if not self.review_config.grounded_report:
-            raise ValueError("Expert fact_report output requires grounded report validation")
         names = [t.name for t in self.tools]
         reserved = RESERVED_NAMES
         if len(set(names)) != len(names) or set(names) & reserved:
             raise ValueError("Duplicate or reserved expert tool name")
-        if not set(self.review_config.required_tools).issubset(names):
-            raise ValueError("Review requires a tool not provided by this expert")
-        if self.execution.planned and "research_step" not in names:
-            raise ValueError("Planned research requires the controlled research_step tool")
-        if not self.execution.network_access and set(names) & {
-            "research_step",
-            "internet_search",
-            "read_web_page",
-            "submit_research_job",
-        }:
-            raise ValueError("Network tool contradicts the expert permission")
-        if self.execution.source_kind == "db" and self.execution.planned:
-            raise ValueError("Database results cannot use the public research lifecycle")
-        if len(set(self.delegate_targets)) != len(self.delegate_targets):
-            raise ValueError("Duplicate delegation target")
         from agent.runtime.skills import validate_skill_ids
 
         validate_skill_ids(self.allowed_skill_ids)
@@ -195,8 +132,6 @@ class SubagentSpec:
 
         for t in self.tools:
             adapter = adapter_for_tool(t)
-            if t.name in self.review_config.required_tools and adapter.kind == "control" and adapter.capture:
-                raise ValueError("A required evidence tool cannot be declared as workflow control")
             if adapter.network and not self.execution.network_access:
                 raise ValueError("Tool evidence binding contradicts the expert network permission")
             convert_to_openai_tool(t)
@@ -214,12 +149,10 @@ class SubagentSpec:
                 for t in self.tools
             ],
             model_config=asdict(self.model_config),
-            review_config=asdict(self.review_config),
             allowed_skill_ids=list(self.allowed_skill_ids),
             execution=asdict(self.execution),
             resources=asdict(self.resources),
             summary=asdict(self.summary),
-            delegate_targets=list(self.delegate_targets),
         )
 
 
@@ -242,25 +175,6 @@ class SubagentRegistry:
         all_tools = {t.name for s in registered.values() for t in s.tools}
         if all_tools & registered.keys():
             raise ValueError("Expert and tool names must be distinct")
-        visiting, visited = set(), set()
-
-        def visit(key):
-            if key in visiting:
-                raise ValueError("Cyclic expert delegation is forbidden")
-            if key in visited:
-                return
-            visiting.add(key)
-            for target in registered[key].delegate_targets:
-                if target not in registered:
-                    raise ValueError("Unknown delegated expert")
-                if not registered[key].execution.network_access and registered[target].execution.network_access:
-                    raise ValueError("Delegation cannot escalate network permissions")
-                visit(target)
-            visiting.remove(key)
-            visited.add(key)
-
-        for key in registered:
-            visit(key)
         self.specs = MappingProxyType(registered)
 
     def get(self, agent_id):

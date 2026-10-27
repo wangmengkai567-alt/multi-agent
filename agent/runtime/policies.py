@@ -14,7 +14,6 @@ from sqlglot.optimizer.scope import traverse_scope
 
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
-from agent.runtime.source_policy import SourcePolicy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_CONFIG_PATH = PROJECT_ROOT / "config" / "runtime.yml"
@@ -25,17 +24,6 @@ class PolicyError(ValueError):
     pass
 
 
-class DecisionRejected(PolicyError):
-    """Structurally valid intent violates a runtime ownership or requirement policy."""
-
-
-class SearchLimitReached(PolicyError):
-    pass
-
-
-SEARCH_CONTROL_CATEGORIES = frozenset(("search_limit",))
-
-
 class BudgetExceeded(ExecutionTerminated):
     pass
 
@@ -44,17 +32,8 @@ class MissingConfiguration(ExecutionTerminated):
     """Required execution configuration is invalid; the run cannot safely continue."""
 
 
-class ReservationUnavailable(PolicyError):
-    """An unspent report/refinement hold cannot be admitted."""
-
-
 class StrictConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
-
-
-class CollectionLimits(StrictConfig):
-    model_calls: int = Field(default=12, ge=1, le=10000)
-    tool_calls: int = Field(default=12, ge=1, le=10000)
 
 
 class Budgets(StrictConfig):
@@ -65,6 +44,8 @@ class Budgets(StrictConfig):
     tool: int = Field(ge=1, le=10000)
     retry: int = Field(ge=0, le=10000)
     tools_per_turn: int = Field(default=8, ge=1, le=100)
+    task_model_calls: int = Field(default=12, ge=1, le=1000)
+    task_tool_calls: int = Field(default=12, ge=1, le=1000)
     near_ratio: float = Field(default=0.85, gt=0, lt=1)
 
 
@@ -112,29 +93,17 @@ class SchedulerLimits(StrictConfig):
 
 class SearchLimits(StrictConfig):
     calls_per_task: int = Field(default=2, ge=1, le=20)
-    refinement_calls_per_task: int = Field(default=2, ge=0, le=10)
-    research_calls_per_task: int = Field(default=6, ge=1, le=20)
     max_tasks_per_run: int = Field(default=8, ge=1, le=32)
-    max_concurrent_tasks: int = Field(default=2, ge=1, le=16)
-    max_plan_expansions: int = Field(default=3, ge=0, le=10)
     calls_per_run: int = Field(default=12, ge=1, le=100)
-    research_calls_per_run: int = Field(default=24, ge=1, le=100)
     page_reads_per_task: int = Field(default=3, ge=1, le=10)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     result_chars: int = Field(default=1000, ge=100, le=8000)
     content_chars: int = Field(default=6000, ge=1000, le=40000)
-    model_context_chars: int = Field(default=12000, ge=2000, le=80000)
 
     @model_validator(mode="after")
     def fair_capacity(self):
-        for task_limit, run_limit in (
-            (self.calls_per_task, self.calls_per_run),
-            (self.research_calls_per_task, self.research_calls_per_run),
-        ):
-            if run_limit < self.max_concurrent_tasks * (task_limit + self.refinement_calls_per_task):
-                raise ValueError("Run search capacity must cover one concurrent batch and its reserved refinements")
-        if self.max_concurrent_tasks > self.max_tasks_per_run:
-            raise ValueError("Concurrent tasks cannot exceed the plan task limit")
+        if self.calls_per_run < self.calls_per_task:
+            raise ValueError("Run search capacity cannot be smaller than a task budget")
         return self
 
 
@@ -165,16 +134,10 @@ class RetryLimits(StrictConfig):
 
     @model_validator(mode="after")
     def safe_tools(self):
-        permitted = {"research_step", "list_sql_tables", "get_table_data", "execute_sql_query"}
+        permitted = {"internet_search", "read_web_page", "list_sql_tables", "get_table_data", "execute_sql_query"}
         if set(self.tools) - permitted:
             raise ValueError("Only idempotent query tools may be retried")
         return self
-
-
-class ReviewLimits(StrictConfig):
-    json_mode: bool = False
-    strict_schema: bool = False
-    on_check_failure: str = Field(default="reject", pattern="^(reject|return_unchecked)$")
 
 
 class TimeoutLimits(StrictConfig):
@@ -182,8 +145,6 @@ class TimeoutLimits(StrictConfig):
     request_seconds: float = Field(default=30.0, gt=0, le=300)
     shutdown_seconds: float = Field(default=5.0, gt=0, le=30)
     tool_seconds: float = Field(default=25.0, gt=0, le=300)
-    finalize_seconds: float = Field(default=45.0, ge=0, le=300)
-    job_seconds: float = Field(default=1800.0, gt=0, le=86400)
 
 
 class ModelWindow(StrictConfig):
@@ -219,19 +180,13 @@ class ContextLimits(StrictConfig):
 
 class RuntimePolicy(StrictConfig):
     context: ContextLimits
-    sources: SourcePolicy = Field(default_factory=SourcePolicy)
     scheduler: SchedulerLimits = Field(default_factory=SchedulerLimits)
     timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)
-    collection: CollectionLimits = Field(default_factory=CollectionLimits)
     budgets: Budgets
-    job_budgets: Budgets = Field(
-        default_factory=lambda: Budgets(total=240, main_model=40, sub_model=90, review=24, tool=120, retry=24)
-    )
     sql: SQLLimits
     search: SearchLimits = Field(default_factory=SearchLimits)
     files: FileLimits
     retry: RetryLimits
-    review: ReviewLimits = Field(default_factory=ReviewLimits)
 
 
 def load_runtime_policy(path=None):
@@ -261,7 +216,7 @@ def calls_available(*kinds, phase=None):
     """Use the same admission calculation without charging a future call."""
     try:
         _reserve_calls(*kinds, charge=False, phase=phase)
-    except (BudgetExceeded, ReservationUnavailable):
+    except (BudgetExceeded, PolicyError):
         return False
     return True
 
@@ -273,96 +228,42 @@ def _reserve_calls(*kinds, charge, phase=None):
     context.check_active()
     limits = policy_for_run().budgets
     requested = {kind: kinds.count(kind) for kind in set(kinds)}
-    from agent.runtime.capacity import eligible as capacity_eligible
-    from agent.runtime.capacity import pending_counts
-    from agent.runtime.reservations import current_owner, held_counts
-
     with context.budget_lock:
-        from agent.runtime.collection import current_collection
-
-        collection = current_collection()
-        if charge and collection is not None:
-            for kind, count in requested.items():
-                collection.check(kind, count)
-        if phase is None:
-            from agent.runtime.models import model_phase
-
-            phase = model_phase.get()
-        reserved = pending_counts(context)
-        capacity = {kind: capacity_eligible(context, kind, phase) for kind in requested}
-        capacity_consumed = {kind: 1 for kind, row in capacity.items() if row is not None}
-        reserved.subtract(capacity_consumed)
-        held = held_counts(context)
-        owner = current_owner(context)
-        own = context.revision_reservations.get(owner)
-        eligible = dict(own["remaining"]) if own and own["active"] else {}
-        if requested.get("sub_model") and phase not in ("report_generation", "report_revision"):
-            eligible["sub_model"] = max(0, eligible.get("sub_model", 0) - 1)
-        consume = {k: min(requested.get(k, 0), v) for k, v in eligible.items()}
-        for kind, amount in consume.items():
-            if amount and capacity_consumed.get(kind):
-                capacity_consumed.pop(kind)
-                reserved[kind] += 1
-        for kind in KINDS:
-            reserved[kind] = reserved.get(kind, 0) + held[kind] - consume.get(kind, 0)
         context.check_active()
+        from agent.runtime.hooks import active_call
+
+        call = active_call.get()
+        task = context.task_results.get(call.task_id) if call else None
+        task_counts = task.setdefault("call_counts", {}) if task is not None else {}
+        for kind, setting in (("sub_model", "task_model_calls"), ("tool", "task_tool_calls")):
+            if task is not None and task_counts.get(kind, 0) + requested.get(kind, 0) > getattr(limits, setting):
+                raise PolicyError(f"Task {kind} call budget exhausted")
         failure = None
-        if sum(context.call_counts.values()) + len(kinds) + sum(reserved.values()) > limits.total:
-            failure = BudgetExceeded("Total collection call budget reached; synthesis and review calls are reserved")
+        if sum(context.call_counts.values()) + len(kinds) > limits.total:
+            failure = BudgetExceeded("Total call budget exhausted")
         for kind, count in requested.items():
-            if context.call_counts[kind] + count + reserved.get(kind, 0) > getattr(limits, kind):
+            if context.call_counts[kind] + count > getattr(limits, kind):
                 failure = BudgetExceeded(f"{kind} call budget exhausted")
-                break
         if failure is not None:
-            hard_limit = sum(context.call_counts.values()) + len(kinds) > limits.total or any(
-                context.call_counts[kind] + count > getattr(limits, kind) for kind, count in requested.items()
-            )
-            if charge and collection is not None and not hard_limit:
-                collection.finish("reserved_capacity")
-            if not hard_limit:
-                raise ReservationUnavailable(str(failure))
             if charge:
                 context.terminate(failure)
             raise failure
-        if not charge:
-            return
-        for kind, count in requested.items():
-            context.call_counts[kind] += count
-            if consume.get(kind):
-                own["remaining"][kind] -= consume[kind]
-            if capacity_consumed.get(kind):
-                capacity[kind][kind] -= capacity_consumed[kind]
-        if collection is not None:
-            collection.record(requested)
-        from agent.runtime.checkpoints import save_job_checkpoint
-
-        save_job_checkpoint(context)
+        if charge:
+            for kind, count in requested.items():
+                context.call_counts[kind] += count
+                if task is not None:
+                    task_counts[kind] = task_counts.get(kind, 0) + count
 
 
 def request_timeout(maximum=None, *, category=None, phase=None):
     context = get_run_context()
-    limits = policy_for_run().timeouts
     context.check_active()
-    remaining = context.remaining()
+    limits = policy_for_run().timeouts
     from agent.runtime.hooks import active_call
 
     call = active_call.get()
-    if category is None and maximum is not None and call and "admitted_timeout" in call.workflow_data:
-        return min(value for value in (maximum, remaining, call.workflow_data["admitted_timeout"]) if value is not None)
-    from agent.runtime.collection import current_collection
-
-    collection = current_collection()
-    collection_remaining = collection.remaining() if collection is not None else None
-    if collection_remaining is not None and collection_remaining <= 0:
-        collection.finish("time_limit")
-    from agent.runtime.capacity import timeout
-
-    return timeout(
-        context,
-        min(value for value in (limits.request_seconds, maximum, remaining, collection_remaining) if value is not None),
-        category=category,
-        phase=phase,
-    )
+    admitted = call.workflow_data.get("admitted_timeout") if call and category is None else None
+    return min(value for value in (limits.request_seconds, maximum, context.remaining(), admitted) if value is not None)
 
 
 SAFE_FUNCTIONS = frozenset(
@@ -472,6 +373,8 @@ def validate_sql(query, limits=None):
             "dot",
         }
         for node in tree.walk():
+            if isinstance(node, exp.Select) and not node.expressions:
+                raise PolicyError("SELECT must contain a result expression")
             if node.comments or node.key in forbidden:
                 raise PolicyError("SQL contains unsupported or unsafe constructs")
             if isinstance(node, exp.With) and node.args.get("recursive"):
@@ -525,18 +428,12 @@ def classify_tool_error(error):
     provider_type = type(error).__module__ + "." + type(error).__name__
     if provider_type == "tavily.errors.MissingAPIKeyError":
         return "configuration"
-    if isinstance(error, SearchLimitReached):
-        return "search_limit"
     if isinstance(error, BudgetExceeded):
         return "budget"
-    if isinstance(error, ReservationUnavailable):
-        return "reservation_unavailable"
     if isinstance(error, PermissionError):
         return "permission"
     if provider_type in ("tavily.errors.InvalidAPIKeyError", "tavily.errors.ForbiddenError"):
         return "permission"
-    if isinstance(error, DecisionRejected):
-        return "decision_rejected"
     if isinstance(error, PolicyError | ValidationError | ValueError | TypeError):
         return "invalid_argument"
     response = getattr(error, "response", None)
@@ -567,15 +464,20 @@ def validate_tool_call(call):
 
     name = call.actor.rsplit(":", 1)[-1]
     args = call.args
-    if name in ("internet_search", "read_web_page"):
-        raise PolicyError("Retired model entry; use research_step")
     context = get_run_context()
-    if context and context.background_job and name in ("generate_markdown", "write_file", "edit_file"):
-        raise PolicyError("当前持久化研究任务仅执行只读查询；文件交付由交互轮次单独执行")
-    if context and not context.collecting and name in ("task", "research_step", "submit_research_job"):
-        raise PolicyError("本轮已进入交付阶段，不再启动调查")
-    if name == "execute":
-        raise PolicyError("Script execution is disabled")
+    if name in ("internet_search", "read_web_page"):
+        if context is None or context.network_policy == "forbidden":
+            raise PolicyError("本轮禁止联网")
+        from tools.tavily_tool import internet_search, read_web_page
+
+        schema = internet_search if name == "internet_search" else read_web_page
+        parsed = schema.tool_call_schema.model_validate(args)
+        if not parsed.query.strip():
+            raise PolicyError("Search query must not be empty")
+        if name == "internet_search" and not 1 <= parsed.max_results <= 20:
+            raise PolicyError("max_results must be between 1 and 20")
+    if name in ("execute", "write_file", "edit_file", "generate_markdown"):
+        raise PolicyError("Model-side file writes and script execution are disabled")
     if name == "task" and set(args) - {"description", "subagent_type"}:
         raise PolicyError(
             "task 仅接受 description 和 subagent_type；完整任务说明和约束必须写入 description，"
@@ -590,20 +492,11 @@ def validate_tool_call(call):
     elif name == "list_sql_tables":
         require_sql_tables()
         require_db_credentials()
-    elif name == "generate_markdown":
-        filename = args.get("filename", "")
-        if not filename.endswith(".md"):
-            filename += ".md"
-        resolve_run_path(str(Path(args.get("path") or "") / filename), write=True)
     elif name in ("read_file_content", "read_document"):
         file = resolve_run_path(args.get("filename", ""))
         if name == "read_document":
             if not file.is_relative_to((context.work_dir / "uploads").resolve()):
                 raise PolicyError("Document evidence accepts original uploads only")
-            from agent.runtime.preflight import unavailable
-
-            if unavailable(context, "document:" + file.suffix.lower()):
-                raise PolicyError("This document reader is unavailable; retain the file as an explicit gap")
     elif name in ("read_file", "write_file", "edit_file", "ls", "glob", "grep"):
         value = args.get("file_path") if name in ("read_file", "write_file", "edit_file") else args.get("path") or "/"
         resolve_run_path(value, write=name in ("write_file", "edit_file"), virtual=True)
@@ -625,30 +518,27 @@ def before_tool_policy(call):
     try:
         policy_for_run()
         validate_tool_call(call)
-        if call.actor.rsplit(":", 1)[-1] == "research_step":
-            return  # The single research adapter owns all attempt reservations.
         context = get_run_context()
         owner = call.parent_call_id or context.run_id
         turn = context.tool_turns.get((owner, call.call_id), owner)
         with context.budget_lock:
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
-                from agent.runtime.collection import current_collection
-
-                collection = current_collection()
-                if collection is not None:
-                    collection.finish("turn_tool_limit")
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
             if call.actor.rsplit(":", 1)[-1] != "task":
                 call.workflow_data["admitted_timeout"] = request_timeout(
                     context.policy.timeouts.tool_seconds, category="tool"
                 )
+            name = call.actor.rsplit(":", 1)[-1]
+            if name in ("internet_search", "read_web_page"):
+                limits = context.policy.search
+                task_key = (owner, name)
+                per_task = limits.calls_per_task if name == "internet_search" else limits.page_reads_per_task
+                total = sum(value for (_, tool), value in context.search_counts.items() if tool == name)
+                if context.search_counts.get(task_key, 0) >= per_task or total >= limits.calls_per_run:
+                    raise PolicyError("Search/page read budget exhausted; use the actual results already obtained")
             reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
+            if name in ("internet_search", "read_web_page"):
+                context.search_counts[task_key] = context.search_counts.get(task_key, 0) + 1
             context.turn_counts[turn] = context.turn_counts.get(turn, 0) + 1
-            from agent.runtime.checkpoints import save_job_checkpoint
-
-            save_job_checkpoint(context)
-        from agent.runtime.workflows import before_tool_workflow
-
-        before_tool_workflow(call)
-    except (PolicyError, PermissionError) as exc:
+    except (PolicyError, PermissionError, ValidationError) as exc:
         raise HookRejected(str(exc)) from exc

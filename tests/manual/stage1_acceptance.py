@@ -1,159 +1,148 @@
-"""Run the two user-approved questions against the real production app and providers."""
+"""Run only original business question 1, once, against real configured providers.
+
+Creates isolated authenticated databases; never touches production history,
+never starts question 2 and never retries the business question automatically.
+"""
 
 import argparse
 import asyncio
 import json
+import os
+import secrets
 import sys
-from datetime import datetime
 from pathlib import Path
 from time import monotonic
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-QUESTIONS = [
-    "请查看 Deep Agents、Open Deep Research 和 smolagents 的源码，分析它们如何进行子 agent 协作与工具调用，并结合我的项目提出改进建议。关键结论需要提供源码依据。",
-    "不再联网，把上一轮的调研结果整理成一份实施计划，包含修改位置、依赖关系和验收标准。不要补充未经核实的新结论。",
-]
-
-STAGE2_QUESTIONS = [
-    "请从 Deep Agents、Open Deep Research、smolagents 和 GPT Researcher 的官方源码与文档中，比较它们如何委派子任务、调用工具和返回结果，并结合我的项目提出改进建议。关键结论附源码链接；无法确认来源身份或缺少证据的地方明确说明，不要用推测补齐。",
-    "研究 Open Deep Research 的子 agent 调度。先核实正常委派和结果返回流程，再根据实际源码发现的风险，追加调查必要的异常、取消或任务遗漏路径，最后给出有源码依据的修复建议。复用已取得的证据，不重复执行已经完成的调查；区分已确认问题和待核实疑点。",
-]
+QUESTION = "请查看 Deep Agents、Open Deep Research 和 smolagents 的源码，分析它们如何进行子 agent 协作与工具调用，并结合我的项目提出改进建议。关键结论需要提供源码依据。"
 
 
-def save(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(data, ensure_ascii=False, indent=2) if not isinstance(data, str) else data
-    path.write_bytes((text.replace("\r\n", "\n").replace("\n", "\r\n") + "\r\n").encode("utf-8"))
+def save(path, value):
+    text = json.dumps(value, ensure_ascii=False, indent=2) if not isinstance(value, str) else value
+    path.write_bytes(text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n").encode("utf-8"))
 
 
-async def main():
+async def main(directory):
     import httpx
+    from dotenv import load_dotenv
 
+    load_dotenv(ROOT / ".env")
+    directory = directory.resolve()
+    directory.relative_to((ROOT / "output").resolve())
+    directory.mkdir(parents=True, exist_ok=False)
+    # Isolated test account; the actual AuthService, cookie, Origin, CSRF and
+    # resource ownership checks remain in use. No secret is written to reports.
+    password = secrets.token_urlsafe(48)
+    os.environ.update(
+        APP_ACCESS_PASSWORD=password,
+        APP_ORIGIN="http://127.0.0.1:8000",
+        APP_BIND_HOST="127.0.0.1",
+        APP_BIND_PORT="8000",
+    )
     import agent.main_agent as runtime
     import api.server as server
+    from api.migrate_security import migrate
+    from api.security import DataLease
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=("stage1", "stage2"), default="stage1")
-    parser.add_argument("--resume", type=Path, help="Continue question 2 using question-1.json and its real database")
-    args = parser.parse_args()
-    if args.resume and args.stage != "stage1":
-        raise ValueError("Only the original stage-one rewrite supports resuming its reviewed source")
-    approved_questions = QUESTIONS if args.stage == "stage1" else STAGE2_QUESTIONS
-    directory = (
-        args.resume.resolve()
-        if args.resume
-        else (ROOT / "output" / f"{args.stage}-validation" / datetime.now().strftime("live-%Y%m%d-%H%M%S"))
-    )
-    if args.resume:
-        directory.relative_to(ROOT / "output" / f"{args.stage}-validation")
-        if not (directory / "question-1.json").is_file() or not (directory / "runs.db").is_file():
-            raise ValueError("Resume requires the original question-1 record and run database")
-    else:
-        directory.mkdir(parents=True)
     runtime.checkpoint_db_path = directory / "checkpoints.db"
     runtime.project_root_path = directory
     server.run_db_path = directory / "runs.db"
     server.output_dir = directory / "files"
     server.updated_dir = directory / "updated"
-    results = [json.loads((directory / "question-1.json").read_text(encoding="utf-8-sig"))] if args.resume else []
-    questions = list(enumerate(approved_questions, 1))[len(results) :]
+    lease = DataLease(directory)
+    try:
+        await migrate(directory, directory)
+    finally:
+        lease.close()
+    started = monotonic()
     async with server.lifespan(server.app):
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=server.app), base_url="http://stage1.local"
+            transport=httpx.ASGITransport(app=server.app), base_url="http://127.0.0.1:8000"
         ) as client:
-            for number, question in questions:
-                started = monotonic()
-                response = await client.post(
-                    "/api/task",
-                    json={
-                        "query": question,
-                        "thread_id": f"{args.stage}-business-session",
-                        "execution_mode": "foreground",
-                    },
+            response = await client.post(
+                "/api/auth/login",
+                json={"password": password},
+                headers={"Origin": "http://127.0.0.1:8000", "X-Login-Intent": "login"},
+            )
+            response.raise_for_status()
+            client.headers.update({"Origin": "http://127.0.0.1:8000", "X-CSRF-Token": response.json()["csrf_token"]})
+            response = await client.post("/api/task", json={"query": QUESTION, "required_sources": ["search"]})
+            response.raise_for_status()
+            run_id = response.json()["run_id"]
+            print("question_1_started run_id=" + run_id, flush=True)
+            while True:
+                run = (await client.get("/api/runs/" + run_id)).json()
+                if run["status"] not in ("queued", "running"):
+                    break
+                await asyncio.sleep(0.5)
+            execution = server.app.state.run_tasks.get(run_id)
+            if execution is not None:
+                await asyncio.gather(execution, return_exceptions=True)
+            history = (await client.get(f"/api/runs/{run_id}/history")).json()
+            snapshots = []
+            work = directory / "files" / f"session_{run['thread_id']}" / f"run_{run_id}"
+            for path in (work / "results").glob("*.json"):
+                snapshots.append(json.loads(path.read_text(encoding="utf-8")))
+            download = await client.get(f"/api/runs/{run_id}/files/download?path=answer.md")
+            tools = [item for task in snapshots for item in task["evidence"]]
+            source_urls = {source["url"] for row in tools for source in row["sources"] if source["kind"] == "web"}
+            projects = ("langchain-ai/deepagents", "langchain-ai/open_deep_research", "huggingface/smolagents")
+            project_sources = {
+                project: sorted(
+                    url
+                    for url in source_urls
+                    if "/" + project + "/" in url and ("/blob/" in url or "raw.githubusercontent.com/" in url)
                 )
-                response.raise_for_status()
-                run_id = response.json()["run_id"]
-                print(f"question_{number}_started run_id={run_id}", flush=True)
-                execution = server.app.state.run_tasks.get(run_id)
-                recording_error = None
-                while True:
-                    row = await server.app.state.run_store.get(run_id)
-                    if row["status"] not in ("queued", "running"):
-                        break
-                    if execution is not None and execution.done():
-                        recording_error = "Execution ended without a durable terminal record"
-                        break
-                    if monotonic() - started > server.app.state.runtime_policy.timeouts.total_seconds + 30:
-                        recording_error = "Acceptance wait exceeded the configured execution deadline"
-                        await client.post(f"/api/runs/{run_id}/cancel")
-                        break
-                    await asyncio.sleep(1)
-                await server.app.state.event_sink.flush(run_id)
-                events = await server.app.state.run_store.list_events(run_id)
-                final = [event for event in events if event["event"] == "answer_validation"]
-                contracts = [event for event in events if event["event"] == "task_contract"]
-                requests = [event for event in events if event["event"] == "model_request"]
-                searches = [
-                    event
-                    for event in events
-                    if event["event"] == "research_attempt"
-                    or event["actor"] == "search:research_step"
-                    and event["event"] == "before_tool"
-                ]
-                contract = contracts[-1]["data"] if contracts else {}
-                result = {
-                    "question": question,
-                    "run_id": run_id,
-                    "status": row["status"],
-                    "coverage": row.get("coverage"),
-                    "elapsed_seconds": round(monotonic() - started, 2),
-                    "contract": contract,
-                    "search_actions": len(searches),
-                    "model_requests": [event["data"] for event in requests],
-                    "final_review_status": final[-1]["status"] if final else None,
-                    "source_run_id": contract.get("source_run_id"),
-                    "answer": row.get("answer"),
-                    "error": row.get("error"),
-                    "recording_error": recording_error,
-                }
-                result["process_passed"] = bool(
-                    row["status"] == "completed"
-                    and final
-                    and final[-1]["status"] == "passed"
-                    and contract.get("delivery_kind") == ("direct" if args.stage == "stage1" and number == 2 else "grounded")
-                    and (args.stage == "stage2" or number == 1 or not searches and contract.get("source_run_id") == results[0]["run_id"])
-                )
-                result["business_passed"] = result["process_passed"] and (
-                    row.get("coverage") == "complete" if args.stage == "stage2" or number == 1 else results[0].get("business_passed", False)
-                )
-                result["plan_updates"] = [event["data"] for event in events if event["event"] == "research_plan"]
-                result["scheduling"] = [event["data"] for event in events if event["event"].startswith("scheduler_")]
-                result["provider_errors"] = []
-                for path in (directory / "files").rglob("results/tools/*.json"):
-                    if run_id in str(path):
-                        item = json.loads(path.read_text(encoding="utf-8-sig"))
-                        if item.get("error"):
-                            result["provider_errors"].append(item["error"])
-                results.append(result)
-                save(directory / f"question-{number}.json", result)
-                save(directory / f"answer-{number}.md", row.get("answer") or "未获得交付")
-                print(
-                    f"question_{number}_finished status={row['status']} coverage={row.get('coverage')} process_passed={result['process_passed']}",
-                    flush=True,
-                )
-    save(
-        directory / "summary.json",
-        {
-            "questions": results,
-            "process_passed": all(r["process_passed"] for r in results),
-            "business_passed": all(r.get("business_passed", r.get("coverage") == "complete") for r in results),
-            "semantic_review": "Read answers and source links; process checks do not grade writing style.",
-        },
-    )
-    print("evidence_directory=" + str(directory), flush=True)
-    return 0 if all(r.get("business_passed", r.get("coverage") == "complete") for r in results) else 1
+                for project in projects
+            }
+            checks = dict(
+                code_sources_for_all_projects=all(project_sources.values()),
+                execution_completed=run["status"] == "completed",
+                business_complete=(run.get("completion") or {}).get("status") == "complete",
+                actual_delegation=bool(history["subtasks"]),
+                only_search=bool(history["subtasks"]) and all(row["target"] == "search" for row in history["subtasks"]),
+                all_tasks_completed=bool(history["subtasks"])
+                and all(row["status"] == "completed" for row in history["subtasks"]),
+                actual_search=any(
+                    row["name"] == "internet_search" and row["executed"] and row["status"] == "completed"
+                    for row in tools
+                ),
+                actual_sources=any(row["sources"] for row in tools if row["executed"] and row["status"] == "completed"),
+                exact_markdown=download.status_code == 200
+                and download.content == (run.get("answer") or "").encode("utf-8"),
+            )
+            record = dict(
+                question=QUESTION,
+                project_sources=project_sources,
+                seconds=round(monotonic() - started, 2),
+                checks=checks,
+                passed=all(checks.values()),
+                run=run,
+                subtasks=history["subtasks"],
+                evidence=snapshots,
+                events=history["events"],
+            )
+            save(directory / "question-1.json", record)
+            if run.get("answer"):
+                save(directory / "question-1.md", run["answer"])
+            print(
+                json.dumps(
+                    dict(
+                        passed=record["passed"],
+                        checks=checks,
+                        status=run["status"],
+                        seconds=record["seconds"],
+                        report=str(directory / "question-1.json"),
+                    ),
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+            return 0 if record["passed"] else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--report-dir", type=Path, required=True)
+    raise SystemExit(asyncio.run(main(parser.parse_args().report_dir)))

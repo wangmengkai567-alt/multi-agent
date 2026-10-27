@@ -35,57 +35,42 @@ def _build_agent(saver):
     from deepagents.middleware.subagents import SubAgentMiddleware
     from deepagents.middleware.summarization import SummarizationMiddleware
     from langchain.agents import create_agent
-    from langchain.agents.middleware import TodoListMiddleware
 
     from agent.llm import create_role_model
     from agent.prompts import main_agent_content
-    from agent.results import RESULT_DISPLAY_PROMPT
-    from agent.runtime.answer_review import AnswerReviewMiddleware
     from agent.runtime.capabilities import READONLY_FILESYSTEM_PROMPT, CapabilityDisclosureMiddleware
     from agent.runtime.contracts import TaskContractMiddleware
     from agent.runtime.evidence_protocol import adapter_for_tool, bind_framework_tools
-    from agent.runtime.experts import ExpertRegistryMiddleware
-    from agent.runtime.finalization import SearchFinalizationMiddleware
+    from agent.runtime.experts import ExpertRegistryMiddleware, SerialDelegationMiddleware
     from agent.runtime.skills import ProjectSkillsMiddleware, SkillReadMiddleware
-    from agent.runtime.task_plan import plan_research
     from agent.subagent_factory import build_subagents, validate_model
     from agent.subagent_registry import SummaryConfig, load_default_registry
-    from tools.job_tools import get_research_job, submit_research_job
     from tools.upload_file_read_tool import read_file_content
 
     registry = load_default_registry()
-    profiles = {"MAIN", "REVIEW"} | {
-        p for s in registry.specs.values() for p in (s.model_config.profile, s.model_config.review_profile)
-    }
+    profiles = {"MAIN"} | {spec.model_config.profile for spec in registry.specs.values()}
     models = {name: create_role_model(name) for name in sorted(profiles)}
     subagents = build_subagents(registry, models)
-    main_model, review_model = models["MAIN"], models["REVIEW"]
+    main_model = models["MAIN"]
     validate_model(main_model, needs_tools=True)
     root_model = budget_model(main_model, "main_model")
-    tools = [
-        read_file_content,
-        plan_research,
-        submit_research_job,
-        get_research_job,
-    ]
+    tools = [read_file_content]
     for tool in tools:
         adapter_for_tool(tool)
     return create_agent(
         model=root_model,
-        system_prompt=main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT,
+        system_prompt=main_agent_content["system_prompt"],
         tools=tools,
         checkpointer=saver,
         middleware=[
             ExpertRegistryMiddleware(registry),
-            bind_framework_tools(TodoListMiddleware()),
+            SerialDelegationMiddleware(),
             SkillReadMiddleware(),
             bind_framework_tools(FilesystemMiddleware(backend=run_backend, system_prompt=READONLY_FILESYSTEM_PROMPT)),
             bind_framework_tools(SubAgentMiddleware(backend=run_backend, subagents=subagents)),
             SummarizationMiddleware(model=root_model, backend=run_backend, **SummaryConfig().kwargs()),
             PatchToolCallsMiddleware(),
             TaskContractMiddleware(),
-            AnswerReviewMiddleware(review_model),
-            SearchFinalizationMiddleware(main_agent_content["system_prompt"] + "\n" + RESULT_DISPLAY_PROMPT),
             ProjectSkillsMiddleware(),
             CapabilityDisclosureMiddleware(registry.specs),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
@@ -138,7 +123,6 @@ async def run_deep_agent(task_query, session_id):
             session_id,
             project_root_path / "output" / f"session_{session_id}" / f"run_{run_id}",
             user_query=task_query,
-            enforce_plan=True,
         )
     if context.thread_id != session_id:
         raise ValueError("Run context belongs to another session")
@@ -165,6 +149,9 @@ async def run_deep_agent(task_query, session_id):
                 upload_prompt = "\n[已上传文件] 本轮工作目录中的只读文件：\n" + "\n".join(
                     f"uploads/{path.name}" for path in files
                 )
+        from agent.runtime.contracts import bind_contract
+
+        bind_contract(context)
         path_instruction = f"""
         【本轮参考时间】
         当前时间：{context.reference_time.isoformat()}；今天：{context.reference_time.date().isoformat()}；
@@ -172,15 +159,13 @@ async def run_deep_agent(task_query, session_id):
         【工作环境指令】
         本轮虚拟文件系统根目录为 /，工具已自动绑定本轮工作目录。
         {upload_prompt}
-        文件由程序在内容终审后生成，不调用写文件或转换工具。
+        最终正文由程序自动保存为 answer.md，不调用写文件或转换工具。
         不要重复拼接 output/、session_ 或 run_ 目录，也不要传本机绝对路径。
-        读取已绑定上传材料时传 uploads/文件名；仅按本轮契约处理所需材料。
+        读取已绑定上传材料时传 uploads/文件名；绑定文本 reference 为 input_text。
         业务文件工具使用相对路径。框架文件工具使用本轮虚拟路径，如 /report.md、/uploads/文件名。
         /skills/ 是独立只读的任务说明目录，不能写入；uploads/ 中的用户源文件也不能改写；results/ 中的查询原文只读。
         禁止访问本机真实绝对路径或其他轮次目录。
         """
-        if context.execution_mode == "foreground":
-            path_instruction += "\n当前明确前台执行：不要提交后台任务；直接登记研究对象并完成查询和交付。"
         path_instruction += instruction(context)
         # Each execution gets a new graph frame; the canonical checkpoint owns continuation.
         config = {"configurable": {"thread_id": validate_identifier(context.run_id)}}
@@ -195,18 +180,6 @@ async def run_deep_agent(task_query, session_id):
                 ]
             )
         }
-        if context.background_job:
-            path_instruction += "\n当前是持久化后台执行：不得创建嵌套后台任务；直接登记分工、查询并完成最终答复。"
-            stream_input = {
-                "messages": Overwrite(
-                    [
-                        HumanMessage(
-                            content=task_query + path_instruction,
-                            additional_kwargs={"task_input_run_id": context.run_id},
-                        )
-                    ]
-                )
-            }
         stream = agent.astream(
             stream_input,
             config=config,

@@ -197,8 +197,6 @@ class EventSink:
         draft = getattr(context, "delivery_draft", None)
         if draft and draft.get("source_status") is not None:
             data["source_status"] = draft["source_status"]
-        if getattr(context, "pending_jobs", None):
-            data["jobs"] = list(context.pending_jobs.values())
         if hasattr(context, "call_counts"):
             data["call_counts"] = dict(context.call_counts)
         hook_failures = getattr(context, "hook_failures", [])

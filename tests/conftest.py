@@ -11,11 +11,12 @@ from contextvars import ContextVar
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 # Set before test modules are collected, not only inside a test fixture.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 for _key in tuple(os.environ):
-    if _key.startswith(("LLM_", "OPENAI_", "ANTHROPIC_", "TAVILY_", "MYSQL_")):
+    if _key.startswith(("LLM_", "OPENAI_", "ANTHROPIC_", "TAVILY_", "MYSQL_", "APP_")):
         os.environ.pop(_key)
 os.environ.pop("LANGSMITH_API_KEY", None)
 os.environ["LANGSMITH_TRACING"] = "false"
@@ -87,3 +88,69 @@ def sandbox_db(sandbox_dir):
         yield connection
     finally:
         connection.close()
+
+
+@pytest.fixture
+def test_environment(sandbox_dir, monkeypatch):
+    from runtime_fixtures import OfflineEnvironment
+
+    environment = OfflineEnvironment(sandbox_dir)
+    environment.configure(monkeypatch)
+    return environment
+
+
+@pytest_asyncio.fixture
+async def migrated_environment(test_environment):
+    await test_environment.migrate()
+    return test_environment
+
+
+@pytest_asyncio.fixture
+async def job_runtime(migrated_environment):
+    from types import SimpleNamespace
+
+    from agent.runtime.policies import load_runtime_policy
+    from agent.runtime.scheduler import ServiceScheduler
+    from api.run_store import RunStore
+
+    store = await RunStore.open(migrated_environment.runs)
+    try:
+        await store.create_thread("thread")
+        await store.create("thread", "controlled job parent", run_id="run")
+        yield SimpleNamespace(store=store, scheduler=ServiceScheduler(load_runtime_policy().scheduler))
+    finally:
+        await store.close()
+
+
+@pytest.fixture
+def inline_provider_worker(monkeypatch):
+    """Exercise actual SDK adapters with fake SDK clients, without spawning live providers.
+
+    Process containment is exercised separately by test_stage2/test_stage4.
+    """
+    from agent.runtime import workers
+    from tools import db_tools, tavily_tool
+
+    def execute(operation, payload, *, seconds, on_event=None):
+        assert seconds > 0
+        if operation == "database":
+            return db_tools.execute_worker(payload)
+        if operation == "tavily":
+
+            def progress(kind, **data):
+                if on_event is not None:
+                    on_event(dict(event="progress", kind=kind, **data))
+
+            return tavily_tool.execute_worker(payload, progress)
+        raise AssertionError(f"Unexpected provider operation in adapter test: {operation}")
+
+    monkeypatch.setattr(workers, "run_operation", execute)
+
+
+@pytest_asyncio.fixture
+async def authenticated_client(migrated_environment, monkeypatch):
+    import agent.main_agent as runtime
+
+    monkeypatch.setattr(runtime, "_build_agent", lambda saver: object())
+    async with migrated_environment.client() as client:
+        yield client

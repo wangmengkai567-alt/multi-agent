@@ -1,7 +1,6 @@
 """Step 11: real framework Skill reads, scoped state, request validation and resources."""
 
 import asyncio
-import json
 import shutil
 from dataclasses import replace
 from hashlib import sha256
@@ -10,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
-from deepagents import create_deep_agent
+from deepagents.middleware.subagents import SubAgentMiddleware
+from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableLambda
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -21,17 +21,19 @@ from agent.runtime.backend import run_backend
 from agent.runtime.context import RunContext, reset_run_context, set_run_context
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.events import EventSink
+from agent.runtime.evidence_protocol import bind_framework_tools
 from agent.runtime.hooks import HookToolMiddleware
 from agent.runtime.policies import MissingConfiguration, load_runtime_policy
 from agent.runtime.skills import (
     SKILL_FILES,
     SKILL_IDS,
     ProjectSkillsMiddleware,
+    SkillReadMiddleware,
     skill_scope,
     validate_skill_ids,
 )
 from agent.subagent_factory import build_subagents
-from agent.subagent_registry import ExecutionConfig, ReviewConfig, SubagentRegistry, SubagentSpec, load_default_registry
+from agent.subagent_registry import ExecutionConfig, SubagentRegistry, SubagentSpec, load_default_registry
 from api.run_store import RunStore
 from utils.secure_paths import PathDenied, resolve_run_path
 
@@ -47,8 +49,8 @@ def write_text(file, text):
 
 
 @pytest_asyncio.fixture
-async def runtime(sandbox_dir):
-    store = await RunStore.open(sandbox_dir / "skills.db")
+async def runtime(sandbox_dir, migrated_environment):
+    store = await RunStore.open(sandbox_dir / "runs.db")
     sink = EventSink(store, lambda *args: None)
     root = sandbox_dir / "instructions"
     shutil.copytree(PROJECT / "skills", root)
@@ -62,7 +64,11 @@ async def runtime(sandbox_dir):
         policy=load_runtime_policy(),
     )
     context.work_dir.mkdir()
+    from agent.runtime.contracts import bind_contract
+
+    bind_contract(context)
     token = set_run_context(context)
+    await store.create_thread(context.thread_id)
     await sink.create(context.thread_id, "question", context.run_id)
     await sink.start(context)
     try:
@@ -80,8 +86,18 @@ async def skill_events(runtime):
 
 
 def graph(model, **kwargs):
-    return create_deep_agent(
-        model=model, backend=run_backend, middleware=[ProjectSkillsMiddleware(), HookToolMiddleware()], **kwargs
+    from deepagents.middleware.filesystem import FilesystemMiddleware
+    from langchain.agents import create_agent
+
+    return create_agent(
+        model=model,
+        middleware=[
+            SkillReadMiddleware(),
+            bind_framework_tools(FilesystemMiddleware(backend=run_backend)),
+            ProjectSkillsMiddleware(),
+            HookToolMiddleware(),
+        ],
+        **kwargs,
     )
 
 
@@ -211,7 +227,7 @@ async def test_business_file_reader_tracks_real_skill_read_but_upload_is_not_ski
 
     context, _, _ = runtime
     write_text(context.work_dir / "uploads" / "SKILL.md", "user document")
-    assert read_file_content.invoke({"filename": "uploads/SKILL.md"}) == "user document"
+    assert read_file_content.invoke({"filename": "uploads/SKILL.md"}).split("[text]\n", 1)[1] == "user document"
     assert await skill_events(runtime) == []
     result = read_file_content.invoke({"filename": BODY})
     assert "电商运营分析" in result
@@ -233,13 +249,19 @@ async def test_child_is_explicitly_scoped_and_parent_metadata_is_refreshed(runti
         "Return evidence",
         (),
         allowed_skill_ids=("ecommerce-analysis",),
-        review_config=audited_skill_review(),
     )
-    agent = create_deep_agent(
+    agent = create_agent(
         model=parent,
-        backend=run_backend,
-        subagents=build_subagents(SubagentRegistry([spec]), {"SUB": child, "REVIEW": SkillReviewer(responses=[])}),
-        middleware=[ProjectSkillsMiddleware(), HookToolMiddleware(allowed_targets=("db",), managed_delegation=True)],
+        middleware=[
+            bind_framework_tools(
+                SubAgentMiddleware(
+                    backend=run_backend,
+                    subagents=build_subagents(SubagentRegistry([spec]), {"SUB": child}),
+                )
+            ),
+            ProjectSkillsMiddleware(),
+            HookToolMiddleware(allowed_targets=("db",), managed_delegation=True),
+        ],
     )
     await agent.ainvoke({"messages": [("user", "analyze")]})
     assert "不得从表名或样本猜测字段含义" in str(child.seen_messages[0])
@@ -264,9 +286,7 @@ async def test_unconfigured_child_cannot_read_parent_skill_and_scope_is_restored
         seen.append(skill_scope.get())
         return {"messages": [AIMessage(content="done")]}
 
-    spec = SubagentSpec(
-        "search", DEFAULT_NAMES["search"], "Query", "Return evidence", (), review_config=audited_skill_review()
-    )
+    spec = SubagentSpec("search", DEFAULT_NAMES["search"], "Query", "Return evidence", ())
     await DelegationRunnable(spec, RunnableLambda(execute)).ainvoke({"messages": [HumanMessage(content="query")]})
     assert seen == [("search", ())] and skill_scope.get() == ("main", SKILL_IDS)
     assert await skill_events(runtime) == []
@@ -311,7 +331,7 @@ async def test_selected_body_unavailable_never_calls_model_or_claims_loaded(runt
     with pytest.raises(MissingConfiguration):
         await graph(model).ainvoke({"messages": [("user", "report")]})
     assert not model.seen_messages
-    assert [e["status"] for e in await skill_events(runtime)] == ["selected"]
+    assert await skill_events(runtime) == []
 
 
 @pytest.mark.asyncio
@@ -358,6 +378,7 @@ async def test_two_sessions_keep_selected_bodies_and_events_separate(runtime, sa
         current.work_dir.mkdir()
         token = set_run_context(current)
         try:
+            await store.create_thread(name)
             await sink.create(name, "query", name)
             await sink.start(current)
             model = ScriptedModel(responses=[AIMessage(content="done")])
@@ -378,7 +399,7 @@ def test_registry_ids_and_production_expert_visibility():
     registry = load_default_registry()
     assert registry.get("db").allowed_skill_ids == ("ecommerce-analysis", "data-analysis")
     assert registry.get("search").allowed_skill_ids == ("ecommerce-analysis", "research")
-    assert set(registry.specs) == {"db", "search"}
+    assert set(registry.specs) == {"db", "document", "search"}
     with pytest.raises(ValueError, match="Unknown expert"):
         registry.get("knowledge")
     with pytest.raises(ValueError):
@@ -417,9 +438,7 @@ async def test_template_cannot_override_output_or_execution_permissions(runtime)
 async def test_new_skills_reach_scoped_expert_and_record_resources(runtime, target, skill_id):
     context, _, _ = runtime
     context.skill_ids = (skill_id,)
-    spec = replace(
-        load_default_registry().get(target), tools=(), review_config=audited_skill_review(), execution=ExecutionConfig()
-    )
+    spec = replace(load_default_registry().get(target), tools=(), execution=ExecutionConfig())
     resource = f"/skills/{skill_id}/{SKILL_FILES[skill_id][1]}"
     child = SkillWorker(
         responses=[
@@ -434,11 +453,18 @@ async def test_new_skills_reach_scoped_expert_and_record_resources(runtime, targ
             AIMessage(content="done"),
         ]
     )
-    agent = create_deep_agent(
+    agent = create_agent(
         model=parent,
-        backend=run_backend,
-        subagents=build_subagents(SubagentRegistry([spec]), {"SUB": child, "REVIEW": SkillReviewer(responses=[])}),
-        middleware=[ProjectSkillsMiddleware(), HookToolMiddleware(allowed_targets=(target,), managed_delegation=True)],
+        middleware=[
+            bind_framework_tools(
+                SubAgentMiddleware(
+                    backend=run_backend,
+                    subagents=build_subagents(SubagentRegistry([spec]), {"SUB": child}),
+                )
+            ),
+            ProjectSkillsMiddleware(),
+            HookToolMiddleware(allowed_targets=(target,), managed_delegation=True),
+        ],
     )
     await agent.ainvoke({"messages": [("user", "分析材料")]})
     first = str(child.seen_messages[0])
@@ -447,10 +473,10 @@ async def test_new_skills_reach_scoped_expert_and_record_resources(runtime, targ
     for name in SKILL_IDS:
         assert (f"/skills/{name}/SKILL.md" in first) == (name in spec.allowed_skill_ids)
     denied = {
-        m.tool_call_id: m
+        context.original_call_ids.get(m.tool_call_id): m
         for batch in child.seen_messages
         for m in batch
-        if isinstance(m, ToolMessage) and m.tool_call_id == "denied"
+        if isinstance(m, ToolMessage) and context.original_call_ids.get(m.tool_call_id) == "denied"
     }
     assert len(denied) == 1 and denied["denied"].status == "error"
     events = [e for e in await skill_events(runtime) if e["actor"] == target]
@@ -472,7 +498,7 @@ def test_registry_does_not_import_removed_service_sdk(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", checked_import)
     registry = load_default_registry()
-    assert set(registry.specs) == {"db", "search"}
+    assert set(registry.specs) == {"db", "document", "search"}
     tools = {tool.name for spec in registry.specs.values() for tool in spec.tools}
     assert not tools & {"get_assistant_list", "create_ask_delete"}
 
@@ -480,52 +506,4 @@ def test_registry_does_not_import_removed_service_sdk(monkeypatch):
 DEFAULT_NAMES = {"db": "数据库查询助手", "search": "联网搜索助手"}
 
 
-def audited_skill_review():
-    return ReviewConfig(enabled=True, model_check=True, grounded_report=True, max_refinements=0)
-
-
-class SkillWorker(ScriptedModel):
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        if kwargs.get("response_format", {}).get("json_schema", {}).get("name") != "search_report":
-            return super()._generate(messages, stop, run_manager, **kwargs)
-        self.seen_messages.append(list(messages))
-        from langchain_core.outputs import ChatGeneration, ChatResult
-
-        return ChatResult(
-            generations=[
-                ChatGeneration(
-                    message=AIMessage(
-                        content=json.dumps(
-                            dict(facts=[], analysis=[], gaps=["只验证技能读取，未取得业务事实证据"]), ensure_ascii=False
-                        )
-                    )
-                )
-            ]
-        )
-
-
-class SkillReviewer(ScriptedModel):
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        self.seen_messages.append(list(messages))
-        data = json.loads(messages[-1].text)
-        from langchain_core.outputs import ChatGeneration, ChatResult
-
-        return ChatResult(
-            generations=[
-                ChatGeneration(
-                    message=AIMessage(
-                        content=json.dumps(
-                            dict(
-                                facts=[],
-                                analysis=[],
-                                findings=[],
-                                coverage={
-                                    rid: dict(status="unknown", fact_ids=[], claim_ids=[])
-                                    for rid in data["coverage_candidates"]
-                                },
-                            )
-                        )
-                    )
-                )
-            ]
-        )
+SkillWorker = ScriptedModel

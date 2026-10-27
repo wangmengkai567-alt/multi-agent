@@ -6,7 +6,7 @@ from email.utils import parsedate_to_datetime
 
 from agent.runtime.context import get_run_context
 
-READ_ONLY = frozenset({"list_sql_tables", "get_table_data", "execute_sql_query", "get_research_job"})
+READ_ONLY = frozenset({"internet_search", "read_web_page", "list_sql_tables", "get_table_data", "execute_sql_query"})
 
 
 class ToolCallTimeout(TimeoutError):
@@ -86,11 +86,7 @@ def retry_delay(request, call, error):
     if status == 429:
         # Without a usable header use the configured backoff, never a model guess.
         delay = max(delay, retry_after(error) or 0)
-    from agent.runtime.capacity import pending_seconds
-
     remaining = context.remaining()
-    if remaining is not None:
-        remaining -= pending_seconds(context)
     if remaining is not None and delay + min(policy_for_run().timeouts.tool_seconds, 1.0) >= remaining:
         call.workflow_data["retry_blocked"] = "剩余时长预算不足，未安排重试"
         return None

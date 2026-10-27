@@ -6,18 +6,15 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from time import monotonic, sleep
-from uuid import uuid4
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
-from langchain_core.runnables import Runnable
 from langgraph.types import Command
 from pydantic import ValidationError
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import CollectionFinished, DependencyUnavailable, ExecutionTerminated
+from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
 from agent.runtime.events import EventPersistenceError, make_event, redact_text
-from agent.runtime.review_state import ReviewState
 
 logger = logging.getLogger(__name__)
 HOOK_NAMES = ("before_run", "before_delegate", "before_tool", "after_tool", "after_subagent", "after_run", "on_error")
@@ -42,10 +39,6 @@ class HookCall:
     target: str | None = None
     source_kind: str | None = None
     evidence_adapter: str | None = None
-    check_status: str = "not_checked"
-    state: ReviewState = field(default_factory=ReviewState)
-    current_result_id: str | None = None
-    report_attempt: int = 0
     executed: bool = False
     execution_status: str = "not_started"
     result_status: str = "unavailable"
@@ -53,15 +46,12 @@ class HookCall:
     terminal_recorded: bool = False
     attempt: int = 0
     workflow_data: dict = field(default_factory=dict, repr=False)
-    search_task_key: str | None = field(default=None, repr=False)
-    search_budget: dict | None = field(default=None, repr=False)
+    task_id: str | None = field(default=None, repr=False)
 
 
 def error_category(error):
     from agent.runtime.policies import classify_tool_error
 
-    if isinstance(error, CollectionFinished):
-        return "collection_finished"
     if isinstance(error, HookRejected):
         return classify_tool_error(error.__cause__) if error.__cause__ else "rejected"
     if isinstance(error, BaseException) and type(error).__name__ == "CancelledError":
@@ -98,8 +88,6 @@ def record_hook(name, call):
     if context is None or context.event_sink is None:
         return  # Standalone execution makes no persistence claim.
     data = {"hook": name, "elapsed_ms": call.elapsed_ms, "args": call.args, "attempt": call.attempt}
-    if call.search_budget is not None:
-        data["search_budget"] = call.search_budget
     if name == "after_tool":
         data["result_length"] = len(str(call.result)) if call.result is not None else 0
         data["result_type"] = type(call.result).__name__
@@ -111,7 +99,7 @@ def record_hook(name, call):
             tool_name=call.actor.rsplit(":", 1)[-1],
         )
     if name == "after_subagent":
-        data.update(check_status=call.check_status, result_length=len(str(call.result)))
+        data.update(result_length=len(str(call.result)))
     if call.error is not None:
         data.update(error=error_message(call.error), **error_details(call))
     context.event_sink.submit(
@@ -164,7 +152,7 @@ def prepare_run(call):
 
 def default_pipeline():
     from agent.runtime.policies import before_run_policy, before_tool_policy
-    from agent.runtime.workflows import after_tool_workflow, before_delegate_workflow, before_run_workflow
+    from agent.runtime.workflows import after_tool_workflow
 
     after_tool_workflow.record_only = True
 
@@ -176,9 +164,9 @@ def default_pipeline():
             recorders[name] = (recorder,)
     return HookPipeline(
         {
-            "before_run": (prepare_run, before_run_policy, before_run_workflow),
+            "before_run": (prepare_run, before_run_policy),
             **recorders,
-            "before_delegate": (prepare_run, before_delegate_workflow, *recorders["before_delegate"]),
+            "before_delegate": (prepare_run, *recorders["before_delegate"]),
             "after_tool": (after_tool_workflow, *recorders["after_tool"]),
             "before_tool": (before_tool_policy, *recorders["before_tool"]),
         }
@@ -217,7 +205,7 @@ class HookToolMiddleware(AgentMiddleware):
             call_id=tool["id"],
             parent_call_id=parent.call_id if parent else None,
             args=tool["args"],
-            search_task_key=parent.search_task_key if parent else None,
+            task_id=parent.task_id if parent else None,
             target=tool["args"].get("subagent_type") if tool["name"] == "task" else None,
             source_kind=(
                 self.target_specs[tool["args"]["subagent_type"]].execution.source_kind
@@ -230,13 +218,12 @@ class HookToolMiddleware(AgentMiddleware):
         if context := get_run_context():
             context.check_active()
         from agent.runtime.capabilities import expert_available, tool_available
-        from agent.runtime.delivery_actions import action_authorized
 
         if context and context.task_contract is not None:
             from agent.runtime.contracts import assert_contract
 
             assert_contract(context)
-        if context and not action_authorized(call) and not tool_available(context, request.tool_call["name"]):
+        if context and not tool_available(context, request.tool_call["name"]):
             raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
         if (
             context
@@ -247,7 +234,7 @@ class HookToolMiddleware(AgentMiddleware):
             raise HookRejected(unavailable or "专家不在当前契约、权限或执行阶段允许的范围内")
         tool = getattr(request, "tool", None)
         context = get_run_context()
-        if context and context.enforce_plan and hasattr(request, "tool") and tool is None:
+        if context and hasattr(request, "tool") and tool is None:
             error = ValueError("模型请求了未注册的工具，请选择实际提供的工具")
             raise HookRejected(str(error)) from error
         if tool is not None:
@@ -291,13 +278,16 @@ class HookToolMiddleware(AgentMiddleware):
         from agent.runtime.policies import policy_for_run, request_timeout
 
         name = call.actor.rsplit(":", 1)[-1]
-        if name in ("task", "research_step"):
-            return None  # Delegations have their own collection and run deadlines.
+        if name == "task":
+            return None  # The run deadline controls sequential expert execution.
         if "admitted_timeout" in call.workflow_data:
             return call.workflow_data["admitted_timeout"]
         return request_timeout(policy_for_run().timeouts.tool_seconds, category="tool") if get_run_context() else None
 
     def _error(self, call, exc):
+        if call.target and isinstance(exc, HookRejected):
+            if context := get_run_context():
+                context.task_rejections.append(error_message(exc))
         call.error = exc
         call.result_status = "rejected"
         if call.execution_status == "running":
@@ -306,7 +296,7 @@ class HookToolMiddleware(AgentMiddleware):
             call.execution_status = "unknown" if isinstance(exc, ToolCallTimeout | asyncio.CancelledError) else "failed"
         call.status = (
             "rejected"
-            if isinstance(exc, HookRejected | CollectionFinished)
+            if isinstance(exc, HookRejected)
             else "cancelled"
             if error_category(exc) == "cancelled"
             else "failed"
@@ -347,25 +337,14 @@ class HookToolMiddleware(AgentMiddleware):
         from agent.reflection import capture_tool
 
         try:
-            if not isinstance(call.error, CollectionFinished):
-                capture_tool(call)
+            capture_tool(call)
             if call.status == "completed":
                 call.result_status = "accepted"
         except Exception as exc:
             self._error(call, exc)
             raise
         finally:
-            try:
-                if self.actor == "delivery":
-                    from agent.runtime.delivery_actions import record_action
-
-                    record_action(call)
-            except Exception as exc:
-                logger.exception("Delivery action record was NOT saved")
-                if context := get_run_context():
-                    context.hook_failures.append("delivery_checkpoint: " + redact_text(str(exc)))
-            finally:
-                self.hooks.emit("after_tool", call)
+            self.hooks.emit("after_tool", call)
         if request.tool_call["name"] == "task" and call.executed and not self.managed_delegation:
             self.hooks.emit("after_subagent", call)
 
@@ -386,9 +365,6 @@ class HookToolMiddleware(AgentMiddleware):
             while True:
                 started = monotonic()
                 try:
-                    from agent.runtime.workflows import prepare_tool_sync
-
-                    prepare_tool_sync(call)
                     self._before(request, call)
                     seconds = self._timeout(call)
                     call.stage = "execution"
@@ -406,12 +382,9 @@ class HookToolMiddleware(AgentMiddleware):
                         context.terminate(exc)
                     self._error(call, exc)
                     raise
-                except CollectionFinished as exc:
-                    self._error(call, exc)
-                    raise
                 except DependencyUnavailable as exc:
                     self._error(call, exc)
-                    if call.search_task_key:
+                    if call.task_id:
                         raise  # The owning delegation records a failed dependency, without report/review calls.
                     return self._error_response(call, error_message(exc))
                 except HookRejected as exc:
@@ -455,21 +428,12 @@ class HookToolMiddleware(AgentMiddleware):
             active_call.reset(token)
 
     async def awrap_tool_call(self, request, handler):
-        from agent.runtime.collection import current_collection
-
-        scope = current_collection()
         call = self._call(request)
         token = active_call.set(call)
-        task = asyncio.current_task()
-        if scope is not None:
-            scope.pending.add(task)
         try:
             while True:
                 started = monotonic()
                 try:
-                    from agent.runtime.workflows import prepare_tool
-
-                    await prepare_tool(call)
                     self._before(request, call)
                     seconds = self._timeout(call)
                     call.executed = True
@@ -500,12 +464,9 @@ class HookToolMiddleware(AgentMiddleware):
                         context.terminate(exc)
                     self._error(call, exc)
                     raise
-                except CollectionFinished as exc:
-                    self._error(call, exc)
-                    raise
                 except DependencyUnavailable as exc:
                     self._error(call, exc)
-                    if call.search_task_key:
+                    if call.task_id:
                         raise  # The owning delegation records a failed dependency, without report/review calls.
                     return self._error_response(call, error_message(exc))
                 except HookRejected as exc:
@@ -550,85 +511,4 @@ class HookToolMiddleware(AgentMiddleware):
                     self._error(call, exc)
                     raise
         finally:
-            if scope is not None:
-                scope.pending.discard(task)
             active_call.reset(token)
-
-
-class HookSubagentRunnable(Runnable):
-    """Explicit adapter for compiled executors; inner tools need middleware too.
-
-    Framework task already owns delegation hooks. Direct calls to this executor
-    use the same hooks, without charging or recording delegation twice.
-    """
-
-    def __init__(self, target, runnable, hooks=None):
-        self.target, self.runnable, self.hooks = target, runnable, hooks or pipeline
-
-    def _begin(self):
-        parent = active_call.get()
-        if parent and parent.target == self.target:
-            return None, None
-        call = HookCall(self.target, str(uuid4()), parent.call_id if parent else None, target=self.target)
-        token = active_call.set(call)
-        return call, token
-
-    def _end(self, call, token, started):
-        if call is not None:
-            try:
-                call.elapsed_ms = (monotonic() - started) * 1000
-                if call.executed:
-                    self.hooks.emit("after_subagent", call)
-            finally:
-                active_call.reset(token)
-
-    def invoke(self, input, config=None, **kwargs):
-        call, token = self._begin()
-        started = monotonic()
-        try:
-            if call:
-                self.hooks.emit("before_delegate", call)
-                call.executed = True
-            result = self.runnable.invoke(input, config, **kwargs)
-            if call:
-                call.result, call.status = result, "completed"
-            return result
-        except BaseException as exc:
-            if call:
-                call.error = exc
-                call.status = error_category(exc) if error_category(exc) in ("rejected", "cancelled") else "failed"
-                self.hooks.emit("on_error", call)
-            raise
-        finally:
-            self._end(call, token, started)
-
-    async def ainvoke(self, input, config=None, **kwargs):
-        call, token = self._begin()
-        started = monotonic()
-        try:
-            if call:
-                self.hooks.emit("before_delegate", call)
-                call.executed = True
-            result = await self.runnable.ainvoke(input, config, **kwargs)
-            if call:
-                call.result, call.status = result, "completed"
-            return result
-        except BaseException as exc:
-            if call:
-                call.error = exc
-                call.status = error_category(exc) if error_category(exc) in ("rejected", "cancelled") else "failed"
-                self.hooks.emit("on_error", call)
-            raise
-        finally:
-            self._end(call, token, started)
-
-
-def hook_subagents(specs):
-    """Configure each child explicitly; main middleware is never inherited."""
-    result = []
-    for spec in specs:
-        if "runnable" in spec:
-            result.append(dict(spec, runnable=HookSubagentRunnable(spec["name"], spec["runnable"])))
-        else:
-            result.append(dict(spec, middleware=[*spec.get("middleware", []), HookToolMiddleware(spec["name"])]))
-    return result

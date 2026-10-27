@@ -5,10 +5,10 @@ import importlib
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
-import httpx
 import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
+from runtime_fixtures import OfflineEnvironment
 
 from agent.runtime.context import get_run_context
 from api.context import get_session_context, get_thread_context
@@ -49,13 +49,10 @@ class GatedAgent:
         self.inputs = {}
 
     async def astream(self, inputs, config, stream_mode):
-        from tools.markdown_tools import generate_markdown
-        from tools.upload_file_read_tool import read_file_content
-
         context = get_run_context()
         assert get_thread_context() == context.thread_id
         assert get_session_context() == str(context.work_dir)
-        assert config["configurable"]["thread_id"] == context.thread_id
+        assert config["configurable"]["thread_id"] == context.run_id
         self.contexts[context.run_id] = context
         self.inputs[context.run_id] = inputs
         gate = self.gates[context.run_id] = asyncio.Event()
@@ -64,10 +61,8 @@ class GatedAgent:
         if context.thread_id in self.failures:
             raise RuntimeError(f"controlled failure in {context.thread_id}")
         answer = f"answer:{context.thread_id}:{context.run_id}"
-        await asyncio.to_thread(generate_markdown.invoke, {"content": answer, "filename": "report"})
-        assert read_file_content.invoke({"filename": "report.md"}) == answer
         assert get_run_context() is context
-        self.answers[context.thread_id] = answer
+        self.answers[context.run_id] = answer
         yield {"any_node": {"messages": [AIMessage(content=answer)]}}
 
     async def aget_state(self, config):
@@ -80,16 +75,13 @@ class GatedAgent:
 async def service_runtime(sandbox_dir, monkeypatch):
     agent = GatedAgent()
     recorder = MonitorRecorder()
-    monkeypatch.setattr(runtime, "checkpoint_db_path", sandbox_dir / "checkpoints.db")
-    monkeypatch.setattr(runtime, "project_root_path", sandbox_dir)
+    environment = OfflineEnvironment(sandbox_dir)
+    environment.configure(monkeypatch)
+    await environment.migrate()
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: agent)
     monkeypatch.setattr(runtime, "monitor", recorder)
-    monkeypatch.setattr(server, "run_db_path", sandbox_dir / "runs.db")
-    monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
-    monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
-    async with server.lifespan(server.app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app), base_url="http://test") as client:
-            yield client, agent, recorder
+    async with environment.client() as client:
+        yield client, agent, recorder
 
 
 @pytest_asyncio.fixture
@@ -113,6 +105,7 @@ async def complete(agent, run_id):
 @pytest.mark.asyncio
 async def test_same_session_concurrent_requests_return_409(service):
     client, agent, _ = service
+    await server.app.state.run_store.create_thread("same")
     responses = await asyncio.gather(
         *(client.post("/api/task", json={"query": f"q{i}", "thread_id": "same"}) for i in range(8))
     )
@@ -131,6 +124,8 @@ async def test_same_session_concurrent_requests_return_409(service):
 @pytest.mark.asyncio
 async def test_two_sessions_run_concurrently_without_mixed_outputs(service):
     client, agent, recorder = service
+    for name in ("alpha", "beta"):
+        await server.app.state.run_store.create_thread(name)
     responses = await asyncio.gather(
         *(client.post("/api/task", json={"query": name, "thread_id": name}) for name in ("alpha", "beta"))
     )
@@ -150,7 +145,7 @@ async def test_two_sessions_run_concurrently_without_mixed_outputs(service):
         expected = f"answer:{record['thread_id']}:{record['run_id']}"
         saved = (await client.get(f"/api/runs/{record['run_id']}")).json()
         assert saved["status"] == "completed" and saved["answer"] == expected
-        assert (context.work_dir / "report.md").read_text(encoding="utf-8") == expected
+        assert (context.work_dir / "answer.md").read_text(encoding="utf-8") == expected
         events = await server.app.state.run_store.list_events(record["run_id"])
         assert events[-1]["data"]["result"] == expected
     assert get_run_context() is None and get_thread_context() is None and get_session_context() is None
@@ -163,11 +158,13 @@ async def test_next_round_keeps_previous_answer_and_files(service):
     upload = server.updated_dir / "session_repeat"
     upload.mkdir(parents=True)
     (upload / "uploaded.txt").write_text("upload version 1", encoding="utf-8")
+    await server.app.state.run_store.create_thread("repeat")
     first = (await client.post("/api/task", json={"query": "first question", "thread_id": "repeat"})).json()
     await wait_started(agent)
     old_task = await complete(agent, first["run_id"])
     before = (await client.get(f"/api/runs/{first['run_id']}")).json()
     (upload / "uploaded.txt").write_text("upload version 2", encoding="utf-8")
+    await server.app.state.run_store.create_thread("repeat")
     second = (await client.post("/api/task", json={"query": "second question", "thread_id": "repeat"})).json()
     assert first["run_id"] != second["run_id"]
     await wait_started(agent)
@@ -180,8 +177,8 @@ async def test_next_round_keeps_previous_answer_and_files(service):
     for version, record in enumerate((first, second), start=1):
         directory = agent.contexts[record["run_id"]].work_dir
         assert (directory / "uploads" / "uploaded.txt").read_text(encoding="utf-8") == f"upload version {version}"
-        assert record["run_id"] in (directory / "report.md").read_text(encoding="utf-8")
-        prompt = agent.inputs[record["run_id"]]["messages"][0]["content"]
+        assert record["run_id"] in (directory / "answer.md").read_text(encoding="utf-8")
+        prompt = agent.inputs[record["run_id"]]["messages"].value[0].content
         assert directory.name == f"run_{record['run_id']}"
         assert "虚拟文件系统根目录为 /" in prompt and "uploads/uploaded.txt" in prompt
         assert str(directory) not in prompt
@@ -191,6 +188,7 @@ async def test_next_round_keeps_previous_answer_and_files(service):
 async def test_failure_is_saved_and_session_can_retry(service, caplog):
     client, agent, _ = service
     agent.failures.add("failure")
+    await server.app.state.run_store.create_thread("failure")
     first = (await client.post("/api/task", json={"query": "question", "thread_id": "failure"})).json()
     await wait_started(agent)
     await complete(agent, first["run_id"])
@@ -199,6 +197,7 @@ async def test_failure_is_saved_and_session_can_retry(service, caplog):
     assert saved["ended_at"] and saved["error"] == "controlled failure in failure"
     assert first["run_id"] in caplog.text
     agent.failures.clear()
+    await server.app.state.run_store.create_thread("failure")
     next_run = await client.post("/api/task", json={"query": "retry", "thread_id": "failure"})
     assert next_run.status_code == 200 and next_run.json()["run_id"] != first["run_id"]
     await wait_started(agent)
@@ -221,6 +220,7 @@ async def test_generated_ids_invalid_session_and_unknown_run(service):
 @pytest.mark.asyncio
 async def test_shutdown_saves_cancellation_and_closes_run_connection(service):
     client, agent, _ = service
+    await server.app.state.run_store.create_thread("shutdown")
     record = (await client.post("/api/task", json={"query": "wait", "thread_id": "shutdown"})).json()
     await wait_started(agent)
     task = server.app.state.run_tasks[record["run_id"]]
@@ -234,7 +234,7 @@ async def test_shutdown_saves_cancellation_and_closes_run_connection(service):
 
 
 @pytest.mark.asyncio
-async def test_actual_lifespan_shutdown_persists_unstarted_run(sandbox_dir, monkeypatch):
+async def test_actual_lifespan_shutdown_persists_unstarted_run(sandbox_dir, monkeypatch, migrated_environment):
     async def initialize():
         pass
 
@@ -244,6 +244,7 @@ async def test_actual_lifespan_shutdown_persists_unstarted_run(sandbox_dir, monk
     monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
     async with server.lifespan(server.app):
         # Keep a queued record to cover cancellation before a coroutine's first turn.
+        await server.app.state.run_store.create_thread("queued-at-exit")
         record = await server.app.state.run_store.create("queued-at-exit", "question")
         connection = server.app.state.run_store.connection
     with pytest.raises(ValueError, match="closed|active"):
@@ -272,6 +273,7 @@ async def test_cancelled_submission_does_not_leave_session_busy(service, monkeyp
         return record
 
     monkeypatch.setattr(store, "create", paused_create)
+    await store.create_thread("admission")
     submission = asyncio.create_task(
         server.run_task(server.TaskRequest(query="cancelled request", thread_id="admission"))
     )
@@ -282,6 +284,7 @@ async def test_cancelled_submission_does_not_leave_session_busy(service, monkeyp
     assert saved["status"] == "cancelled" and saved["error"] == "Task submission cancelled"
     assert not server.app.state.run_tasks
     monkeypatch.setattr(store, "create", original_create)
+    await server.app.state.run_store.create_thread("admission")
     response = await client.post("/api/task", json={"query": "retry", "thread_id": "admission"})
     assert response.status_code == 200
     await wait_started(agent)

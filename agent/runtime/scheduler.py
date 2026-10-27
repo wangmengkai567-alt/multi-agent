@@ -120,7 +120,7 @@ class ServiceScheduler:
             if context.run_id not in self.run_children:
                 self.run_children[context.run_id] = Gate(
                     PoolLimits(
-                        concurrency=context.policy.search.max_concurrent_tasks,
+                        concurrency=1,
                         queue_capacity=context.policy.search.max_tasks_per_run,
                     )
                 )
@@ -160,18 +160,12 @@ class ServiceScheduler:
         context.check_active()
         if context.policy is None:
             return
-        from agent.runtime.collection import current_collection
         from agent.runtime.measurement import active_request
         from agent.runtime.policies import request_timeout
 
-        collection = current_collection()
-        if collection is not None:
-            collection.check()
         request = active_request.get()
         if request is not None and request.context is context and not request.closed:
             request_timeout(category=request.row["category"], phase=request.row["phase"])
-        elif collection is not None or context.capacity_reservations:
-            request_timeout()
 
     def acquire(self, gate, context, label):
         self._check_wait(context)
@@ -226,7 +220,7 @@ class ServiceScheduler:
     @asynccontextmanager
     async def run_slot(self, context):
         if _run_owner.get() is self:
-            # A durable job owns the same service slot throughout its handler.
+            # Reentrant execution shares the existing service slot.
             yield
             return
         lease = await self.aacquire(self.gate("runs"), context, "runs", context.scheduler_ticket)

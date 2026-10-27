@@ -5,6 +5,7 @@ import sqlite3
 
 import pytest
 from fastapi import WebSocketDisconnect
+from runtime_fixtures import ORIGIN, OfflineEnvironment, legacy_snapshot, login
 from test_run_concurrency import complete, server, service_runtime, wait_started
 
 from agent.runtime.events import make_event
@@ -62,6 +63,7 @@ async def test_websocket_route_replays_only_matching_run_after_cursor(sandbox_di
     async with service_runtime(sandbox_dir, monkeypatch) as (client, agent, _):
         records = []
         for thread in ("one", "two"):
+            await server.app.state.run_store.create_thread(thread)
             record = (await client.post("/api/task", json={"query": thread, "thread_id": thread})).json()
             await wait_started(agent)
             await complete(agent, record["run_id"])
@@ -83,10 +85,11 @@ async def test_websocket_route_replays_only_matching_run_after_cursor(sandbox_di
 
 
 @pytest.mark.asyncio
-async def test_replay_and_concurrent_live_delivery_have_no_gap_or_duplicate(sandbox_dir):
+async def test_replay_and_concurrent_live_delivery_have_no_gap_or_duplicate(sandbox_dir, migrated_environment):
     store = await RunStore.open(sandbox_dir / "runs.db")
     manager = ConnectionManager()
     manager.store = store
+    await store.create_thread("thread")
     await store.create("thread", "question", run_id="run")
     for i in range(4):
         await store.append_event(make_event("thread", "run", "progress", str(i)))
@@ -116,6 +119,7 @@ async def test_replay_and_concurrent_live_delivery_have_no_gap_or_duplicate(sand
         assert all(e["run_id"] == "run" and e["thread_id"] == "thread" for e in socket.messages)
         # Another round in the same thread must not leak into a run-specific subscription.
         await store.finish("run", "cancelled")
+        await store.create_thread("thread")
         await store.create("thread", "next", run_id="next")
         event = await store.append_event(make_event("thread", "next", "progress", "next"))
         await manager.send_to_thread(event, "thread")
@@ -128,11 +132,12 @@ async def test_replay_and_concurrent_live_delivery_have_no_gap_or_duplicate(sand
 
 
 @pytest.mark.asyncio
-async def test_reconnect_reads_saved_events_after_disconnect_and_keeps_new_socket(sandbox_dir):
+async def test_reconnect_reads_saved_events_after_disconnect_and_keeps_new_socket(sandbox_dir, migrated_environment):
     store = await RunStore.open(sandbox_dir / "runs.db")
     manager = ConnectionManager()
     manager.store = store
     try:
+        await store.create_thread("thread")
         await store.create("thread", "q", run_id="run")
         first = await store.append_event(make_event("thread", "run", "progress", "first"))
         socket = Socket()
@@ -156,7 +161,7 @@ async def test_reconnect_reads_saved_events_after_disconnect_and_keeps_new_socke
 
 @pytest.mark.asyncio
 async def test_v4_migration_keeps_existing_run_and_events(sandbox_dir):
-    path = sandbox_dir / "old.db"
+    path = sandbox_dir / "runs.db"
     with sqlite3.connect(path) as db:
         db.executescript("""
             CREATE TABLE runs (
@@ -170,6 +175,10 @@ async def test_v4_migration_keeps_existing_run_and_events(sandbox_dir):
             INSERT INTO runs VALUES ('old','thread','中文问题','completed','原答案',NULL,'2026-10-13','2026-10-13');
             PRAGMA user_version=1;
         """)
+    environment = OfflineEnvironment(sandbox_dir)
+    with pytest.raises(RuntimeError, match="Security database migration required"):
+        await RunStore.open(path)
+    await environment.migrate()
     store = await RunStore.open(path)
     try:
         original = await store.get("old")
@@ -177,12 +186,13 @@ async def test_v4_migration_keeps_existing_run_and_events(sandbox_dir):
         event = await store.append_event(make_event("thread", "old", "task_result", "saved"))
     finally:
         await store.close()
-    with sqlite3.connect(path) as db:
-        db.execute("PRAGMA user_version=4")
-    store = await RunStore.open(path)
+    environment = legacy_snapshot(path, sandbox_dir / "legacy", 4)
+    await environment.migrate()
+    store = await RunStore.open(environment.runs)
     try:
         assert await store.get("old") == original
         assert await store.list_events("old") == [event]
+        await store.create_thread("thread")
         await store.create("thread", "retry", run_id="new")
         assert await store.finish("new", "timed_out", error="deadline")
         assert not await store.finish("old", "cancelled")
@@ -198,6 +208,7 @@ def test_actual_asgi_websocket_cursor_and_wrong_thread_rejection(sandbox_dir, mo
     async def prepare():
         store = await RunStore.open(sandbox_dir / "runs.db")
         try:
+            await store.create_thread("thread")
             await store.create("thread", "q", run_id="saved")
             await store.append_event(make_event("thread", "saved", "progress", "first"))
             await store.append_event(make_event("thread", "saved", "progress", "second"))
@@ -208,19 +219,27 @@ def test_actual_asgi_websocket_cursor_and_wrong_thread_rejection(sandbox_dir, mo
     async def noop():
         pass
 
+    environment = OfflineEnvironment(sandbox_dir)
+    environment.configure(monkeypatch)
+    asyncio.run(environment.migrate())
     asyncio.run(prepare())
     monkeypatch.setattr(server, "initialize_agent", noop)
     monkeypatch.setattr(server, "shutdown_agent", noop)
     monkeypatch.setattr(server, "run_db_path", sandbox_dir / "runs.db")
     monkeypatch.setattr(server, "output_dir", sandbox_dir / "output")
     monkeypatch.setattr(server, "updated_dir", sandbox_dir / "updated")
-    with TestClient(server.app) as client:
-        with client.websocket_connect("/ws/thread?run_id=saved&after_seq=1") as websocket:
+    with TestClient(server.app, base_url=ORIGIN) as client:
+        login(client)
+        with client.websocket_connect(
+            "ws://127.0.0.1:8000/ws/thread?run_id=saved&after_seq=1", headers={"Origin": ORIGIN}
+        ) as websocket:
             event = websocket.receive_json()
             assert event["event_seq"] == 2 and event["message"] == "second"
             websocket.send_text("ping")
             assert websocket.receive_json()["type"] == "pong"
         with pytest.raises(WebSocketDisconnect) as denied:
-            with client.websocket_connect("/ws/other?run_id=saved&after_seq=0"):
+            with client.websocket_connect(
+                "ws://127.0.0.1:8000/ws/other?run_id=saved&after_seq=0", headers={"Origin": ORIGIN}
+            ):
                 pass
         assert denied.value.code == 1008

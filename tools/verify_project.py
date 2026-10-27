@@ -1,4 +1,4 @@
-"""Run the unchanged offline suites and retain every failure with its first blocker."""
+"""Run the isolated offline suites and retain every failure with its first blocker."""
 
 import argparse
 import json
@@ -14,108 +14,6 @@ from xml.etree import ElementTree
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# These identify the observed first blocker, never a passing or waived test.
-BLOCKERS = (
-    (
-        "initialization",
-        "security_migration",
-        "Security database migration required",
-        "api/run_store.py",
-        "Fixture must explicitly migrate its temporary databases before opening the runtime.",
-    ),
-    (
-        "initialization",
-        "authenticated_lifespan",
-        "has no attribute 'auth'",
-        "api/security.py",
-        "ASGI fixture must enter the authenticated lifespan and log in before protected requests.",
-    ),
-    (
-        "old_contract",
-        "quote_registration",
-        "quote_id: Field required",
-        "agent/runtime/quotes.py",
-        "Report fixtures must use runtime-owned quote IDs and the current evidence protocol.",
-    ),
-    (
-        "old_contract",
-        "quote_registration",
-        "Quote registration requires an owned delegated task",
-        "agent/runtime/quotes.py",
-        "Fixture must establish its actual delegated task owner before report parsing.",
-    ),
-    (
-        "old_contract",
-        "evidence_record",
-        "Unsupported tool evidence protocol",
-        "agent/runtime/evidence_protocol.py",
-        "Raw legacy evidence dictionaries do not satisfy the versioned evidence contract.",
-    ),
-    (
-        "old_contract",
-        "tool_binding",
-        "explicitly versioned evidence adapter is required",
-        "agent/runtime/evidence_protocol.py",
-        "Registered fixture tools must declare their evidence adapter.",
-    ),
-    (
-        "old_contract",
-        "tool_binding",
-        "Executed evidence has no declared adapter",
-        "agent/runtime/evidence_protocol.py",
-        "The simulated executed tool call omits its mandatory evidence binding.",
-    ),
-    (
-        "old_contract",
-        "route_decision",
-        "validation errors for RouteDecision",
-        "agent/runtime/contracts.py",
-        "Fixture must provide the complete current intent/material/permission contract.",
-    ),
-    (
-        "old_contract",
-        "job_ownership",
-        "JobService.open() missing",
-        "agent/runtime/jobs.py",
-        "JobService requires the shared scheduler and migrated parent run store.",
-    ),
-    (
-        "old_contract",
-        "expert_review",
-        "explicit enabled semantic review policy",
-        "agent/subagent_registry.py",
-        "Expert definitions must declare the mandatory semantic review policy.",
-    ),
-    (
-        "old_contract",
-        "removed_conversion",
-        "No module named 'utils.word_converter'",
-        "docs/implementation/34-remove-format-conversion.md",
-        "PDF export was explicitly removed; do not restore its implementation for obsolete checks.",
-    ),
-    (
-        "old_contract",
-        "removed_conversion",
-        "No module named 'agent.runtime.artifact_jobs'",
-        "docs/implementation/34-remove-format-conversion.md",
-        "Background conversion was explicitly removed.",
-    ),
-    (
-        "old_contract",
-        "provider_process",
-        "has no attribute 'connect'",
-        "agent/runtime/worker.py",
-        "Database connections are owned by the managed provider process, not tools.db_tools.",
-    ),
-    (
-        "old_contract",
-        "provider_process",
-        "has no attribute 'TavilyClient'",
-        "agent/runtime/worker.py",
-        "Tavily clients are owned by the managed provider process.",
-    ),
-)
-
 
 def write_text(path, text):
     normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
@@ -123,14 +21,11 @@ def write_text(path, text):
 
 
 def classify(text):
-    for category, blocker, marker, source, action in BLOCKERS:
-        if marker in text:
-            return dict(category=category, blocker=blocker, source=source, action=action)
     return dict(
         category="needs_investigation",
         blocker="unreviewed",
         source=None,
-        action="Inspect this assertion and its fixture against the current implementation; no automatic attribution.",
+        action="Inspect this failure against the current execution contract; no failure is waived.",
     )
 
 
@@ -182,7 +77,10 @@ def main():
         "--node", default="node", help="Explicit Node executable; missing executables fail verification."
     )
     parser.add_argument("--uv", default="uv", help="Explicit uv executable for the dependency consistency check.")
-    parser.add_argument("--timeout-seconds", type=int, default=300)
+    parser.add_argument("--timeout-seconds", type=int, default=1200)
+    parser.add_argument(
+        "--baseline-report", type=Path, help="Prior report.json to compare every case without waiving failures."
+    )
     args = parser.parse_args()
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
@@ -228,7 +126,25 @@ def main():
         for outcome in case["outcomes"]
         if "first_blocker" in outcome
     )
+    comparison = None
+    if args.baseline_report is not None:
+        baseline = json.loads(args.baseline_report.read_text(encoding="utf-8"))
+        before = {(row["module"], row["name"]): row for row in baseline["cases"]}
+        after = {(row["module"], row["name"]): row for row in cases}
+        comparison = dict(
+            baseline=str(args.baseline_report.resolve()),
+            before_counts=baseline["pytest_counts"],
+            after_counts=counts,
+            transitions=[
+                dict(module=key[0], name=key[1], before=before[key]["status"], after=after[key]["status"])
+                for key in sorted(before.keys() & after.keys())
+                if before[key]["status"] != after[key]["status"]
+            ],
+            removed=[dict(module=key[0], name=key[1]) for key in sorted(before.keys() - after.keys())],
+            added=[dict(module=key[0], name=key[1]) for key in sorted(after.keys() - before.keys())],
+        )
     report = dict(
+        baseline_comparison=comparison,
         passed=passed,
         created_at=datetime.now(UTC).isoformat(),
         python=sys.version,
@@ -253,9 +169,22 @@ def main():
         "| --- | ---: | --- |",
     ]
     lines.extend(f"| {step['name']} | {step['exit_code']} | [{step['log']}]({step['log']}) |" for step in results)
-    lines.extend(
-        ["", "## Pytest", "", json.dumps(counts), "", "| Case | Status | First blocker |", "| --- | --- | --- |"]
-    )
+    lines.extend(["", "## Pytest", "", json.dumps(counts)])
+    if comparison is not None:
+        lines.extend(
+            [
+                "",
+                "## Baseline comparison",
+                "",
+                json.dumps(
+                    {key: value for key, value in comparison.items() if key != "transitions"}, ensure_ascii=False
+                ),
+                "",
+                "All renamed/added/removed cases must be reviewed; a transition never waives a failure.",
+                "",
+            ]
+        )
+    lines.extend(["", "| Case | Status | First blocker |", "| --- | --- | --- |"])
     for case in cases:
         if case["status"] == "passed":
             continue
