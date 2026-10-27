@@ -4,7 +4,7 @@
 
 ## 环境要求
 
-Windows、uv。项目使用 uv 管理 Python 3.11；PDF 导出另需安装 Microsoft Word。
+Windows、uv。项目使用 uv 管理 Python 3.11；交付支持正文和 Markdown，不提供文件格式转换。
 
 ## 快速启动
 
@@ -73,6 +73,18 @@ uv run --offline --no-project --python .venv\Scripts\python.exe python -B api\se
 Qwen3.8 Max 主模型和审核模型均可配置 `LLM_MAIN_EXTRA_BODY={"thinking_budget":1024}`、`LLM_REVIEW_EXTRA_BODY={"thinking_budget":1024}`，在保留推理的同时限制其长度；审核失败仍拒绝放行，不自动延长请求时限。
 
 项目的 pytest 默认禁止联网并使用隔离存储和假客户端，检查通过不能证明真实模型与检索服务端到端可用。真实验收需另外运行同类问题，并核对子任务 `check_status`、最终 `answer_validation` 和交付状态；`run.status=completed` 也可能只是返回有限结果，不能单独作为业务验收通过的依据。
+
+## 离线验证
+
+在项目根目录执行以下命令。报告目录必须是 output/ 下尚不存在的子目录，避免覆盖已有证据。
+
+```powershell
+uv run --offline --no-project --python .venv\Scripts\python.exe python -X utf8 -B -m tools.verify_project --report-dir output/verification/local
+```
+
+验证入口按同一解释器运行依赖一致性、Ruff、完整 pytest 和前端 Node 用例；Node 和 uv 需在 PATH 中，也可用 --node、--uv 指定绝对路径。执行期间屏蔽真实服务凭据和 .env 加载，pytest 仍使用现有 conftest 的禁止联网规则。不迁移生产数据库、不修改测试、断言或应用权限，不自动调用真实模型和搜索。任一检查失败或未收集到用例都会返回非零退出码；第一阻塞点分类仅用于定位，不能将旧契约失败当作通过。
+
+report.md 是汇总，report.json 和 pytest.xml 保留逐用例结果与原始失败位置，阶段日志单独保存。docs/ 中的设计、修复和验收 Markdown 可纳入版本管理；生成日志、截图和 output/ 仍被忽略。当前已知失败及后续限制见 [阶段四修复记录](docs/implementation/36-stage4-verification-repository.md)。
 
 ## 相关文档
 

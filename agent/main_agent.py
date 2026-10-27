@@ -183,7 +183,7 @@ async def run_deep_agent(task_query, session_id):
             path_instruction += "\n当前明确前台执行：不要提交后台任务；直接登记研究对象并完成查询和交付。"
         path_instruction += instruction(context)
         # Each execution gets a new graph frame; the canonical checkpoint owns continuation.
-        config = {"configurable": {"thread_id": context.research_scope_id + ":" + context.run_id}}
+        config = {"configurable": {"thread_id": validate_identifier(context.run_id)}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))
         stream_input = {

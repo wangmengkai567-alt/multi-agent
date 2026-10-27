@@ -56,7 +56,9 @@ Thumbs.db
 
 
 # ========================
-# 非必要文档
+# 本地指令与生成的验证产物
 # ========================
 AGENTS.md
-docs/
+docs/**/*.log
+docs/implementation/*.png
+docs/generated/
