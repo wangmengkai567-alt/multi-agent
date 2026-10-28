@@ -354,3 +354,137 @@ def test_timeout_settings_reject_invalid_values(field, value):
 
     with pytest.raises(ValidationError):
         TimeoutLimits.model_validate({field: value})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_expired_expert_persists_failed_status_with_timeout_reason(
+    sandbox_dir, migrated_environment, asynchronous
+):
+    import json
+    from time import monotonic
+
+    from agent.runtime.contracts import bind_contract
+    from agent.runtime.delegation import DelegationRunnable
+    from agent.subagent_registry import SubagentSpec
+
+    path = sandbox_dir / "runs.db"
+    store = await RunStore.open(path)
+    sink = EventSink(store, lambda *args: None)
+    work = sandbox_dir / "work"
+    work.mkdir()
+    context = RunContext("expired-run", "expired-thread", work, policy=load_runtime_policy(), event_sink=sink)
+
+    def expire(state):
+        # Expire inside the actual executor, after admission, without a timer race.
+        context.deadline_clock = monotonic() - 1
+        context.check_active()
+
+    token = set_run_context(context)
+    try:
+        await store.create_thread(context.thread_id)
+        await sink.create(context.thread_id, "Investigate", context.run_id)
+        await sink.start(context)
+        bind_contract(context)
+        child = DelegationRunnable(
+            SubagentSpec("probe", "Probe", "Investigate", "Investigate", ()), RunnableLambda(expire)
+        )
+        inputs = {"messages": [HumanMessage(content="Investigate")]}
+        with pytest.raises(RunStopped, match="timed_out"):
+            if asynchronous:
+                await child.ainvoke(inputs)
+            else:
+                await asyncio.to_thread(child.invoke, inputs)
+        await sink.flush(context.run_id)
+        (task,) = await store.list_subtasks(context.run_id)
+        (memory,) = context.task_results.values()
+        assert task["status"] == memory["status"] == "failed"
+        assert task["ended_at"] and task["result"] is None
+        assert "timed_out" in task["error"]
+        assert memory["error_category"] == "timeout"
+        saved = json.loads((work / "results" / (task["call_id"] + ".json")).read_text("utf-8"))
+        assert saved["status"] == "failed" and saved["error_category"] == "timeout"
+        events = await store.list_events(context.run_id)
+        terminals = [event for event in events if event["event"] == "subagent_failed"]
+        assert len(terminals) == 1
+        assert terminals[0]["status"] == "failed"
+        assert terminals[0]["data"]["error_category"] == "timeout"
+        assert "timed_out" in terminals[0]["data"]["error"]
+        assert not any(event["event"] == "subagent_completed" for event in events)
+        assert not (work / "answer.md").exists()
+        assert all(row["active"] == row["queued"] == 0 for row in context.scheduler.snapshot().values())
+        await sink.finish(context, "timed_out", error="Total run deadline exceeded")
+        history = await store.history(context.run_id)
+        assert history["run"]["status"] == "timed_out" and history["run"]["answer"] is None
+        assert history["events"][-1]["event"] == "run_timed_out"
+        assert "recording_status" not in history["events"][-1]["data"]
+        assert not await store.finish(context.run_id, "completed", answer="late")
+        late = dict(task, status="completed", result="late")
+        assert (
+            await store.record_subtask(late, dict(terminals[0], event="subagent_completed", status="completed")) is None
+        )
+        assert await store.history(context.run_id) == history
+    finally:
+        reset_run_context(token)
+        await sink.close()
+        await store.close()
+    reopened = await RunStore.open(path)
+    try:
+        assert await reopened.history(context.run_id) == history
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_expert_http_history_keeps_original_timeout(sandbox_dir, monkeypatch):
+    from time import monotonic
+
+    from agent.runtime.contracts import bind_contract
+    from agent.runtime.delegation import DelegationRunnable
+    from agent.subagent_registry import SubagentSpec
+
+    contexts = []
+
+    async def body(question, session):
+        context = get_run_context()
+        contexts.append(context)
+        context.work_dir.mkdir(parents=True)
+        bind_contract(context)
+
+        def expire(state):
+            context.deadline_clock = monotonic() - 1
+            context.check_active()
+
+        child = DelegationRunnable(
+            SubagentSpec("probe", "Probe", "Investigate", "Investigate", ()), RunnableLambda(expire)
+        )
+        await child.ainvoke({"messages": [HumanMessage(content=question)]})
+        raise AssertionError("An expired expert must not return success")
+
+    monkeypatch.setattr(server, "run_deep_agent", body)
+    async with service_runtime(sandbox_dir, monkeypatch) as (client, _, _):
+        response = await client.post("/api/task", json={"query": "Investigate"})
+        assert response.status_code == 200
+        run_id = response.json()["run_id"]
+        run = await settled(client, run_id)
+        await asyncio.gather(*list(server.app.state.agent_tasks), return_exceptions=True)
+        assert run["status"] == "timed_out" and run["answer"] is None
+        assert run["completion"]["status"] == "timed_out"
+        assert "Run has ended: timed_out" in run["error"]
+        assert "EventPersistenceError" not in run["error"]
+        history = (await client.get(f"/api/runs/{run_id}/history")).json()
+        (task,) = history["subtasks"]
+        assert task["status"] == "failed" and task["result"] is None and task["ended_at"]
+        (terminal,) = [event for event in history["events"] if event["event"] == "subagent_failed"]
+        assert terminal["data"]["error_category"] == "timeout"
+        assert "timed_out" in terminal["data"]["error"]
+        assert history["events"][-1]["event"] == "run_timed_out"
+        assert "recording_status" not in history["events"][-1]["data"]
+        assert (await client.get(f"/api/runs/{run_id}/files/download?path=answer.md")).status_code == 404
+        assert all(row["active"] == row["queued"] == 0 for row in contexts[0].scheduler.snapshot().values())
+        assert (await client.post(f"/api/runs/{run_id}/cancel")).json()["status"] == "timed_out"
+    store = await RunStore.open(sandbox_dir / "runs.db")
+    try:
+        assert await store.history(run_id) == history
+    finally:
+        await store.close()

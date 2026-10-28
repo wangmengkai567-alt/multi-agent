@@ -104,6 +104,9 @@ class DelegationRunnable(Runnable):
                     context.run_id,
                     "subagent_" + status,
                     self.spec.display_name + "：" + status,
+                    dict(error=record["error"], error_category=context.task_results[call.call_id]["error_category"])
+                    if status not in ("queued", "running")
+                    else None,
                     actor=self.spec.agent_id,
                     status=status,
                     call_id=call.call_id,
@@ -144,6 +147,9 @@ class DelegationRunnable(Runnable):
         record["result"] = call.result = None
         call.error = error
         status = context.stop_status or ("cancelled" if isinstance(error, asyncio.CancelledError) else "failed")
+        # Like Codex Errored(reason), keep the execution state separate from its timeout cause.
+        if status == "timed_out":
+            status = "failed"
         row = context.task_results[call.call_id]
         try:
             sources, unfinished, limitations = task_evidence(evidence, call.task_id)
@@ -155,7 +161,7 @@ class DelegationRunnable(Runnable):
         unfinished.append(dict(call_id=call.call_id, tool=self.spec.agent_id, status=status, reason=record["error"]))
         category = (
             "timeout"
-            if status == "timed_out"
+            if context.stop_status == "timed_out"
             else "cancelled"
             if status in ("cancelled", "interrupted")
             else error_category(error)
