@@ -148,6 +148,9 @@ async def test_actual_websocket_send_failure_keeps_successful_record(history_ser
     from test_run_concurrency import runtime, server
 
     class BrokenSocket:
+        async def accept(self):
+            pass
+
         async def send_json(self, payload):
             raise RuntimeError("disconnected socket")
 
@@ -156,8 +159,9 @@ async def test_actual_websocket_send_failure_keeps_successful_record(history_ser
 
     client, agent, _ = history_service
     monkeypatch.setattr(runtime, "monitor", monitor)
-    server.manager.active_connections["socket"] = BrokenSocket()
     await server.app.state.run_store.create_thread("socket")
+    broken = BrokenSocket()
+    await server.manager.connect(broken, "socket")
     record = (await client.post("/api/task", json={"query": "question", "thread_id": "socket"})).json()
     await wait_started(agent)
     await complete(agent, record["run_id"])
@@ -167,7 +171,8 @@ async def test_actual_websocket_send_failure_keeps_successful_record(history_ser
     history = (await client.get(f"/api/runs/{record['run_id']}/history")).json()
     assert history["run"]["status"] == "completed" and history["events"][-1]["status"] == "completed"
     assert "disconnected socket" in caplog.text
-    server.manager.disconnect(server.manager.active_connections["socket"], "socket")
+    assert broken not in server.manager.connections
+    server.manager.disconnect(broken, "socket")
     assert (await client.get(f"/api/runs/{record['run_id']}/history")).json() == history
 
 

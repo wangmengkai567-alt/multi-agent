@@ -37,10 +37,11 @@ def task_evidence(evidence, task_id):
     from agent.runtime.evidence_protocol import EvidenceError, source_rows, validate_record
     from agent.runtime.workflows import _range_covered
 
+    context = get_run_context()
     for item in evidence:
         if item["task_id"] != task_id:
             raise EvidenceError("Tool evidence belongs to another delegated task")
-        validate_record(item, get_run_context())
+        validate_record(item, context)
     sources = [row for _, row, _ in source_rows(evidence)]
     unfinished, limitations = [], []
     documents = {}
@@ -56,11 +57,13 @@ def task_evidence(evidence, task_id):
             document = item["artifact"]["document"]
             identity = (document["path"], document["sha256"], document["parser"])
             state = documents.setdefault(
-                identity, dict(extents=coverage["extents"], ranges={}, missing=set(), complete=False, item=item)
+                identity,
+                dict(extents=coverage["extents"], ranges={}, missing=set(), complete=False, full_read=False, item=item),
             )
             if state["extents"] != coverage["extents"]:
                 raise EvidenceError("Document coverage changed within the delegated task")
             state["complete"] |= coverage["complete"]
+            state["full_read"] |= coverage["scope"] == "supported_content"
             state["missing"].update(coverage["missing"])
             for target, bounds in coverage["read_ranges"].items():
                 state["ranges"].setdefault(target, []).append(bounds)
@@ -77,10 +80,21 @@ def task_evidence(evidence, task_id):
                 _range_covered(extent, state["ranges"].get(target, [])) for target, extent in state["extents"].items()
             )
         )
-        if state["missing"] or not covered:
-            item = state["item"]
+        item = state["item"]
+        requires_full = state["full_read"] or path in {"uploads/" + name for name in context.required_uploads}
+        # A successful selected-range read need not reach the whole-file boundary.
+        # Keep actual gaps and explicit full-read obligations separate from scope.
+        if state["missing"] or not covered and (requires_full or not state["ranges"]):
             reason = path + "：" + "；".join(sorted(state["missing"]) or ["材料尚未完整读取"])
             unfinished.append(dict(call_id=item["call_id"], tool=item["name"], status=item["status"], reason=reason))
+        elif not covered:
+            limitations.append(
+                dict(
+                    call_id=item["call_id"],
+                    tool=item["name"],
+                    reason=path + "：本次仅分析工具返回的选定范围，未读取整个文件；范围及位置见来源。",
+                )
+            )
     return sources, unfinished, limitations
 
 

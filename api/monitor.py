@@ -161,7 +161,7 @@ monitor = ToolMonitor()
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: dict[str, WebSocket] = {}
+        self.active_connections: dict[str, set[WebSocket]] = {}
         # 延迟绑定 loop，防止初始化时 loop 不一致
         self.loop = None
         self.delivery_tasks = set()
@@ -214,11 +214,7 @@ class ConnectionManager:
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)
         self.delivery_tasks.clear()
-        for websocket in list(self.active_connections.values()):
-            try:
-                await websocket.close()
-            except Exception:
-                logging.getLogger(__name__).exception("WebSocket close failed")
+        await asyncio.gather(*(self._close_connection(websocket) for websocket in list(self.connections)))
         self.active_connections.clear()
         self.connections.clear()
         self.store = None
@@ -241,11 +237,7 @@ class ConnectionManager:
         state = {"lock": asyncio.Lock(), "run_id": run_id, "cursors": {run_id: after_seq} if run_id else {}}
         self.connections[websocket] = state
         async with state["lock"]:
-            previous = self.active_connections.get(thread_id)
-            self.active_connections[thread_id] = websocket
-            if previous is not None and previous is not websocket:
-                self.connections.pop(previous, None)
-                await asyncio.wait_for(previous.close(code=1000), timeout=5)
+            self.active_connections.setdefault(thread_id, set()).add(websocket)
             try:
                 runs = [run_id] if run_id else await self.store.thread_runs(thread_id) if self.store else []
                 for current in runs:
@@ -255,8 +247,11 @@ class ConnectionManager:
                 raise
 
     def disconnect(self, websocket: WebSocket, thread_id: str):
-        if self.active_connections.get(thread_id) is websocket:
-            del self.active_connections[thread_id]
+        subscribers = self.active_connections.get(thread_id)
+        if subscribers is not None:
+            subscribers.discard(websocket)
+            if not subscribers:
+                del self.active_connections[thread_id]
         self.connections.pop(websocket, None)
 
     async def pong(self, websocket, payload):
@@ -268,24 +263,35 @@ class ConnectionManager:
     async def send_personal_message(self, message: str, websocket: WebSocket):
         await websocket.send_text(message)
 
-    async def send_to_thread(self, message: dict, thread_id: str):
-        websocket = self.active_connections.get(thread_id)
-        if websocket is None:
-            return
+    async def _close_connection(self, websocket):
+        try:
+            await asyncio.wait_for(websocket.close(), timeout=5)
+        except Exception:
+            logging.getLogger(__name__).exception("WebSocket close failed")
+
+    async def _send_to_connection(self, message, websocket, thread_id):
         state = self.connections.get(websocket)
         if state is None:
-            await websocket.send_json(message)
             return
         run_id = message.get("run_id")
         if state["run_id"] is not None and state["run_id"] != run_id:
             return
-        async with state["lock"]:
-            if self.active_connections.get(thread_id) is not websocket:
-                return
-            if run_id and "event_seq" in message and self.store is not None:
-                await self._catch_up(websocket, state, run_id)
-            else:
-                await websocket.send_json(message)
+        try:
+            async with state["lock"]:
+                if self.connections.get(websocket) is not state:
+                    return
+                if run_id and "event_seq" in message and self.store is not None:
+                    await self._catch_up(websocket, state, run_id)
+                else:
+                    await asyncio.wait_for(websocket.send_json(message), timeout=5)
+        except Exception:
+            self.disconnect(websocket, thread_id)
+            logging.getLogger(__name__).exception("WebSocket delivery failed")
+            await self._close_connection(websocket)
+
+    async def send_to_thread(self, message: dict, thread_id: str):
+        subscribers = tuple(self.active_connections.get(thread_id, ()))
+        await asyncio.gather(*(self._send_to_connection(message, websocket, thread_id) for websocket in subscribers))
 
 
 manager = ConnectionManager()

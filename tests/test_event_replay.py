@@ -147,13 +147,14 @@ async def test_reconnect_reads_saved_events_after_disconnect_and_keeps_new_socke
         reconnect = Socket()
         await manager.connect(reconnect, "thread", run_id="run", after_seq=first["event_seq"])
         manager.disconnect(socket, "thread")
-        assert manager.active_connections["thread"] is reconnect
+        assert manager.active_connections["thread"] == {reconnect}
         assert [e["event_seq"] for e in reconnect.messages] == [second["event_seq"]]
         replacement = Socket()
         await manager.connect(replacement, "thread", run_id="run", after_seq=second["event_seq"])
-        assert reconnect.closed == 1000
+        assert reconnect.closed is None and replacement.closed is None
+        assert manager.active_connections["thread"] == {reconnect, replacement}
         manager.disconnect(reconnect, "thread")
-        assert manager.active_connections["thread"] is replacement
+        assert manager.active_connections["thread"] == {replacement}
     finally:
         await manager.shutdown()
         await store.close()
