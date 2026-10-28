@@ -46,7 +46,8 @@ def build_subagents(registry, models, *, hooks=None):
             tools=list(spec.tools),
             name=spec.agent_id,
             system_prompt=spec.system_prompt
-            + "\n完成指定分工后直接返回简明结论及实际来源；说明读取范围、工具失败和未知项。不要编造查询或来源。",
+            + "\n完成指定分工后直接返回简明结论及实际来源；说明读取范围、工具失败和未知项。不要编造查询或来源。"
+            "任务身份、执行状态、来源归属和工具限制由程序记录，不要自行填写或声称覆盖未知事项。",
             middleware=[
                 SkillReadMiddleware(),
                 *([ProjectSkillsMiddleware(spec.allowed_skill_ids)] if spec.allowed_skill_ids else []),

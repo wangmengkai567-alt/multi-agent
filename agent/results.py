@@ -1,4 +1,4 @@
-"""Redaction and execution result metadata shared by storage and source adapters."""
+"""Redaction and program-owned execution results shared by storage and delegates."""
 
 import asyncio
 import json
@@ -29,6 +29,80 @@ def clean(value):
     if value is None or isinstance(value, bool | int | float):
         return value
     return str(value)
+
+
+def task_evidence(evidence, task_id):
+    """Accept only this task's observations and retain unresolved execution limits."""
+    from agent.runtime.context import get_run_context
+    from agent.runtime.evidence_protocol import EvidenceError, source_rows, validate_record
+    from agent.runtime.workflows import _range_covered
+
+    for item in evidence:
+        if item["task_id"] != task_id:
+            raise EvidenceError("Tool evidence belongs to another delegated task")
+        validate_record(item, get_run_context())
+    sources = [row for _, row, _ in source_rows(evidence)]
+    unfinished, limitations = [], []
+    documents = {}
+    # A successful runtime retry resolves earlier attempts of that same call.
+    latest = {item["call_id"]: item for item in evidence}
+    for item in latest.values():
+        reason = item["error"] if item["status"] != "completed" else ""
+        if item["status"] == "completed" and item["adapter"] == "document.v1":
+            coverage = json.loads(item["evidence_note"])
+            limitations.extend(
+                dict(call_id=item["call_id"], tool=item["name"], reason=note) for note in coverage["limitations"]
+            )
+            document = item["artifact"]["document"]
+            identity = (document["path"], document["sha256"], document["parser"])
+            state = documents.setdefault(
+                identity, dict(extents=coverage["extents"], ranges={}, missing=set(), complete=False, item=item)
+            )
+            if state["extents"] != coverage["extents"]:
+                raise EvidenceError("Document coverage changed within the delegated task")
+            state["complete"] |= coverage["complete"]
+            state["missing"].update(coverage["missing"])
+            for target, bounds in coverage["read_ranges"].items():
+                state["ranges"].setdefault(target, []).append(bounds)
+            reason = ""
+        elif item["status"] == "completed" and item["adapter"] not in ("control.v1", "network-control.v1"):
+            reason = item["evidence_note"]
+        if reason:
+            unfinished.append(dict(call_id=item["call_id"], tool=item["name"], status=item["status"], reason=reason))
+    for (path, _, _), state in documents.items():
+        covered = (
+            state["complete"]
+            or bool(state["ranges"])
+            and all(
+                _range_covered(extent, state["ranges"].get(target, [])) for target, extent in state["extents"].items()
+            )
+        )
+        if state["missing"] or not covered:
+            item = state["item"]
+            reason = path + "：" + "；".join(sorted(state["missing"]) or ["材料尚未完整读取"])
+            unfinished.append(dict(call_id=item["call_id"], tool=item["name"], status=item["status"], reason=reason))
+    return sources, unfinished, limitations
+
+
+def delegation_payload(row):
+    """One result shape for success, failure, timeout and cancellation snapshots."""
+    return dict(
+        task_id=row["call_id"],
+        expert=row["target"],
+        status=row["status"],
+        result=row["result"],
+        sources=[
+            {
+                key: source[key]
+                for key in ("key", "kind", "title", "url", "locator", "inputs", "retrieval", "provenance")
+            }
+            for source in row["sources"]
+        ],
+        unfinished=row["unfinished"],
+        limitations=row["limitations"],
+        error=row["error"],
+        error_category=row["error_category"],
+    )
 
 
 def metadata(text, evidence):

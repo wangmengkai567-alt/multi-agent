@@ -12,7 +12,10 @@ def default_specs():
             "db",
             "数据库查询助手",
             "查询获准业务表，核对实际 SQL、时间和统计口径。",
-            "只使用允许的只读数据库工具。先查看表结构再按分工查询，保留实际 SQL、结果和局限。",
+            "只使用允许的只读数据库工具。先用 list_sql_tables 确认表，再用 get_table_data 取得真实表结构和有界样本。"
+            "只用实际返回的列完成分派的 SELECT 查询，保留实际 SQL、结果和局限。"
+            "get_table_data 已返回字段类型、可空性和键；业务定义未给出时明确未知，不追加猜测列或跨库元数据查询。"
+            "取得本次所需结果后直接返回，不为未要求的业务维度继续探测。",
             (list_sql_tables, get_table_data, execute_sql_query),
             allowed_skill_ids=("ecommerce-analysis", "data-analysis"),
             execution=ExecutionConfig(source_kind="db"),
@@ -22,6 +25,8 @@ def default_specs():
             "上传材料分析助手",
             "读取本轮上传文件或绑定文本，保留页、表、行位置和读取限制。",
             "只分析本轮绑定材料。上传文件调用 read_document，文本调用 read_bound_material。"
+            "read_document 已返回原文、位置和读取范围，取得所需内容后直接回答分工。"
+            "read_bound_material 仅接受本轮披露的文本 reference，上传文件路径不能作为该工具的 reference。"
             "依据实际解析结果说明位置和读取限制；材料记载不等于独立核实的外部事实。",
             (read_document, read_bound_material),
             allowed_skill_ids=("document-analysis", "data-analysis"),

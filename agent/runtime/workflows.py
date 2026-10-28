@@ -141,6 +141,11 @@ async def finalize_answer(context, answer):
     if {source_page(url) for url in cited_urls(answer)} - {source_page(url) for url in allowed}:
         raise ValueError("最终答复包含实际输入和工具结果中不存在的来源 URL")
     notices = []
+    for row in successes:
+        if row["unfinished"]:
+            notices.append(
+                row["display_name"] + "的未完成事项：" + "；".join(item["reason"] for item in row["unfinished"])
+            )
     if failures:
         notices.append(
             "未完成的分工："

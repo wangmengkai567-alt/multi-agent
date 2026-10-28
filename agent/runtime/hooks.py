@@ -51,12 +51,13 @@ class HookCall:
 
 def error_category(error):
     from agent.runtime.policies import classify_tool_error
+    from agent.runtime.recovery import is_transport_timeout
 
     if isinstance(error, HookRejected):
         return classify_tool_error(error.__cause__) if error.__cause__ else "rejected"
     if isinstance(error, BaseException) and type(error).__name__ == "CancelledError":
         return "cancelled"
-    if isinstance(error, TimeoutError):
+    if is_transport_timeout(error):
         return "timeout"
     if isinstance(error, EventPersistenceError):
         return "recording"

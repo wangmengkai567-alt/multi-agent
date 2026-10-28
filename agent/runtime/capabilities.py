@@ -13,6 +13,7 @@ FILE_ACTIONS = frozenset(("write_file", "edit_file", "generate_markdown", "execu
 NETWORK_ACTIONS = frozenset(("internet_search", "read_web_page"))
 READONLY_FILESYSTEM_PROMPT = """文件工具只读查看本轮文件与 /skills/ 说明。
 read_file 使用从 0 开始的 offset 和 limit 分页。grep 为字面量匹配。
+glob 用 path 指定目录、pattern 指定相对模式，例如 path='/skills/'、pattern='*/SKILL.md'。
 只使用本轮实际提供的工具；最终正文由程序自动保存为 Markdown。
 """
 
@@ -30,6 +31,8 @@ def tool_available(context, name, *, network=False, target_specs=None):
         return True
     if (network or name in NETWORK_ACTIONS) and context.network_policy == "forbidden":
         return False
+    if name == "read_bound_material" and context.task_contract is not None:
+        return any(material.text is not None for material in context.task_contract.materials)
     if name == "task" and target_specs is not None:
         return any(expert_available(context, target, spec) for target, spec in target_specs.items())
     return True
@@ -54,14 +57,17 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 name, network = schema["function"]["name"], False
             if not tool_available(context, name, network=network, target_specs=self.target_specs):
                 continue
-            if name == "read_document" and context.task_contract is not None:
-                filenames = [
-                    material.reference for material in context.task_contract.materials if material.kind == "upload"
+            if name in ("read_document", "read_bound_material") and context.task_contract is not None:
+                references = [
+                    material.reference
+                    for material in context.task_contract.materials
+                    if (material.kind == "upload" if name == "read_document" else material.text is not None)
                 ]
-                if not filenames:
+                if not references:
                     continue
                 schema = deepcopy(convert_to_openai_tool(tool))
-                schema["function"]["parameters"]["properties"]["filename"]["enum"] = filenames
+                parameter = "filename" if name == "read_document" else "reference"
+                schema["function"]["parameters"]["properties"][parameter]["enum"] = references
                 tool = (
                     tool.model_copy(update={"args_schema": schema["function"]["parameters"]})
                     if isinstance(tool, BaseTool)
@@ -77,8 +83,17 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 function = schema["function"]
                 function["parameters"]["properties"]["subagent_type"] = {"type": "string", "enum": list(targets)}
                 function["parameters"]["additionalProperties"] = False
-                function["description"] = "仅委派当前允许的专家；description 包含完整分工和限制。\n" + "\n".join(
-                    f"- {target}: {spec.display_name}；{spec.description}" for target, spec in targets.items()
+                function["description"] = (
+                    "仅委派当前允许的专家；description 包含目标、范围和限制，具体方法由专家选择。\n"
+                    + "\n".join(
+                        f"- {target}: {spec.display_name}；{spec.description}\n"
+                        + "\n".join(
+                            f"  {tool.name}: {tool.description}"
+                            for tool in spec.tools
+                            if tool_available(context, tool.name, network=adapter_for_tool(tool).network)
+                        )
+                        for target, spec in targets.items()
+                    )
                 )
                 tool = (
                     tool.model_copy(

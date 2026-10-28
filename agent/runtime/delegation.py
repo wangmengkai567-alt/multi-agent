@@ -16,14 +16,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import Runnable
 
 from agent.reflection import source_urls, tool_evidence
-from agent.results import clean, sync_result
+from agent.results import clean, delegation_payload, sync_result, task_evidence
 from agent.runtime.checkpoints import write_json
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.events import EventPersistenceError, make_event
-from agent.runtime.evidence_protocol import source_rows
+from agent.runtime.evidence_protocol import EvidenceError
 from agent.runtime.experts import bind_registry
-from agent.runtime.hooks import HookCall, HookRejected, active_call, error_message, pipeline
+from agent.runtime.hooks import HookCall, HookRejected, active_call, error_category, error_message, pipeline
 from agent.runtime.output import cited_urls, source_page
 from agent.runtime.skills import skill_scope
 
@@ -80,30 +80,37 @@ class DelegationRunnable(Runnable):
             check_status="not_checked",
         )
         with context.budget_lock:
+            context.check_active()
             if len(context.task_results) >= context.policy.search.max_tasks_per_run:
                 raise HookRejected("本轮委派数量已达到上限")
-            context.task_results[call.call_id] = dict(record, sources=[], evidence=[])
+            context.task_results[call.call_id] = dict(
+                record, sources=[], evidence=[], unfinished=[], limitations=[], error_category=None
+            )
             if parent:
                 context.delegation_calls.setdefault(parent.call_id, []).append(record)
         return context, call, record
 
     def _save(self, context, call, record, status):
-        record["status"] = call.status = status
-        if status not in ("queued", "running"):
-            record["ended_at"] = datetime.now(UTC).isoformat()
-        context.task_results[call.call_id].update(record)
-        if context.event_sink is not None:
-            event = make_event(
-                context.thread_id,
-                context.run_id,
-                "subagent_" + status,
-                self.spec.display_name + "：" + status,
-                actor=self.spec.agent_id,
-                status=status,
-                call_id=call.call_id,
-                parent_call_id=call.parent_call_id,
-            )
-            context.event_sink.submit_subtask(record, event)
+        # Commit success under the same lock as stop(); late results cannot win.
+        with context.budget_lock:
+            if status in ("running", "completed"):
+                context.check_active()
+            record["status"] = call.status = status
+            if status not in ("queued", "running"):
+                record["ended_at"] = datetime.now(UTC).isoformat()
+            context.task_results[call.call_id].update(record)
+            if context.event_sink is not None:
+                event = make_event(
+                    context.thread_id,
+                    context.run_id,
+                    "subagent_" + status,
+                    self.spec.display_name + "：" + status,
+                    actor=self.spec.agent_id,
+                    status=status,
+                    call_id=call.call_id,
+                    parent_call_id=call.parent_call_id,
+                )
+                context.event_sink.submit_subtask(record, event)
 
     def _start(self, context, call, record):
         context.check_active()
@@ -113,11 +120,13 @@ class DelegationRunnable(Runnable):
 
     def _result(self, context, call, record, result, evidence):
         context.check_active()
+        sources, unfinished, limitations = task_evidence(evidence, call.task_id)
+        row = context.task_results[call.call_id]
+        row.update(sources=sources, evidence=list(evidence), unfinished=unfinished, limitations=limitations)
         messages = result.get("messages", []) if isinstance(result, dict) else []
         final = messages[-1] if messages else None
         if not isinstance(final, AIMessage) or final.tool_calls or not final.text.strip():
             raise ValueError("Expert did not return a final assistant answer")
-        sources = [row for _, row, _ in source_rows(evidence)]
         if self.spec.tools and not sources:
             raise ValueError("子任务未取得有效工具结果，不能声明已完成调查")
         allowed = set(source_urls(evidence))
@@ -126,24 +135,39 @@ class DelegationRunnable(Runnable):
             raise ValueError("Expert cited a URL absent from its actual tool results")
         record["result"] = clean(final.text)
         call.result = record["result"]
-        row = context.task_results[call.call_id]
-        row.update(sources=sources, evidence=list(evidence))
         self._save(context, call, record, "completed")
-        payload = dict(
-            task_id=call.call_id,
-            expert=self.spec.agent_id,
-            status="completed",
-            result=record["result"],
-            sources=[{k: source[k] for k in ("kind", "title", "url", "locator", "inputs")} for source in sources],
-        )
-        return {"messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))]}
+        return {"messages": [AIMessage(content=json.dumps(delegation_payload(row), ensure_ascii=False))]}
 
-    def _failed(self, context, call, record, error):
+    def _failed(self, context, call, record, error, evidence):
         if isinstance(error, ExecutionTerminated):
             context.terminate(error)
         record["error"] = error_message(error)
+        record["result"] = call.result = None
         call.error = error
         status = context.stop_status or ("cancelled" if isinstance(error, asyncio.CancelledError) else "failed")
+        row = context.task_results[call.call_id]
+        try:
+            sources, unfinished, limitations = task_evidence(evidence, call.task_id)
+        except EvidenceError as evidence_error:
+            sources, limitations = [], []
+            unfinished = [
+                dict(call_id=call.call_id, tool=self.spec.agent_id, status="failed", reason=str(evidence_error))
+            ]
+        unfinished.append(dict(call_id=call.call_id, tool=self.spec.agent_id, status=status, reason=record["error"]))
+        category = (
+            "timeout"
+            if status == "timed_out"
+            else "cancelled"
+            if status in ("cancelled", "interrupted")
+            else error_category(error)
+        )
+        row.update(
+            sources=sources,
+            evidence=list(evidence),
+            unfinished=unfinished,
+            limitations=limitations,
+            error_category=category,
+        )
         self._save(context, call, record, status)
         self.hooks.emit("on_error", call)
         if (
@@ -156,7 +180,7 @@ class DelegationRunnable(Runnable):
             "messages": [
                 AIMessage(
                     content=json.dumps(
-                        dict(task_id=call.call_id, expert=self.spec.agent_id, status="failed", error=record["error"]),
+                        delegation_payload(row),
                         ensure_ascii=False,
                     )
                 )
@@ -203,7 +227,7 @@ class DelegationRunnable(Runnable):
                 result = self.executor.invoke(self._inputs(context, input), config, **kwargs)
                 return self._result(context, call, record, result, evidence)
         except BaseException as error:
-            return self._failed(context, call, record, error)
+            return self._failed(context, call, record, error, evidence)
         finally:
             try:
                 self._finish(context, call, record, started, evidence)
@@ -237,7 +261,7 @@ class DelegationRunnable(Runnable):
                 result = await self.executor.ainvoke(self._inputs(context, input), config, **kwargs)
                 return self._result(context, call, record, result, evidence)
         except BaseException as error:
-            return self._failed(context, call, record, error)
+            return self._failed(context, call, record, error, evidence)
         finally:
             try:
                 self._finish(context, call, record, started, evidence)

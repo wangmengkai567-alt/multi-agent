@@ -2,6 +2,7 @@
 
 import csv
 import io
+import json
 import os
 import re
 from contextlib import contextmanager
@@ -107,9 +108,31 @@ def execute_worker(payload):
                     raise DependencyUnavailable("Configured database tables are missing or inaccessible")
                 return {"tables_verified": len(names)}
             return "可用的表有：" + ", ".join(names) if names else "没有可用的表"
-        if payload["action"] != "select":
+        columns, schema_query = None, None
+        if payload["action"] == "inspect":
+            table = payload["table_name"]
+            validate_table(table, limits)
+            schema_query = f"SHOW FULL COLUMNS FROM `{table}`"
+            cursor.execute(schema_query)
+            columns = [
+                dict(
+                    name=row[0],
+                    sql_type=row[1],
+                    collation=row[2],
+                    nullable=row[3] == "YES",
+                    key=row[4],
+                    default=row[5],
+                    extra=row[6],
+                    comment=row[8],
+                )
+                for row in cursor.fetchall()
+            ]
+            query = validate_sql(f"SELECT * FROM `{table}`", limits)
+        elif payload["action"] == "select":
+            query = validate_sql(payload["query"], limits)
+        else:
             raise ValueError("Unknown read-only database operation")
-        cursor.execute(validate_sql(payload["query"], limits))
+        cursor.execute(query)
         if not cursor.description:
             raise PolicyError("Query did not return a read-only result set")
         rows = cursor.fetchmany(limits.max_rows)
@@ -117,6 +140,14 @@ def execute_worker(payload):
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow([item[0] for item in cursor.description])
         writer.writerows(rows)
+        if payload["action"] == "inspect":
+            return json.dumps(
+                dict(
+                    table=table, columns=columns, executed_queries=[schema_query, query], sample_csv=output.getvalue()
+                ),
+                ensure_ascii=False,
+                default=str,
+            )
         return output.getvalue()
 
 
@@ -146,10 +177,14 @@ def list_sql_tables() -> str:
 @evidence_tool("sql.v1")
 @tool
 def get_table_data(table_name: str) -> str:
-    """Read columns and a bounded sample from a configured allowed table."""
+    """Return an allowed table's actual schema and a bounded CSV sample as JSON.
+
+    Columns include names, SQL types, nullability, keys, defaults and comments. This is the
+    supported schema inspection; no separate system-schema query is needed.
+    """
     validate_table(table_name)
     monitor.report_tool("数据库表数据查询工具：get_table_data", {"table_name": table_name})
-    return run_select(f"SELECT * FROM `{table_name}`")
+    return database_operation("inspect", table_name=table_name)
 
 
 @evidence_tool("sql.v1")
