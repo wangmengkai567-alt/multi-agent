@@ -295,8 +295,12 @@ async def test_stream_is_closed_when_parser_raises(isolated_runtime, monkeypatch
             finally:
                 closed.append(True)
 
+    def fail_progress_parser(*args, **kwargs):
+        raise RuntimeError("controlled progress parser failure")
+
     monkeypatch.setattr(runtime, "_build_agent", lambda saver: BrokenStream())
-    with pytest.raises(KeyError):
+    monkeypatch.setattr(runtime.monitor, "report_tool_request", fail_progress_parser)
+    with pytest.raises(RuntimeError, match="controlled progress parser failure"):
         await runtime.run_deep_agent("question", "parser-error")
     assert closed == [True]
     assert isolated_runtime.errors and not isolated_runtime.results

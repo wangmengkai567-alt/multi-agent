@@ -207,11 +207,6 @@ class HookToolMiddleware(AgentMiddleware):
             args=tool["args"],
             task_id=parent.task_id if parent else None,
             target=tool["args"].get("subagent_type") if tool["name"] == "task" else None,
-            source_kind=(
-                self.target_specs[tool["args"]["subagent_type"]].execution.source_kind
-                if tool["name"] == "task" and tool["args"].get("subagent_type") in self.target_specs
-                else None
-            ),
         )
 
     def _before(self, request, call):
@@ -225,13 +220,7 @@ class HookToolMiddleware(AgentMiddleware):
             assert_contract(context)
         if context and not tool_available(context, request.tool_call["name"]):
             raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
-        if (
-            context
-            and call.target in self.target_specs
-            and not expert_available(context, call.target, self.target_specs[call.target])
-        ):
-            unavailable = context.unavailable_agents.get(call.target)
-            raise HookRejected(unavailable or "专家不在当前契约、权限或执行阶段允许的范围内")
+
         tool = getattr(request, "tool", None)
         context = get_run_context()
         if context and hasattr(request, "tool") and tool is None:
@@ -261,10 +250,19 @@ class HookToolMiddleware(AgentMiddleware):
                 )
                 raise HookRejected("Invalid tool arguments: " + fields) from exc
         if request.tool_call["name"] == "task":
+            call.target = call.args.get("subagent_type")
+            if not isinstance(call.target, str):
+                raise HookRejected("Task subagent_type must be a string")
             if call.target not in self.allowed_targets:
                 raise HookRejected(f"Subagent target is not allowed: {call.target}")
             if not isinstance(call.args.get("description"), str) or not call.args["description"].strip():
                 raise HookRejected("Task description must not be empty")
+            spec = self.target_specs.get(call.target)
+            if spec is not None:
+                call.source_kind = spec.execution.source_kind
+                if context and not expert_available(context, call.target, spec):
+                    unavailable = context.unavailable_agents.get(call.target)
+                    raise HookRejected(unavailable or "专家不在当前契约、权限或执行阶段允许的范围内")
             if not self.managed_delegation:
                 self.hooks.emit("before_delegate", call)
         self.hooks.emit("before_tool", call)
@@ -285,7 +283,7 @@ class HookToolMiddleware(AgentMiddleware):
         return request_timeout(policy_for_run().timeouts.tool_seconds, category="tool") if get_run_context() else None
 
     def _error(self, call, exc):
-        if call.target and isinstance(exc, HookRejected):
+        if call.actor.rsplit(":", 1)[-1] == "task" and isinstance(exc, HookRejected):
             if context := get_run_context():
                 context.task_rejections.append(error_message(exc))
         call.error = exc

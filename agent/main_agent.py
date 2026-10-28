@@ -222,7 +222,11 @@ async def run_deep_agent(task_query, session_id):
                             if marker in seen_events:
                                 continue
                             seen_events.add(marker)
-                            if call["name"] == "task":
+                            if (
+                                call["name"] == "task"
+                                and isinstance(call["args"].get("subagent_type"), str)
+                                and isinstance(call["args"].get("description"), str)
+                            ):
                                 args = call["args"]
                                 monitor.report_assistant(
                                     args["subagent_type"], {"description": args["description"]}, call_id=call["id"]

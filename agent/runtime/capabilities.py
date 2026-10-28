@@ -76,6 +76,7 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 schema = deepcopy(convert_to_openai_tool(tool))
                 function = schema["function"]
                 function["parameters"]["properties"]["subagent_type"] = {"type": "string", "enum": list(targets)}
+                function["parameters"]["additionalProperties"] = False
                 function["description"] = "仅委派当前允许的专家；description 包含完整分工和限制。\n" + "\n".join(
                     f"- {target}: {spec.display_name}；{spec.description}" for target, spec in targets.items()
                 )
