@@ -31,7 +31,6 @@ def completion_snapshot(context, execution_status):
     return dict(
         status=status,
         execution_status=execution_status,
-        review_status="not_requested",
         coverage=coverage,
         delivery_status=artifact["status"] if artifact else "not_requested",
         artifact=artifact,

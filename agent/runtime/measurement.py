@@ -9,20 +9,7 @@ from uuid import uuid4
 from agent.runtime.context import get_run_context
 
 active_request = ContextVar("active_model_request", default=None)
-PHASE_LABELS = {
-    "research": "资料收集",
-    "report_generation": "事实报告生成",
-    "report_revision": "事实报告修订",
-    "semantic_review": "证据审核",
-    "review_revision": "审核格式修订",
-    "final_review": "终稿审核",
-    "direct_review": "直接答复审核",
-    "coordination": "任务协调",
-    "task_contract": "任务契约",
-    "summarization": "上下文摘要",
-    "final_generation": "终稿生成",
-    "final_revision": "终稿修订",
-}
+PHASE_LABELS = {"research": "资料收集", "coordination": "任务协调", "summarization": "上下文摘要"}
 
 
 def persist(context):
@@ -30,7 +17,7 @@ def persist(context):
 
     write_json(
         context.work_dir / "model-requests.json",
-        dict(scope_id=context.run_id, requests=context.request_ledger, totals=totals(context)),
+        dict(run_id=context.run_id, requests=context.request_ledger, totals=totals(context)),
     )
 
 
@@ -187,19 +174,6 @@ def observe_http_request(request):
     if not isinstance(data.get("model"), str) or not isinstance(data.get("messages"), list):
         raise ValueError("Model context admission requires a model ID and chat messages")
     admit_context(measurement, data, request_bytes=len(raw))
-    drafts = []
-    for message in data.get("messages", []):
-        content = message.get("content")
-        if isinstance(content, str):
-            try:
-                value = json.loads(content)
-            except ValueError:
-                value = None
-            if isinstance(value, dict):
-                drafts.extend(value[key] for key in ("draft", "untrusted_previous_draft") if key in value)
-        if row["phase"] == "review_revision" and message.get("role") == "assistant":
-            drafts.append(content)
-
     with context.budget_lock:
         if row["transport"] is not None:
             raise RuntimeError("Model SDK attempted a second HTTP send; implicit retries/redirects are forbidden")
@@ -210,7 +184,6 @@ def observe_http_request(request):
             messages_bytes=size(data["messages"]) if "messages" in data else 0,
             tools_bytes=size(data["tools"]) if "tools" in data else 0,
             schema_bytes=size(data["response_format"]) if "response_format" in data else 0,
-            revision_draft_bytes=sum(size(d) for d in drafts),
             component_encoding="canonical_utf8_json",
             tool_definition_count=len(data.get("tools", [])),
             http_status=None,
@@ -239,40 +212,3 @@ async def aobserve_http_request(request):
 
 async def aobserve_http_response(response):
     observe_http_response(response)
-
-
-def restore_measurements(context):
-    """Reconcile a durable observation written just before a checkpoint update."""
-    from agent.runtime.context import RunStopped
-
-    path = context.work_dir / "model-requests.json"
-    if path.exists():
-        saved = json.loads(path.read_text("utf-8"))
-        if saved["scope_id"] != context.run_id:
-            context.stop("interrupted")
-            raise RunStopped("Model request ledger belongs to another research scope")
-        observed = saved["requests"]
-        if set(context.request_ledger) - set(observed):
-            context.stop("interrupted")
-            raise RunStopped("Model request ledger lost checkpointed observations")
-        for key, row in observed.items():
-            previous = context.request_ledger.get(key)
-            if (
-                row["request_id"] != key
-                or previous is None
-                and row["transport"] is not None
-                or previous is not None
-                and any(
-                    previous[field] != row[field]
-                    for field in ("request_id", "run_id", "category", "phase", "parent_call_id")
-                )
-            ):
-                context.stop("interrupted")
-                raise RunStopped("Unowned model request observation")
-        context.request_ledger = observed
-    # An interrupted supplier call has unknown billing, even after response headers.
-    for row in context.request_ledger.values():
-        if row["status"] in ("queued", "running"):
-            row["status"] = "interrupted"
-            if row["transport"] is not None and row["transport"]["status"] == "started":
-                row["transport"]["status"] = "uncertain"

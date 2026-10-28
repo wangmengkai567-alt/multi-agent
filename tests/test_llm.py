@@ -10,7 +10,7 @@ import pytest
 
 from agent.runtime.policies import MissingConfiguration
 
-ROLES = ("MAIN", "SUB", "REVIEW")
+ROLES = ("MAIN", "SUB", "CUSTOM")
 LOADER = Path(__file__).resolve().parents[1] / "agent" / "llm.py"
 
 

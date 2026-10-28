@@ -31,7 +31,7 @@ def prepared_payload(messages, delegate, kwargs):
             payload["model" if name == "model_name" else name] = value
     for binding in reversed(bindings):
         payload.update(binding)
-    payload.update({key: value for key, value in kwargs.items() if key != "budget_retry"})
+    payload.update(kwargs)
     payload.update(payload.pop("extra_body", None) or {})
     payload["messages"] = convert_to_openai_messages(messages)
     return payload

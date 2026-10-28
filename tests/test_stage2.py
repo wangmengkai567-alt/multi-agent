@@ -54,7 +54,7 @@ async def test_shared_account_models_queue_and_cancel_without_budget_or_late_exe
     other = RunContext("other", "other-thread", context.work_dir, policy=policy, scheduler=context.scheduler)
     token = set_run_context(other)
     try:
-        waiting = asyncio.create_task(budget_model(raw, "review").ainvoke("cancelled"))
+        waiting = asyncio.create_task(budget_model(raw, "sub_model").ainvoke("cancelled"))
     finally:
         reset_run_context(token)
     await asyncio.sleep(0.05)
@@ -64,7 +64,7 @@ async def test_shared_account_models_queue_and_cancel_without_budget_or_late_exe
         await waiting
     release.set()
     await first
-    assert calls == ["first"] and other.call_counts["review"] == 0
+    assert calls == ["first"] and other.call_counts["sub_model"] == 0
     assert context.scheduler.snapshot()["models"] == {"active": 0, "queued": 0}
 
 

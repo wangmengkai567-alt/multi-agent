@@ -1,4 +1,4 @@
-"""Bind expert contracts to runs and enforce serial, allowlisted nested delegation."""
+"""Bind expert definitions to each run and serialize root-level delegation."""
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage
@@ -21,7 +21,7 @@ def bind_registry(context, registry):
     with context.budget_lock:
         if context.expert_contract and context.expert_contract != contract:
             context.stop("interrupted")
-            raise RunStopped("Expert definitions changed; retain the checkpoint and start a new reviewed run")
+            raise RunStopped("Expert definitions changed during this run; start a new run")
         context.expert_contract = contract
 
 

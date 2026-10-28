@@ -17,7 +17,7 @@ from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_CONFIG_PATH = PROJECT_ROOT / "config" / "runtime.yml"
-KINDS = ("main_model", "sub_model", "review", "tool", "retry")
+KINDS = ("main_model", "sub_model", "tool", "retry")
 
 
 class PolicyError(ValueError):
@@ -40,13 +40,11 @@ class Budgets(StrictConfig):
     total: int = Field(ge=1, le=10000)
     main_model: int = Field(ge=1, le=10000)
     sub_model: int = Field(ge=1, le=10000)
-    review: int = Field(ge=1, le=10000)
     tool: int = Field(ge=1, le=10000)
     retry: int = Field(ge=0, le=10000)
     tools_per_turn: int = Field(default=8, ge=1, le=100)
     task_model_calls: int = Field(default=12, ge=1, le=1000)
     task_tool_calls: int = Field(default=12, ge=1, le=1000)
-    near_ratio: float = Field(default=0.85, gt=0, lt=1)
 
 
 class SQLLimits(StrictConfig):
@@ -207,21 +205,21 @@ def policy_for_run():
         return context.policy
 
 
-def reserve_calls(*kinds, phase=None):
+def reserve_calls(*kinds):
     """Reserve all categories or none, before performing any external action."""
-    _reserve_calls(*kinds, charge=True, phase=phase)
+    _reserve_calls(*kinds, charge=True)
 
 
-def calls_available(*kinds, phase=None):
+def calls_available(*kinds):
     """Use the same admission calculation without charging a future call."""
     try:
-        _reserve_calls(*kinds, charge=False, phase=phase)
+        _reserve_calls(*kinds, charge=False)
     except (BudgetExceeded, PolicyError):
         return False
     return True
 
 
-def _reserve_calls(*kinds, charge, phase=None):
+def _reserve_calls(*kinds, charge):
     if not kinds or set(kinds) - set(KINDS):
         raise ValueError("Unknown or empty call category")
     context = get_run_context()
@@ -255,14 +253,14 @@ def _reserve_calls(*kinds, charge, phase=None):
                     task_counts[kind] = task_counts.get(kind, 0) + count
 
 
-def request_timeout(maximum=None, *, category=None, phase=None):
+def request_timeout(maximum=None, *, model_request=False):
     context = get_run_context()
     context.check_active()
     limits = policy_for_run().timeouts
     from agent.runtime.hooks import active_call
 
     call = active_call.get()
-    admitted = call.workflow_data.get("admitted_timeout") if call and category is None else None
+    admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
     return min(value for value in (limits.request_seconds, maximum, context.remaining(), admitted) if value is not None)
 
 
@@ -525,9 +523,7 @@ def before_tool_policy(call):
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
             if call.actor.rsplit(":", 1)[-1] != "task":
-                call.workflow_data["admitted_timeout"] = request_timeout(
-                    context.policy.timeouts.tool_seconds, category="tool"
-                )
+                call.workflow_data["admitted_timeout"] = request_timeout(context.policy.timeouts.tool_seconds)
             name = call.actor.rsplit(":", 1)[-1]
             if name in ("internet_search", "read_web_page"):
                 limits = context.policy.search

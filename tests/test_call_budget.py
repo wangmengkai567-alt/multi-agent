@@ -70,6 +70,11 @@ def test_multicategory_reservation_is_all_or_none(context):
     with pytest.raises(BudgetExceeded):
         reserve_calls("retry", "tool")
     assert sum(context.call_counts.values()) == 0
+    with pytest.raises(ValueError, match="Unknown"):
+        reserve_calls("review")
+    with pytest.raises(ValueError):
+        budget_model(ScriptedModel(responses=[]), "review")
+    assert "review" not in context.call_counts
 
 
 @pytest.mark.asyncio
@@ -84,15 +89,13 @@ async def test_async_reservations_share_total_budget(context):
         except BudgetExceeded:
             return 0
 
-    results = await asyncio.gather(
-        *(reserve(kind) for kind in ("main_model", "sub_model", "review", "tool", "retry") * 10)
-    )
+    results = await asyncio.gather(*(reserve(kind) for kind in ("main_model", "sub_model", "tool", "retry") * 10))
     assert sum(results) == 7 and sum(context.call_counts.values()) == 7
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("kind", ["main_model", "sub_model", "review"])
+@pytest.mark.parametrize("kind", ["main_model", "sub_model"])
 async def test_model_denied_before_underlying_invocation(context, asynchronous, kind):
     context.policy = limits(**{kind: 1})
     underlying = ScriptedModel(responses=[AIMessage(content="first"), AIMessage(content="must not execute")])
@@ -145,7 +148,14 @@ async def test_actual_task_model_tool_and_total_counts(context):
     )
     state = await agent.ainvoke({"messages": [("user", "query")]})
     assert state["messages"][-1].content == "done" and executions == [1]
-    assert context.call_counts == {"main_model": 2, "sub_model": 2, "review": 0, "tool": 2, "retry": 0}
+    assert context.call_counts == {"main_model": 2, "sub_model": 2, "tool": 2, "retry": 0}
+    from agent.runtime.measurement import totals
+
+    assert len(context.request_ledger) == 4
+    assert {row["phase"] for row in context.request_ledger.values()} == {"coordination", "research"}
+    assert all(row["status"] == "completed" for row in context.request_ledger.values())
+    assert totals(context)["invocations"] == context.call_counts["main_model"] + context.call_counts["sub_model"]
+    assert "check_status" not in next(iter(context.task_results.values()))
 
 
 @pytest.mark.asyncio
@@ -230,8 +240,8 @@ def test_two_runs_do_not_share_counters(context, sandbox_dir):
     other = RunContext("other", "other-session", sandbox_dir / "other", policy=limits())
     token = set_run_context(other)
     try:
-        reserve_calls("review")
-        assert other.call_counts["tool"] == 0 and other.call_counts["review"] == 1
+        reserve_calls("sub_model")
+        assert other.call_counts["tool"] == 0 and other.call_counts["sub_model"] == 1
     finally:
         reset_run_context(token)
-    assert context.call_counts["tool"] == 1 and context.call_counts["review"] == 0
+    assert context.call_counts["tool"] == 1 and context.call_counts["sub_model"] == 0

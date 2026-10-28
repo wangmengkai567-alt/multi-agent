@@ -32,14 +32,15 @@ assert.equal(b.events.filter(e=>e.call_id==='legacy-reused').length,1);
 assert.ok(a.events.some(e=>e.call_id==='search-a'));assert.ok(!a.events.some(e=>e.call_id==='search-b'));
 assert.ok(b.events.some(e=>e.call_id==='search-b'));
 const html=ui.renderCallGroups(session);
-assert.match(html,/晋城.*执行失败/);assert.match(html,/新乡.*处理结束/);
+assert.match(html,/晋城.*执行失败/);assert.match(html,/新乡.*已完成/);
 assert.equal((html.match(/data-call="search-a"/g)||[]).length,1);
 assert.equal((html.match(/data-call="search-b"/g)||[]).length,1);
 const before=session.logs.length;ui.applyEvent(session,events[0]);assert.equal(session.logs.length,before);
 // Same-kind success cannot erase another instance's failed state.
 session.status='completed';session.completion={status:'partial'};assert.equal(ui.displayStatus(session),'partial');
-ui.applyEvent(session,event('run_timed_out','run',null,'main','timed_out',{partial_result:'已经核实的部分',error:'总时长耗尽'}));
-assert.equal(session.answer,'已经核实的部分');assert.equal(session.status,'timed_out');
+ui.applyEvent(session,event('run_timed_out','run',null,'main','timed_out',{error:'总时长耗尽'}));
+assert.equal(session.answer,null);
+assert.ok(session.logs.some(e=>e.event==='subagent_completed'&&e.call_id==='agent-b'));assert.equal(session.status,'timed_out');
 // Server-owned partial coverage stays partial even when all child agents finished.
 session.status='completed';session.completion={status:'partial'};
 assert.equal(ui.displayStatus(session),'partial');
@@ -50,15 +51,15 @@ for (const item of [
     {target:'auditor',assistant_name:'审计专家',task_label:'复核额度'}),
   event('after_tool','audit-tool','audit-a','auditor:execute_sql_query','completed'),
   event('subagent_completed','audit-a','custom-run','auditor','completed',
-    {target:'auditor',assistant_name:'审计专家',check_status:'passed'})
+    {target:'auditor',assistant_name:'审计专家'})
 ]) ui.applyEvent(custom,{...item,run_id:'custom-run'});
 const auditGroups=ui.callGroups(custom);
 assert.equal(auditGroups.length,1);
 assert.equal(auditGroups[0].target,'auditor');
 assert.ok(auditGroups[0].events.some(e=>e.call_id==='audit-tool'));
-assert.match(ui.renderCallGroups(custom),/审计专家 · 复核额度 · audit-a · 通过/);
+assert.match(ui.renderCallGroups(custom),/审计专家 · 复核额度 · audit-a · 已完成/);
 assert.doesNotMatch(ui.renderCallGroups(custom),/联网搜索助手|数据库查询助手/);
-console.log('PASS: concurrent agent ownership, tool aggregation, reverse replay, failed-instance retention, partial timeout and completion status');
+console.log('PASS: concurrent agent ownership, tool aggregation, reverse replay, failed-instance retention, retained child results on timeout and completion status');
 
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

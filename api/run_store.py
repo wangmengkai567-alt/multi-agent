@@ -162,8 +162,7 @@ class RunStore:
                     raise
 
             if version < 4:
-                # Keep the original source enum for historical database compatibility.
-                # record_result rejects retired sources for all new writes.
+                # Preserve the original schema for explicit historical migrations.
                 try:
                     await self.connection.executescript("""
                         BEGIN IMMEDIATE;
@@ -234,7 +233,7 @@ class RunStore:
             await self.connection.execute("PRAGMA foreign_keys=ON")
 
     async def _migrate_v6(self):
-        from agent.runtime.review_state import PRE_REVIEW, constraints_sql
+        from api.legacy_schema import PRE_REVIEW, constraints_sql
 
         try:
             await self.connection.execute("BEGIN IMMEDIATE")
@@ -358,96 +357,14 @@ class RunStore:
         record["published"] = bool(record["published"])
         return record
 
-    async def record_result(self, record, event):
-        """Append an immutable attempt and event atomically; late output stays unpublished."""
-        if not isinstance(record.get("source"), str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", record["source"]):
-            raise ValueError("Invalid expert result producer")
-        async with self._lock:
-            try:
-                await self.connection.execute("BEGIN IMMEDIATE")
-                run = await self._get(record["run_id"])
-                async with self.connection.execute(
-                    "SELECT * FROM subtasks WHERE call_id=?", (record["call_id"],)
-                ) as cursor:
-                    task = await cursor.fetchone()
-                if (
-                    run is None
-                    or task is None
-                    or run["thread_id"] != record["thread_id"]
-                    or any(task[k] != record[k] for k in ("run_id", "thread_id"))
-                    or task["target"] != record["source"]
-                    or any(event[k] != record[k] for k in ("run_id", "thread_id", "call_id"))
-                ):
-                    raise ValueError("Result does not belong to the subtask/run/session")
-                from agent.runtime.review_state import ReviewState, publishable
-
-                state = ReviewState.from_record(record)
-                if record["published"] and not publishable(state, record["summary"]):
-                    raise ValueError("Only checked results may publish a summary")
-                record = dict(record)
-                if run["status"] not in ACTIVE or task["status"] not in ACTIVE:
-                    record.update(published=False, summary=None)
-                columns = tuple(record)
-                values = [
-                    json.dumps(record[k], ensure_ascii=False) if k in ("review", "statistical_scope") else record[k]
-                    for k in columns
-                ]
-                await self.connection.execute(
-                    "INSERT INTO results (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")",
-                    values,
-                )
-                await self.connection.execute(
-                    "UPDATE subtasks SET current_result_id=?,check_status=? WHERE call_id=?",
-                    (record["result_id"], state.check_status, record["call_id"]),
-                )
-                saved = await self._append_event(dict(event, data=dict(event["data"], published=record["published"])))
-                await self.connection.commit()
-                return saved
-            except BaseException:
-                await self.connection.rollback()
-                raise
-
-    async def _list_results(self, run_id, thread_id=None, purpose=None):
+    async def _historical_results(self, run_id):
+        """Read preserved legacy rows for history; never publish or resume them."""
         if await self._get(run_id) is None:
             return []
-        sql = "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id WHERE r.run_id=?"
-        args = [run_id]
-        if thread_id is not None:
-            sql += " AND r.thread_id=?"
-            args.append(thread_id)
-        if purpose is not None:
-            from agent.runtime.review_state import result_filter
-
-            sql += " AND " + result_filter(purpose)
-        async with self.connection.execute(sql + " ORDER BY r.created_at,r.result_id", args) as cursor:
+        async with self.connection.execute(
+            "SELECT * FROM results WHERE run_id=? ORDER BY created_at,result_id", (run_id,)
+        ) as cursor:
             return [self._decode_result(row) for row in await cursor.fetchall()]
-
-    async def list_results(self, run_id, *, thread_id, purpose=None):
-        async with self._lock:
-            return await self._list_results(run_id, thread_id, purpose)
-
-    async def get_result(self, result_id, run_id, thread_id):
-        async with self._lock:
-            if await self._get(run_id) is None:
-                return None
-            async with self.connection.execute(
-                "SELECT * FROM results WHERE result_id=? AND run_id=? AND thread_id=?",
-                (result_id, run_id, thread_id),
-            ) as cursor:
-                return self._decode_result(await cursor.fetchone())
-
-    async def get_current_result(self, result_id, run_id, thread_id):
-        """Restore only the current result of its actual subtask/run/thread."""
-        async with self._lock:
-            if await self._get(run_id) is None:
-                return None
-            async with self.connection.execute(
-                "SELECT r.* FROM results r JOIN subtasks s ON s.call_id=r.call_id "
-                "AND s.run_id=r.run_id AND s.thread_id=r.thread_id AND s.current_result_id=r.result_id "
-                "WHERE r.result_id=? AND r.run_id=? AND r.thread_id=?",
-                (result_id, run_id, thread_id),
-            ) as cursor:
-                return self._decode_result(await cursor.fetchone())
 
     async def _list_subtasks(self, run_id):
         if await self._get(run_id) is None:
@@ -507,6 +424,8 @@ class RunStore:
                 if existing is None:
                     if record["status"] != "queued":
                         raise ValueError("Subtask must be queued before execution")
+                    # The historical schema requires this inert column; it is not runtime state.
+                    record = dict(record, check_status="not_checked")
                     columns = tuple(record)
                     await self.connection.execute(
                         "INSERT INTO subtasks ("
@@ -522,13 +441,12 @@ class RunStore:
                     ):
                         raise ValueError("Invalid subtask state transition")
                     await self.connection.execute(
-                        "UPDATE subtasks SET status=?,result=?,error=?,ended_at=?,check_status=? WHERE call_id=?",
+                        "UPDATE subtasks SET status=?,result=?,error=?,ended_at=? WHERE call_id=?",
                         (
                             record["status"],
                             record["result"],
                             record["error"],
                             record["ended_at"],
-                            record["check_status"],
                             record["call_id"],
                         ),
                     )
@@ -614,7 +532,7 @@ class RunStore:
                     "run": record,
                     "events": await self._list_events(run_id),
                     "subtasks": await self._list_subtasks(run_id),
-                    "results": await self._list_results(run_id),
+                    "results": await self._historical_results(run_id),
                 }
                 if record
                 else None
@@ -628,15 +546,11 @@ class RunStore:
             ) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
 
-    async def create(
-        self, thread_id: str, question: str, *, run_id: str | None = None, event=None, job_id=None
-    ) -> dict:
+    async def create(self, thread_id: str, question: str, *, run_id: str | None = None, event=None) -> dict:
         run_id = run_id or str(uuid4())
         validate_identifier(run_id)
         validate_identifier(thread_id)
-        if job_id is not None and validate_identifier(job_id) != thread_id:
-            raise ValueError("Research execution thread must match its job")
-        workspace = f"background-jobs/{job_id}" if job_id else f"session_{thread_id}/run_{run_id}"
+        workspace = f"session_{thread_id}/run_{run_id}"
         record = dict(
             run_id=run_id,
             thread_id=thread_id,
@@ -770,7 +684,7 @@ class RunStore:
             return await self._owns_thread(thread_id)
 
     async def create_thread(self, thread_id=None):
-        # IDs come only from the server, including a previously authenticated job ID.
+        # Thread identities are assigned by the server.
         thread_id = validate_identifier(thread_id or str(uuid4()))
         async with self._lock:
             try:

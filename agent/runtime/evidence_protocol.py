@@ -378,7 +378,6 @@ def make_record(call, content, artifact=None):
         dict(
             protocol_version=PROTOCOL_VERSION,
             adapter=adapter.adapter_id if adapter else None,
-            scope_id=context.run_id,
             run_id=context.run_id,
             thread_id=context.thread_id,
             task_id=owner,
@@ -443,7 +442,7 @@ def validate_record(record, context):
         adapter = None
     else:
         adapter = adapter_by_id(record["adapter"])
-    if context is None or record["scope_id"] != context.run_id or record["run_id"] != context.run_id:
+    if context is None or record["run_id"] != context.run_id:
         raise EvidenceError("Evidence belongs to another logical run")
     if record["thread_id"] != context.thread_id:
         raise EvidenceError("Evidence belongs to another thread")

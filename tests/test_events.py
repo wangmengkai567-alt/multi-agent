@@ -145,7 +145,7 @@ async def test_sequence_resets_between_runs_and_persists_on_reopen(outlet, sandb
         assert (
             completed["call_counts"]
             == failed["call_counts"]
-            == dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
+            == dict.fromkeys(("main_model", "sub_model", "tool", "retry"), 0)
         )
     finally:
         await reopened.close()

@@ -163,9 +163,9 @@ class EventSink:
                 f"{len(failures)} event(s) were not saved for run {run_id or 'all'}"
             ) from failures[0][1]
 
-    async def create(self, thread_id, query, run_id, *, job_id=None):
+    async def create(self, thread_id, query, run_id):
         event = make_event(thread_id, run_id, "run_queued", "任务已接收", actor="main", status="queued", call_id=run_id)
-        record = await self.store.create(thread_id, redact_text(query), run_id=run_id, event=event, job_id=job_id)
+        record = await self.store.create(thread_id, redact_text(query), run_id=run_id, event=event)
         self._dispatch(record.pop("saved_event"))
         return record
 
@@ -184,19 +184,16 @@ class EventSink:
             await self.flush(context.run_id)
         except EventPersistenceError as exc:
             recording_error = exc
-        if status != "completed" and not getattr(context, "partial_answer", False):
+        if status != "completed":
             answer = None
         answer = redact_text(answer) if answer is not None else None
         error = redact_text(error) if error is not None else None
         kind = "task_result" if status == "completed" else "error" if status == "failed" else f"run_{status}"
-        data = {"result": answer} if status == "completed" else {"error": error, "partial_result": answer}
+        data = {"result": answer} if status == "completed" else {"error": error}
         from agent.runtime.completion import completion_snapshot
 
         data["completion"] = completion_snapshot(context, status)
         data["coverage"] = getattr(context, "coverage", "unknown")
-        draft = getattr(context, "delivery_draft", None)
-        if draft and draft.get("source_status") is not None:
-            data["source_status"] = draft["source_status"]
         if hasattr(context, "call_counts"):
             data["call_counts"] = dict(context.call_counts)
         hook_failures = getattr(context, "hook_failures", [])

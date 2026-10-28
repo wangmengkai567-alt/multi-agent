@@ -69,6 +69,79 @@ async def test_two_rounds_two_sessions_history_does_not_mix(history_service, mon
         assert all(event["run_id"] == history["run"]["run_id"] for event in history["events"])
         assert history["events"][-1]["data"]["result"] == history["run"]["answer"]
 
+    # Preserved legacy rows are history only, isolated by run and never rewritten on read.
+    from hashlib import sha256
+
+    store = server.app.state.run_store
+    first = histories[0]["run"]
+    await store.connection.execute(
+        "INSERT INTO subtasks (call_id,run_id,thread_id,target,display_name,description,description_length,"
+        "description_sha256,status,created_at,ended_at,check_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "archived-task",
+            first["run_id"],
+            first["thread_id"],
+            "search",
+            "历史搜索",
+            "历史任务",
+            4,
+            sha256("历史任务".encode()).hexdigest(),
+            "completed",
+            first["created_at"],
+            first["ended_at"],
+            "passed",
+        ),
+    )
+    await store.connection.execute(
+        "INSERT INTO results (result_id,run_id,thread_id,call_id,attempt,source,created_at,query_object,time_range,"
+        "statistical_scope,raw_text,raw_sha256,summary,check_status,review,published,judged,facts_status,coverage_status) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "archived-result",
+            first["run_id"],
+            first["thread_id"],
+            "archived-task",
+            0,
+            "search",
+            first["created_at"],
+            "历史对象",
+            "历史范围",
+            "{}",
+            "历史原文",
+            sha256("历史原文".encode()).hexdigest(),
+            "历史审核摘要",
+            "passed",
+            '{"historical":true}',
+            1,
+            1,
+            "all_passed",
+            "covered",
+        ),
+    )
+    await store.connection.execute(
+        "UPDATE subtasks SET current_result_id='archived-result' WHERE call_id='archived-task'"
+    )
+    await store.connection.commit()
+
+    async def archived_rows():
+        async with store.connection.execute("SELECT * FROM results WHERE result_id='archived-result'") as cursor:
+            result = dict(await cursor.fetchone())
+        async with store.connection.execute("SELECT * FROM subtasks WHERE call_id='archived-task'") as cursor:
+            return result, dict(await cursor.fetchone())
+
+    before = await archived_rows()
+    for _ in range(2):
+        replay = (await client.get(f"/api/runs/{first['run_id']}/history")).json()
+        assert replay["events"] == histories[0]["events"] and replay["run"] == first
+        (legacy,) = replay["results"]
+        assert legacy["raw_text"] == "历史原文" and legacy["summary"] == "历史审核摘要"
+        assert legacy["review"] == {"historical": True} and legacy["published"] is True
+        assert await archived_rows() == before
+    for later in histories[1:]:
+        assert (await client.get(f"/api/runs/{later['run']['run_id']}/history")).json()["results"] == []
+    for retired in ("record_result", "get_current_result", "get_result", "list_results"):
+        assert not hasattr(store, retired)
+
 
 @pytest.mark.asyncio
 async def test_actual_websocket_send_failure_keeps_successful_record(history_service, monkeypatch, caplog):

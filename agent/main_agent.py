@@ -167,7 +167,7 @@ async def run_deep_agent(task_query, session_id):
         禁止访问本机真实绝对路径或其他轮次目录。
         """
         path_instruction += instruction(context)
-        # Each execution gets a new graph frame; the canonical checkpoint owns continuation.
+        # Each run owns a separate graph frame; historical checkpoints are never resumed.
         config = {"configurable": {"thread_id": validate_identifier(context.run_id)}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))

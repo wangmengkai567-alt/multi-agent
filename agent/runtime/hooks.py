@@ -261,9 +261,8 @@ class HookToolMiddleware(AgentMiddleware):
             spec = self.target_specs.get(call.target)
             if spec is not None:
                 call.source_kind = spec.execution.source_kind
-                if context and not expert_available(context, call.target, spec):
-                    unavailable = context.unavailable_agents.get(call.target)
-                    raise HookRejected(unavailable or "专家不在当前契约、权限或执行阶段允许的范围内")
+                if context and not expert_available(context, spec):
+                    raise HookRejected("专家不在当前契约、权限或执行阶段允许的范围内")
             if not self.managed_delegation:
                 self.hooks.emit("before_delegate", call)
         self.hooks.emit("before_tool", call)
@@ -281,7 +280,7 @@ class HookToolMiddleware(AgentMiddleware):
             return None  # The run deadline controls sequential expert execution.
         if "admitted_timeout" in call.workflow_data:
             return call.workflow_data["admitted_timeout"]
-        return request_timeout(policy_for_run().timeouts.tool_seconds, category="tool") if get_run_context() else None
+        return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None
 
     def _error(self, call, exc):
         if call.actor.rsplit(":", 1)[-1] == "task" and isinstance(exc, HookRejected):

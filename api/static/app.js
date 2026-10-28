@@ -13,12 +13,11 @@ const storageKey = 'multiagent.runs.v1';
 const $ = selector => document.querySelector(selector);
 const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
-  input_required:'等待补充任务范围', pending:'后台执行中', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'完成情况待确认'};
+  rejected:'已拒绝', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'完成情况待确认'};
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手', document:'材料分析助手', delivery:'文件交付'};
 const skills = Object.create(null);
 let skillCatalog = null;
-const verdicts = {partial_passed:'有效事实已保留', passed_with_gap:'事实通过，仍有缺口', partial_passed_with_gap:'部分事实通过，仍有缺口', passed_coverage_unknown:'事实通过，覆盖待确认', partial_coverage_unknown:'部分事实通过，覆盖待确认', passed:'通过', insufficient:'信息不足', dependency_unavailable:'依赖不可用',
-  check_incomplete:'检查未完成', tool_failed:'工具失败', budget_exhausted:'次数耗尽', not_checked:'未检查'};
+
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c]));
@@ -205,7 +204,7 @@ async function loadSkillCatalog() {
 function createSession(threadId, query, runId, select = true) {
   if (sessions[runId]) { if (select) switchSession(runId); return sessions[runId]; }
   const session = {id:threadId, runId, query, logs:[], seen:new Set(), stream:null, ws:null,
-    status:'unknown', statusSeq:0, answer:null, error:null, degraded:false, recordingIncomplete:false, clarification:false};
+    status:'unknown', statusSeq:0, answer:null, error:null, recordingIncomplete:false};
   sessions[runId] = session;
   if (select) switchSession(runId);
   persist();
@@ -218,21 +217,18 @@ function applyEvent(session, event) {
   session.logs.push(event);
   session.logs.sort((a,b) => a.event_seq - b.event_seq);
   const data = event.data || {};
-  if (data.coverage && event.event_seq >= session.statusSeq) session.coverage = data.coverage;
-  if (event.event === 'clarification_requested') session.clarification = true;
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
   if (currentState) { session.statusSeq = event.event_seq; session.completion = data.completion; }
   if (currentState && event.event === 'run_queued') session.status = 'queued';
   if (currentState && event.event === 'run_started') session.status = 'running';
-  if (event.event === 'workflow_state' && ['degraded','completed_degraded'].includes(event.status)) session.degraded = true;
   if (currentState && event.event === 'task_result') {
     session.status = 'completed'; session.answer = data.result;
     session.recordingIncomplete = data.recording_status === 'incomplete';
   }
   if (currentState && ['error','run_cancelled','run_timed_out','run_interrupted'].includes(event.event)) {
     session.status = event.status; session.error = data.error;
-    if (data.partial_result) session.answer = data.partial_result;
+    session.answer = null;
   }
   if (!activeStates.has(session.status) && session.status !== 'unknown') {
     if (session.stream) session.stream.close();
@@ -257,7 +253,6 @@ async function syncSession(session) {
     // A live terminal event may arrive while this earlier HTTP snapshot is in flight.
     if (activeStates.has(session.status) || session.status === 'unknown' || !activeStates.has(history.run.status)) {
       session.status = history.run.status;
-      session.coverage = history.run.coverage;
       session.completion = history.run.completion;
       session.answer = history.run.answer;
       session.error = history.run.error;
@@ -311,37 +306,13 @@ function renderTabs() {
     `<option value="${escapeHtml(s.id)}">会话 ${i+1} · ${escapeHtml(s.query.slice(0,18))}</option>`).join('');
   if (threads.some(s => s.id === selected)) select.value = selected;
 }
-function isSearchControl(data) {
-  return ['search_limit','search_prerequisite'].includes(data?.error_category);
-}
-
 function describeEvent(event) {
   const d = event.data || {}, who = d.assistant_name || actors[event.actor] || '助手';
-  if (event.event === 'model_request') return ({research:'检索决策（模型）',report_generation:'事实报告生成（模型）',
-    report_revision:'事实报告修订（模型）',semantic_review:'证据审核（模型）',coordination:'任务协调（模型）',
-    task_contract:'任务契约（模型）',summarization:'上下文摘要（模型）',final_generation:'终稿生成（模型）',
-    final_revision:'终稿修订（模型）',final_review:'终稿审核（模型）',direct_review:'直接答复审核（模型）',
-    review_revision:'审核格式修订（模型）'}[d.phase] || '模型请求');
-  if (d.error_category === 'search_prerequisite') return '此补查请求未执行：' + (d.error || '需先评估已有结果并读取关键来源');
-  if (d.error_category === 'search_limit') return event.event === 'on_error'
-    ? '检索额度限制：已拦截新的请求，已获准请求仍会完成'
-    : '此检索请求未执行（检索额度限制）';
-  if (event.event === 'review_repair') return '检查输出格式不符合约定：仅重试检查，复用已有依据';
+  if (event.event === 'model_request') return ({research:'资料收集（模型）',coordination:'任务协调（模型）',
+    summarization:'上下文摘要（模型）'}[d.phase] || '模型请求');
   if (event.event === 'skill_state') return `Skill ${skills[d.skill_id] || d.skill_id}：` +
     ({selected:'已选择', loaded:'正文已读取', resource_loaded:'参考资源已读取'}[event.status] || event.status);
-  if (event.event === 'clarification_requested') return '需要补充任务范围：' + event.message;
-  if (event.event === 'answer_validation') return '最终答复检查：' + (event.status === 'partial' ? '有限结果' : verdicts[event.status] || event.status) + (d.issues?.length ? '；' + d.issues.join('；') : '');
-  if (event.event === 'subagent_review') return `${who}结果检查：${verdicts[event.status] || event.status}` +
-    (d.issues?.length ? '；' + d.issues.join('；') : '');
-  if (event.event === 'subagent_refinement') {
-    const revision = d.revision_instruction;
-    const reason = revision && !['[REDACTED]','[OMITTED]'].includes(revision) ? revision : d.issues?.join('；');
-    return `${who}补充查询：${reason || '补齐缺失依据'}`;
-  }
-  if (event.event === 'budget_finalizing') return '预算接近阈值：优先交付已核实部分';
   if (event.event === 'tool_retry') return `运行时重试 #${d.attempt}：等待 ${Number(d.delay_seconds || 0).toFixed(2)} 秒`;
-  if (event.event === 'research_plan') return '研究分工已登记：' + (d.tasks || []).map(t => t.label).join('、');
-  if (event.event === 'search_finalizing') return '检索修订已结束：汇总已核实内容和剩余缺口';
   if (event.status === 'cancelled' && ['on_error','after_tool'].includes(event.event)) {
     const reason = d.error && !/^<object object at 0x[0-9a-f]+>$/i.test(d.error) ? d.error : '当前操作已取消';
     return '操作已取消：' + reason;
@@ -350,14 +321,11 @@ function describeEvent(event) {
   if (event.event === 'after_tool' && d.execution_status === 'unknown') return (d.tool_name || '工具') + ' · 执行结果未确定：' + (d.error || event.status);
   if (event.event === 'after_tool') return (d.tool_name || event.actor?.split(':').at(-1) || '工具') + (event.status === 'completed' ? ' · 已完成' : ' · 未完成：' + (d.error || event.status));
   if (event.event === 'on_error') return '动作失败：' + (d.error || '请查看详情');
-  if (event.event === 'workflow_state') return ({initialized:'分析流程已准备', blocked:'前置条件未满足，需先完成查询或文件读取',
-    degraded:'数据库不可用，改为外部资料分析', search_allowed:'内部查询已通过，开始市场检索',
-    completed_degraded:'仅完成外部资料分析，缺少内部经营指标', completed:'所需查询与文件检查已完成',
-    report_allowed:'报告前置条件已通过', upload_read:'用户文件已读取'}[event.status] || '分析流程更新');
-  if (event.event === 'result_handoff') return '已将本轮查询摘要传给后续助手';
   if (event.event === 'before_tool') return '执行前检查 · ' + (d.tool_name || event.actor?.split(':').at(-1) || '工具');
   if (event.event === 'before_delegate') return `${who}执行前检查`;
-  if (event.event === 'after_subagent') return `${who}处理结束：${verdicts[d.check_status] || statusNames[event.status] || event.status}`;
+  if (['subagent_queued','subagent_running','subagent_completed','subagent_failed','subagent_cancelled',
+    'subagent_interrupted','subagent_rejected','subagent_timed_out','after_subagent'].includes(event.event))
+    return `${who}：${statusNames[event.status] || event.status}${d.error ? '；' + d.error : ''}`;
   if (event.event === 'before_run') return '准备本轮任务与限制';
   if (event.event === 'after_run') return '本轮执行与清理结束';
   if (event.event === 'task_result') return '本轮结果已保存';
@@ -381,7 +349,6 @@ function renderLog(session) {
     ${session.completion?.error ? `<p>${escapeHtml(typeof session.completion.error === 'string' ? session.completion.error : session.completion.error.message)}</p>` : ''}
     ${session.syncError ? `<p>${escapeHtml(session.syncError)}</p>` : ''}
     ${session.recordingIncomplete ? '<p>部分执行记录未保存，详情见最终事件。</p>' : ''}
-    ${session.clarification ? '<p>请在问题栏补充完整任务后重新提交。</p>' : ''}
     <details><summary>运行详情</summary><pre>${escapeHtml(JSON.stringify({thread_id:session.id,run_id:session.runId,status:session.status},null,2))}</pre></details>`;
   answer.hidden = session.answer === null || session.answer === undefined;
   renderAnswer(answer, session.answer ?? '');
@@ -392,10 +359,10 @@ function renderLog(session) {
   if (follow) area.scrollTop = area.scrollHeight;
 }
 function callGroups(session) {
-  const agents = new Map(), aliases = new Map(), labels = new Map();
+  const agents = new Map(), aliases = new Map();
   for (const event of session.logs) {
-    if (event.event === 'research_plan') for (const task of event.data?.tasks || []) labels.set(task.task_id, task.label);
-    if (event.event.startsWith('subagent_') && !['subagent_review','subagent_refinement'].includes(event.event)) {
+    if (['subagent_queued','subagent_running','subagent_completed','subagent_failed','subagent_cancelled',
+      'subagent_interrupted','subagent_rejected','subagent_timed_out'].includes(event.event)) {
       const d = event.data || {};
       if (!agents.has(event.call_id)) agents.set(event.call_id, {id:event.call_id, target:d.target || event.actor, label:d.task_label || '', events:[]});
       if (d.request_call_id) aliases.set(d.request_call_id,event.call_id);
@@ -432,8 +399,8 @@ function callGroups(session) {
 function renderCallGroups(session, openDetails = new Set()) {
   return callGroups(session).map((group,index) => {
     const agentName = group.events.find(e => e.data?.assistant_name)?.data.assistant_name || actors[group.target] || group.target || '助手';
-    const terminal = group.events.filter(e=>['subagent_completed','subagent_failed','subagent_cancelled','subagent_rejected'].includes(e.event)).at(-1);
-    const outcome = terminal ? ' · ' + (verdicts[terminal.data?.check_status] || ({completed:'处理结束',failed:'执行失败',cancelled:'已取消',rejected:'已拒绝'}[terminal.status] || terminal.status)) : '';
+    const terminal = group.events.filter(e=>['subagent_completed','subagent_failed','subagent_cancelled','subagent_interrupted','subagent_rejected','subagent_timed_out'].includes(e.event)).at(-1);
+    const outcome = terminal ? ' · ' + (statusNames[terminal.status] || terminal.status) : '';
     const title = index === 0 && group.target === 'main' ? '主助手' : `${agentName} · ${group.label || '独立分工'} · ${group.id.slice(0,8)}${outcome}`;
     const calls = new Map();
     for (const e of group.events) {
@@ -443,13 +410,11 @@ function renderCallGroups(session, openDetails = new Set()) {
     }
     let toolNumber = 0;
     const rows = [...calls.values()].map((events,i) => {
-      const last = events.at(-1), d = last.data || {};
-      const failed = !isSearchControl(d) && ['failed','rejected','dependency_unavailable','insufficient','check_incomplete'].includes(last.status);
+      const last = events.at(-1);
+      const failed = ['failed','rejected','cancelled','interrupted','timed_out'].includes(last.status);
       const name = events.find(e=>e.data?.tool_name)?.data.tool_name || events.find(e=>e.actor?.includes(':'))?.actor.split(':').at(-1);
       const toolNames = {internet_search:'网络搜索',read_web_page:'网页正文读取',read_file:'读取文件',task:'委派任务'};
       const caption = name ? `${toolNames[name] || name} #${++toolNumber} · ${last.event==='after_tool' && last.status==='completed'?'已完成':describeEvent(last)}` : describeEvent(last);
-      const budget = [...events].reverse().find(e=>e.data?.search_budget)?.data.search_budget;
-      const quota = budget ? ` · 本任务 ${budget.task_used}/${budget.task_limit}，整轮 ${budget.run_used}/${budget.run_limit}` : '';
       const end = new Date(last.timestamp);
       const measured = [...events].reverse().find(e => Number.isFinite(e.data?.elapsed_ms) &&
         (e.event === 'model_request' || ['after_tool','after_subagent'].includes(e.event)));
@@ -464,7 +429,7 @@ function renderCallGroups(session, openDetails = new Set()) {
         ? requestMetrics.input_units : '未知'}/${Number.isFinite(requestMetrics.output_units)
         ? requestMetrics.output_units : '未知'}` : '';
       return `<div class="log-entry" data-call="${escapeHtml(last.call_id)}"><div class="log-dot ${failed?'e':'a'}"></div><div class="log-body">
-        <span class="log-msg">${escapeHtml(caption + quota + elapsed + requestSize + queueTime + usage)}</span>
+        <span class="log-msg">${escapeHtml(caption + elapsed + requestSize + queueTime + usage)}</span>
         <div class="log-time">${escapeHtml(end.toLocaleTimeString('zh-CN',{hour12:false}))}</div>
         <details data-seq="${escapeHtml('call:'+last.call_id)}" ${openDetails.has('call:'+last.call_id)?'open':''}><summary>展开调用过程（${events.length} 条）</summary>
         ${events.map(e=>`<div>${escapeHtml(describeEvent(e))}</div>`).join('')}

@@ -1,4 +1,4 @@
-"""Task-local source catalog, including verified cache-consumption references."""
+"""Task-local source catalog backed by actual tool evidence."""
 
 import re
 from dataclasses import dataclass

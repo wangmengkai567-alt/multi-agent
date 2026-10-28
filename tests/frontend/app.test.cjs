@@ -13,14 +13,14 @@ async function main() {
   assert.equal(s.status,'running'); assert.equal(h.streams[0].afterSeq,1);
   assert.deepEqual(h.stored().runs,[{threadId:'thread',runId:'run',query:'中文问题'}]);
   ui.applyEvent(s,ev(2,'skill_state','loaded',{skill_id:'ecommerce-analysis'}));
-  ui.applyEvent(s,ev(3,'subagent_review','insufficient',{issues:['缺少来源']}));
-  ui.applyEvent(s,ev(4,'subagent_refinement','insufficient',{revision_instruction:'补查来源'}));
-  ui.applyEvent(s,ev(5,'subagent_review','passed'));
+  ui.applyEvent(s,ev(3,'subagent_running','running'));
+  ui.applyEvent(s,ev(4,'after_tool','completed',{tool_name:'internet_search'}));
+  ui.applyEvent(s,ev(5,'subagent_completed','completed'));
   ui.applyEvent(s,ev(6,'task_result','completed',{result:'完整答案'.repeat(500),completion:{status:'complete'}}));
   ui.applyEvent(s,ev(6,'task_result','completed',{result:'重复'}));
   assert.equal(s.logs.length,6); assert.equal(ui.displayStatus(s),'completed');
   assert.equal(element('#answer').textContent,'完整答案'.repeat(500));
-  assert.match(element('#logArea').innerHTML,/正文已读取/); assert.match(element('#logArea').innerHTML,/补查来源/);
+  assert.match(element('#logArea').innerHTML,/正文已读取/); assert.match(element('#logArea').innerHTML,/联网搜索助手：已完成/);
   assert.ok(h.streams[0].closed);
   s.completion={status:'partial'}; assert.equal(ui.displayStatus(s),'partial');
   for (const state of ['cancelled','timed_out','interrupted','failed']) {
@@ -28,11 +28,11 @@ async function main() {
     assert.equal(ui.displayStatus(s),state); assert.match(element('#runSummary').innerHTML,/原因/);
   }
   assert.equal(ui.escapeHtml('<script>"\''),'&lt;script&gt;&quot;&#39;');
-  assert.match(ui.describeEvent(ev(25,'on_error','rejected',{error_category:'search_limit'})),/已拦截新的请求/);
-  assert.match(ui.describeEvent(ev(26,'after_tool','rejected',{error_category:'search_limit'})),/未执行/);
-  assert.match(ui.describeEvent(ev(27,'review_repair','running')),/仅重试检查/);
+  assert.match(ui.describeEvent(ev(25,'on_error','rejected',{error:'Search/page read budget exhausted'})),/budget exhausted/);
+  assert.match(ui.describeEvent(ev(26,'after_tool','rejected',{error:'工具额度耗尽'})),/未完成：工具额度耗尽/);
+  assert.match(ui.describeEvent(ev(27,'tool_retry','running',{attempt:1,delay_seconds:0.5})),/运行时重试 #1：等待 0.50 秒/);
   assert.equal(ui.describeEvent(ev(28,'on_error','cancelled',{error:'<object object at 0x0000014A534411F0>'})), '操作已取消：当前操作已取消');
-  assert.match(ui.describeEvent(ev(29,'search_finalizing','partial')),/汇总已核实内容/);
+  assert.match(ui.describeEvent(ev(29,'model_request','completed',{phase:'summarization'})),/上下文摘要/);
   const quotaHarness = await harness();
   const quota = quotaHarness.ui.createSession('thread','额度控制','quota');
   quota.status = 'completed'; quota.completion = {status:'complete'};
@@ -41,22 +41,28 @@ async function main() {
   assert.equal(quotaHarness.ui.displayStatus(quota),'completed');
   const finalCheck = quotaHarness.ui.createSession('thread','最终检查','final-check');
   finalCheck.status='completed';
-  // A review verdict cannot assert overall coverage; only the server owns that state.
-  finalCheck.logs=[{...ev(1,'answer_validation','passed'),call_id:'final-check'}];
+  // Child completion cannot assert overall coverage; only the server owns that state.
+  finalCheck.logs=[{...ev(1,'subagent_completed','completed'),call_id:'final-check'}];
   assert.equal(quotaHarness.ui.displayStatus(finalCheck),'coverage_unknown');
   for (const [coverage,expected] of [['unknown','coverage_unknown'],['partial','partial'],['complete','completed']]) {
     finalCheck.completion={status:coverage};
     assert.equal(quotaHarness.ui.displayStatus(finalCheck),expected);
   }
 
-  assert.match(ui.describeEvent(ev(30,'subagent_review','dependency_unavailable',{issues:['缺配置']})),/依赖不可用.*缺配置/);
-  assert.match(ui.describeEvent(ev(31,'subagent_refinement','insufficient',{
-    revision_instruction:'[REDACTED]',issues:['缺少检索日期']})),/补充查询：缺少检索日期/);
+  assert.match(ui.describeEvent(ev(30,'after_subagent','failed',{error:'缺配置'})),/执行失败.*缺配置/);
+  assert.match(ui.describeEvent(ev(31,'subagent_cancelled','cancelled')),/已取消/);
+  // Historical event messages remain readable without activating a retired protocol.
+  const old = {...ev(32,'research_plan','recorded'),message:'历史分工登记',data:{tasks:[{task_id:'old',label:'旧计划'}]}};
+  const savedOld = JSON.stringify(old);
+  assert.equal(ui.describeEvent(old),'历史分工登记');
+  ui.applyEvent(s,old);
+  assert.equal(JSON.stringify(old),savedOld);
+  assert.equal(ui.callGroups(s).some(g=>g.id==='old'),false);
   // Refresh restores server-owned full answers, never a truncated event preview.
   context.reply=url=>response(url.includes('/history') ? history('completed','恢复后的完整答案',[ev(1,'run_started','running')]) : {files:[]});
   await ui.restoreSessions(); assert.equal(s.answer,'恢复后的完整答案');
   // A terminal event that arrives during HTTP must not revert to a running snapshot.
-  context.reply=url=>{ if(url.includes('/history')) ui.applyEvent(s,ev(31,'run_timed_out','timed_out')); return response(url.includes('/history')?history():{files:[]}); };
+  context.reply=url=>{ if(url.includes('/history')) ui.applyEvent(s,ev(40,'run_timed_out','timed_out')); return response(url.includes('/history')?history():{files:[]}); };
   await ui.syncSession(s); assert.equal(s.status,'timed_out');
   // Explicit business mode and Skill selection go through the actual submission code.
   element('#queryInput').value='待提交'; element('#modeSelect').value='internal_external'; element('#threadSelect').value='thread';
@@ -112,6 +118,6 @@ async function main() {
   const submitted = JSON.parse(extra.calls.find(c=>c.url==='/api/task').options.body);
   assert.deepEqual(submitted.skill_ids,['research','document-analysis','data-analysis']);
   assert.equal(submitted.business_mode,'ordinary');
-  console.log('PASS: persistence, refresh, full answers, ordered deduplication, Skill/review/refinement, redacted refinement reasons, partial and terminal states, stale HTTP, busy/validation, cancellation race, scoped downloads, escaping, view cleanup');
+  console.log('PASS: persistence, refresh, full answers, ordered deduplication, Skill/delegation/tool results, immutable historical messages, partial and terminal states, stale HTTP, busy/validation, cancellation race, scoped downloads, escaping, view cleanup');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

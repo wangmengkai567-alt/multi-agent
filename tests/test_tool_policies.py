@@ -420,7 +420,9 @@ async def test_static_download_listing_and_upload_junction_bypasses_blocked(file
     [
         ("budgets", "total", 0),
         ("budgets", "tool", True),
-        ("budgets", "review", -1),
+        ("budgets", "sub_model", -1),
+        ("budgets", "review", 12),
+        ("budgets", "near_ratio", 0.85),
         ("sql", "allowed_tables", ["orders", "orders"]),
         ("sql", "allowed_tables", ["orders;DROP"]),
         ("sql", "timeout_seconds", 0),

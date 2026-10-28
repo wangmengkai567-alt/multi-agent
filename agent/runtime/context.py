@@ -22,7 +22,6 @@ class RunContext:
     owner_id: str = field(default="", repr=False, kw_only=True)
     deadline: datetime | None = None
     reference_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
-    unavailable_agents: dict[str, str] = field(default_factory=dict, repr=False)
     deadline_clock: float | None = None
     stop_status: str | None = None
     terminal_error: ExecutionTerminated | None = field(default=None, repr=False)
@@ -63,7 +62,7 @@ class RunContext:
     task_results: dict = field(default_factory=dict, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(
-        default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "review", "tool", "retry"), 0)
+        default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "tool", "retry"), 0)
     )
 
     def __post_init__(self):

@@ -74,13 +74,13 @@ async def test_cancel_queued_before_executor_starts(sandbox_dir, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["model", "review", "retry"])
+@pytest.mark.parametrize("stage", ["main_model", "sub_model", "retry"])
 async def test_total_deadline_covers_all_execution_stages(sandbox_dir, monkeypatch, stage):
     reached = asyncio.Event()
     cancelled = asyncio.Event()
 
     async def body(question, session):
-        reserve_calls({"model": "main_model", "review": "review", "retry": "retry"}[stage])
+        reserve_calls(stage)
         reached.set()
         try:
             await asyncio.Event().wait()
@@ -180,7 +180,7 @@ async def test_sync_tool_late_return_is_rejected(sandbox_dir):
 
 
 @pytest.mark.asyncio
-async def test_model_request_timeout_and_review_use_same_remaining_deadline(sandbox_dir):
+async def test_child_model_request_timeout_uses_remaining_deadline(sandbox_dir):
     captured = []
 
     async def invoke(messages, **kwargs):
@@ -193,10 +193,12 @@ async def test_model_request_timeout_and_review_use_same_remaining_deadline(sand
     )
     token = set_run_context(context)
     try:
-        model = budget_model(RunnableLambda(lambda messages, **kwargs: AIMessage(content="ok"), afunc=invoke), "review")
+        model = budget_model(
+            RunnableLambda(lambda messages, **kwargs: AIMessage(content="ok"), afunc=invoke), "sub_model"
+        )
         with pytest.raises(TimeoutError):
-            await model.ainvoke("review")
-        assert captured == [0.05] and context.call_counts["review"] == 1
+            await model.ainvoke("child")
+        assert captured == [0.05] and context.call_counts["sub_model"] == 1
         context.deadline = datetime.now(UTC) + timedelta(seconds=0.02)
         assert 0 < request_timeout() <= 0.02
         context.deadline = datetime.now(UTC) - timedelta(seconds=1)

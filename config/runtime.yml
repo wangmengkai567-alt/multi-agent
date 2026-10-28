@@ -29,11 +29,9 @@ budgets:
   total: 80
   main_model: 20
   sub_model: 30
-  review: 12
   tool: 40
   retry: 12
   tools_per_turn: 8
-  near_ratio: 0.85
 sql:
   # Empty by default. Add only actual business tables approved for querying.
   allowed_tables: []

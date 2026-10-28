@@ -18,10 +18,8 @@ glob 用 path 指定目录、pattern 指定相对模式，例如 path='/skills/'
 """
 
 
-def expert_available(context, target, spec):
-    return target not in context.unavailable_agents and not (
-        spec.execution.network_access and context.network_policy == "forbidden"
-    )
+def expert_available(context, spec):
+    return not (spec.execution.network_access and context.network_policy == "forbidden")
 
 
 def tool_available(context, name, *, network=False, target_specs=None):
@@ -34,7 +32,7 @@ def tool_available(context, name, *, network=False, target_specs=None):
     if name == "read_bound_material" and context.task_contract is not None:
         return any(material.text is not None for material in context.task_contract.materials)
     if name == "task" and target_specs is not None:
-        return any(expert_available(context, target, spec) for target, spec in target_specs.items())
+        return any(expert_available(context, spec) for spec in target_specs.values())
     return True
 
 
@@ -75,9 +73,7 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 )
             if name == "task":
                 targets = {
-                    target: spec
-                    for target, spec in self.target_specs.items()
-                    if expert_available(context, target, spec)
+                    target: spec for target, spec in self.target_specs.items() if expert_available(context, spec)
                 }
                 schema = deepcopy(convert_to_openai_tool(tool))
                 function = schema["function"]

@@ -43,7 +43,7 @@ class DelegationRunnable(Runnable):
         from agent.runtime.contracts import assert_contract
 
         assert_contract(context)
-        if not expert_available(context, self.spec.agent_id, self.spec):
+        if not expert_available(context, self.spec):
             raise HookRejected("Expert is unavailable or forbidden by this run's permissions")
         if self.registry is not None:
             bind_registry(context, self.registry)
@@ -77,7 +77,6 @@ class DelegationRunnable(Runnable):
             ended_at=None,
             result=None,
             error=None,
-            check_status="not_checked",
         )
         with context.budget_lock:
             context.check_active()

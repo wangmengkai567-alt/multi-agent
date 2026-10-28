@@ -165,7 +165,7 @@ class ServiceScheduler:
 
         request = active_request.get()
         if request is not None and request.context is context and not request.closed:
-            request_timeout(category=request.row["category"], phase=request.row["phase"])
+            request_timeout(model_request=True)
 
     def acquire(self, gate, context, label):
         self._check_wait(context)
