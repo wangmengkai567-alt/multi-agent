@@ -118,11 +118,11 @@ async def finalize_answer(context, answer):
 
     context.check_active()
     assert_contract(context)
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Final answer must not be empty")
     rows = list(context.task_results.values())
     successes = [row for row in rows if row["status"] == "completed"]
     failures = [row for row in rows if row["status"] != "completed"]
-    if (rows or context.task_rejections) and not successes:
-        raise RuntimeError("所有委派均未取得有效结果，本轮调查失败；详见子任务错误记录")
     obtained = {context.expert_contract[row["target"]]["execution"]["source_kind"] for row in successes}
     missing = sorted(required_sources(context) - obtained)
     unread = [
@@ -130,6 +130,8 @@ async def finalize_answer(context, answer):
         for name in context.required_uploads
         if str(confined_path("uploads/" + name, context.work_dir)) not in context.upload_reads
     ]
+    if (rows or context.task_rejections or missing or unread) and not successes:
+        raise RuntimeError("本轮调查未取得有效分工结果，不能生成调查结论或成功文件；详见来源要求和子任务错误记录")
     allowed = set(cited_urls(context.user_query))
     for row in successes:
         for source in row["sources"]:
@@ -151,12 +153,21 @@ async def finalize_answer(context, answer):
             "未完成的分工："
             + "；".join(row["display_name"] + "（" + (row["error"] or row["status"]) + "）" for row in failures)
         )
+    if context.task_rejections:
+        notices.append("被拒绝的分工：" + "；".join(context.task_rejections))
     if missing:
         notices.append("尚未取得结果的必需来源：" + "、".join(missing))
     if unread:
         notices.append("尚未完整读取的必需文件：" + "、".join(unread))
     if notices:
         answer += "\n\n【部分完成】\n\n" + "\n\n".join(notices)
+    limitations = [
+        row["display_name"] + "的读取或执行限制：" + "；".join(item["reason"] for item in row["limitations"])
+        for row in rows
+        if row["limitations"]
+    ]
+    if limitations:
+        answer += "\n\n【读取与执行限制】\n\n" + "\n\n".join(limitations)
     answer = redact_text(answer).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
     if not answer.strip():
         raise ValueError("Final answer must not be empty")
