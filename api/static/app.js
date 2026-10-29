@@ -249,9 +249,14 @@ async function syncSession(session) {
     if (sessions[session.runId] !== session) return;
     if (history.run.thread_id !== session.id || history.run.run_id !== session.runId) throw new Error('运行归属不匹配');
     session.subtasks = history.subtasks || [];
+    const historySeq = history.events.reduce((seq, event) =>
+      event.run_id === session.runId && event.thread_id === session.id &&
+      Number.isSafeInteger(event.event_seq) && event.event_seq > seq ? event.event_seq : seq, 0);
     for (const e of history.events) applyEvent(session, e);
-    // A live terminal event may arrive while this earlier HTTP snapshot is in flight.
-    if (activeStates.has(session.status) || session.status === 'unknown' || !activeStates.has(history.run.status)) {
+    // Preserve newer live lifecycle state; persisted terminal snapshots supply the full output.
+    if (session.status === 'unknown' || !activeStates.has(history.run.status) ||
+        (activeStates.has(session.status) && historySeq >= session.statusSeq)) {
+      session.statusSeq = Math.max(session.statusSeq, historySeq);
       session.status = history.run.status;
       session.completion = history.run.completion;
       session.answer = history.run.answer;
