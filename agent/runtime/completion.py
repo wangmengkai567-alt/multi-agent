@@ -23,7 +23,11 @@ def validate_delivery(context, answer):
 
 def completion_snapshot(context, execution_status):
     draft = getattr(context, "delivery_draft", None) or {}
-    artifact = deepcopy(draft.get("artifact"))
+    # Prepared files become delivery artifacts only for the committed success path.
+    artifact = deepcopy(draft.get("artifact")) if execution_status == "completed" else None
+    delivery_status = "not_delivered" if draft.get("artifact") else "not_requested"
+    if artifact:
+        delivery_status = artifact["status"]
     coverage = getattr(context, "coverage", "unknown")
     status = execution_status
     if execution_status == "completed":
@@ -32,7 +36,7 @@ def completion_snapshot(context, execution_status):
         status=status,
         execution_status=execution_status,
         coverage=coverage,
-        delivery_status=artifact["status"] if artifact else "not_requested",
+        delivery_status=delivery_status,
         artifact=artifact,
         error=None,
     )

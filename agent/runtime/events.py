@@ -184,6 +184,11 @@ class EventSink:
             await self.flush(context.run_id)
         except EventPersistenceError as exc:
             recording_error = exc
+        # Like Codex task completion, recheck cancellation after the recording barrier.
+        if status == "completed":
+            status = getattr(context, "stop_status", None) or status
+            if status != "completed":
+                error = error or f"Run ended before final delivery: {status}"
         if status != "completed":
             answer = None
         answer = redact_text(answer) if answer is not None else None

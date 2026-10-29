@@ -548,19 +548,26 @@ async def run_workspace(run_id):
     if record is None:
         raise HTTPException(status_code=404, detail="Run not found")
     try:
-        return resource_path(record["workspace"], output_dir)
+        return record, resource_path(record["workspace"], output_dir)
     except PathDenied as exc:
         raise HTTPException(status_code=403, detail="Run workspace rejected") from exc
 
 
+def _published_run_file(record, base, file):
+    """The durable terminal winner owns final-answer publication."""
+    if file == base / ".answer.tmp":
+        return False
+    return file != base / "answer.md" or record["status"] == "completed"
+
+
 @app.get("/api/runs/{run_id}/files/download")
 async def download_file(run_id: str, path: str):
-    base = await run_workspace(run_id)
+    record, base = await run_workspace(run_id)
     try:
         file = resource_path(path, base)
     except PathDenied as exc:
         raise HTTPException(status_code=403, detail="Relative file path rejected") from exc
-    if not file.is_file():
+    if not _published_run_file(record, base, file) or not file.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file, filename=file.name, media_type="application/octet-stream")
 
@@ -569,11 +576,13 @@ async def download_file(run_id: str, path: str):
 async def list_files(run_id: str):
     from utils.artifact_links import artifact_url
 
-    base = await run_workspace(run_id)
+    record, base = await run_workspace(run_id)
     if not base.is_dir():
         return {"files": []}
     files = []
     for file in iter_confined_files(base):
+        if not _published_run_file(record, base, file):
+            continue
         info = file.stat()
         relative = file.relative_to(base).as_posix()
         files.append(
