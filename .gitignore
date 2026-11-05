@@ -63,3 +63,4 @@ docs/**/*.log
 docs/implementation/*.png
 docs/generated/
 docs/
+tests/
