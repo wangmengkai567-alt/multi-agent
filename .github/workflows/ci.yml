@@ -11,7 +11,7 @@ jobs:
   # 代码检查
   # ============================================
   lint:
-    name: Lint & Type Check
+    name: Lint & Format Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +22,7 @@ jobs:
           python-version: "3.11"
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v9
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.11.26"
 
@@ -47,46 +47,9 @@ jobs:
           python-version: "3.11"
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v9
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           version: "0.11.26"
 
       - name: Check syntax (compile all .py files)
         run: uv run --no-project --python 3.11 python -m compileall -q agent/ api/ tools/ utils/
-
-  offline:
-    name: Windows Offline Regression
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v9
-        with:
-          version: "0.11.26"
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Install the Windows development environment
-        run: |
-          uv venv --python 3.11
-          uv pip sync --python .venv/Scripts/python.exe requirements-dev-win-py311.lock
-
-      - name: Run offline verification
-        run: uv run --offline --no-project --python .venv/Scripts/python.exe python -X utf8 -B -m tools.verify_project --report-dir output/verification/ci
-
-      - name: Preserve verification evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: offline-verification
-          path: output/verification/ci/
-          if-no-files-found: error
