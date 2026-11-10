@@ -18,6 +18,25 @@ const statusNames = {queued:'等待执行', running:'执行中', completed:'已�
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手', document:'材料分析助手', delivery:'文件交付'};
 const skills = Object.create(null);
 let skillCatalog = null;
+let selectedUploads = [];
+let newUploadThreadId = null;
+
+function renderUploads() {
+  $('#uploadList').innerHTML = selectedUploads.map((file, index) => `<li>
+    <span class="upload-name">${escapeHtml(file.name)} · ${(file.size / 1024).toFixed(1)} KiB</span>
+    <button class="btn btn-ghost" type="button" data-remove-upload="${index}"
+      aria-label="移除 ${escapeHtml(file.name)}" ${submitting ? 'disabled' : ''}>移除</button></li>`).join('');
+  $('#selectFilesBtn').disabled = submitting;
+  $('#uploadInput').disabled = submitting;
+  for (const selector of ['#threadSelect', '#queryInput', '#inputText', '#modeSelect', '#forbidNetwork']) {
+    $(selector).disabled = submitting;
+  }
+}
+function clearUploads() {
+  selectedUploads = []; newUploadThreadId = null;
+  $('#uploadInput').value = '';
+  renderUploads();
+}
 
 
 function escapeHtml(value) {
@@ -59,6 +78,7 @@ function lockAuthentication(message = '请登录后继续。已提交的任务�
     delete sessions[session.runId];
   }
   activeSessionId = null; skillCatalog = null; submitting = false;
+  clearUploads(); $('#uploadStatus').textContent = '';
   $('#workspace').hidden = true; $('#loginPanel').hidden = false; $('#logoutBtn').hidden = true;
   $('#authMessage').textContent = message;
   $('#queryInput').value = ''; $('#inputText').value = ''; $('#sendBtn').disabled = true;
@@ -450,34 +470,62 @@ function renderCallGroups(session, openDetails = new Set()) {
       <summary>${escapeHtml(title)} · ${toolNumber} 次工具调用</summary>${rows}</details>`;
   }).join('');
 }
-// 提交后用服务端生成的会话/运行 ID 建立视图，再同步历史和订阅实时事件。
+// 先上传所选材料，成功后再提交任务；新会话使用服务端签发的 ID。
 async function sendTask() {
   const epoch = authEpoch;
   const input = $('#queryInput'), query = input.value.trim();
   if (!authenticated || !query || submitting) return;
   if (skillCatalog === null) { notify('请先成功加载技能目录再提交任务'); return; }
   submitting = true; $('#sendBtn').disabled = true; notify('正在提交…');
+  renderUploads();
+  let stage = 'submit';
   try {
     applyRequiredSkills();
     const skillIds = Array.from($('#skillChoices').querySelectorAll('input[name="skill_id"]:checked'), input => input.value);
     if (skillIds.length > skillCatalog.max_selected || new Set(skillIds).size !== skillIds.length ||
         skillIds.some(id => !Object.hasOwn(skills, id))) throw new Error('技能选择不符合服务端目录');
     const mode = $('#modeSelect').value;
+    const files = [...selectedUploads];
+    const payload = {query, input_text:$('#inputText').value || null,
+      network_policy:$('#forbidNetwork').checked ? 'forbidden' : 'allowed',
+      skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null,
+      required_uploads:files.map(file => file.name)};
+    if (files.length) {
+      stage = 'upload';
+      $('#uploadStatus').textContent = `正在上传 ${files.length} 个文件…`;
+      if (!payload.thread_id) {
+        if (!newUploadThreadId) {
+          const thread = await request('/api/threads', {method:'POST'});
+          newUploadThreadId = thread.thread_id;
+        }
+        payload.thread_id = newUploadThreadId;
+      }
+      const form = new FormData();
+      form.append('thread_id', payload.thread_id);
+      for (const file of files) form.append('files', file, file.name);
+      await request('/api/upload', {method:'POST', body:form});
+      $('#uploadStatus').textContent = `已上传 ${files.length} 个文件，正在提交任务…`;
+      stage = 'submit';
+    }
     const data = await request('/api/task', {method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({query, input_text:$('#inputText').value || null,
-        network_policy:$('#forbidNetwork').checked ? 'forbidden' : 'allowed',
-        skill_ids:skillIds, business_mode:mode, thread_id:$('#threadSelect').value || null})});
+      body:JSON.stringify(payload)});
+    clearUploads();
+    if (files.length) $('#uploadStatus').textContent = `已上传 ${files.length} 个文件并提交任务；文件保留在该会话中。`;
     const session = createSession(data.thread_id, query, data.run_id);
     session.status = 'queued'; input.value = ''; $('#inputText').value = ''; notify('任务已接收');
     await syncSession(session);
   } catch (error) {
     if (epoch !== authEpoch) return;
+    if (selectedUploads.length) $('#uploadStatus').textContent = stage === 'upload'
+      ? (error.status === 413 ? '文件超过服务端允许的大小，任务未提交。请移除过大的文件后重试。'
+        : '上传失败，任务未提交。已保留所选文件，请检查后重试。')
+      : '文件已选，任务未提交成功。请检查提示后重试；已上传的文件仍保留在会话中。';
     if (error.status === 409) {
       const session = createSession(error.data.thread_id, '该会话正在执行的任务', error.data.run_id);
       notify('该会话忙碌，已显示正在执行的任务。请等待、取消，或选择新会话。');
       await syncSession(session);
     } else notify('提交失败：' + error.message);
-  } finally { if (epoch === authEpoch) { submitting = false; $('#sendBtn').disabled = !authenticated || skillCatalog === null; } }
+  } finally { if (epoch === authEpoch) { submitting = false; renderUploads(); $('#sendBtn').disabled = !authenticated || skillCatalog === null; } }
 }
 async function cancelRun() {
   const session = sessions[activeSessionId];
@@ -537,6 +585,29 @@ $('#runSummary').addEventListener('click', e => {
   if (e.target.id === 'syncBtn' && sessions[activeSessionId]) syncSession(sessions[activeSessionId]);
 });
 $('#modeSelect').addEventListener('change', applyRequiredSkills);
+$('#selectFilesBtn').addEventListener('click', () => $('#uploadInput').click());
+$('#uploadInput').addEventListener('change', event => {
+  if (submitting) return;
+  const files = Array.from(event.target.files);
+  event.target.value = '';
+  if (!files.length) return;
+  const combined = [...selectedUploads, ...files];
+  if (combined.length > 20) { $('#uploadStatus').textContent = '最多选择 20 个文件，请先移除部分文件。'; return; }
+  if (new Set(combined.map(file => file.name.toLowerCase())).size !== combined.length) {
+    $('#uploadStatus').textContent = '文件名重复，请移除已有同名文件后重新选择。'; return;
+  }
+  selectedUploads = combined; newUploadThreadId = null;
+  renderUploads(); $('#uploadStatus').textContent = `已选择 ${combined.length} 个文件，发送任务时上传。文件上传后保留在所选会话，同名文件会覆盖。`;
+});
+$('#uploadList').addEventListener('click', event => {
+  const button = event.target.closest('[data-remove-upload]');
+  if (!button || submitting) return;
+  selectedUploads.splice(Number(button.dataset.removeUpload), 1); newUploadThreadId = null;
+  renderUploads(); $('#uploadStatus').textContent = selectedUploads.length
+    ? `已选择 ${selectedUploads.length} 个文件，发送任务时上传。`
+    : '未选择文件。文件上传后保留在所选会话，同名文件会覆盖。';
+});
+$('#threadSelect').addEventListener('change', () => { newUploadThreadId = null; });
 $('#retrySkillsBtn').addEventListener('click', () => loadSkillCatalog().catch(error => notify('技能选项更新失败：' + error.message)));
 $('#queryInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); } });
 initializeAuthentication().catch(error => { $('#authMessage').textContent = error.message; });

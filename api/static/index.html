@@ -174,6 +174,15 @@
   .skill-choices { display:flex; gap:16px; flex-wrap:wrap; align-items:center; }
   select { background:var(--panel); color:var(--text); border:1px solid var(--border); padding:5px; border-radius:5px; }
   .notice { padding:8px 20px; color:var(--orange); min-height:34px; font-size:13px; }
+  .upload-area { padding:10px 20px; border-bottom:1px solid var(--border); font-size:13px; }
+  .upload-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .upload-hint, #uploadStatus { color:var(--text-dim); font-size:12px; line-height:1.6; }
+  #uploadStatus { margin-top:6px; }
+  .upload-list { list-style:none; display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+  .upload-list:empty { display:none; }
+  .upload-list li { display:flex; align-items:center; gap:8px; min-width:0; max-width:100%; padding:6px 10px; background:var(--panel); border:1px solid var(--border); border-radius:7px; }
+  .upload-name { overflow-wrap:anywhere; }
+  .upload-list .btn { padding:3px 8px; font-size:12px; }
   .run-summary { padding:12px 20px; border-bottom:1px solid var(--border); font-size:13px; }
   .answer { white-space:normal; overflow-wrap:anywhere; padding:16px 20px; line-height:1.7; border-bottom:1px solid var(--border); max-height:32vh; overflow:auto; }
   details { color:var(--text-dim); margin-top:6px; font-size:12px; }
@@ -234,6 +243,15 @@
   <summary>待加工原文（可选）</summary>
   <textarea id="inputText" aria-label="待加工原文" rows="4" style="width:100%" placeholder="粘贴需要改写、整理或核对的原文；操作要求写在上方问题栏。"></textarea>
 </details>
+<section class="upload-area" aria-label="上传分析材料">
+  <div class="upload-controls">
+    <button id="selectFilesBtn" class="btn btn-ghost" type="button">选择文件</button>
+    <input id="uploadInput" type="file" multiple hidden accept=".pdf,.docx,.xlsx,.xls,.txt,.text,.md,.csv,.json,.py,.yml,.yaml,.log,.html,.xml,.tsv,.toml,.rst,.sql,.js,.ts,.rs,.sh,.bat,.ps1">
+    <span class="upload-hint">支持 PDF、Word（.docx）、Excel 和 UTF-8 文本；最多 20 个文件，发送任务时上传。</span>
+  </div>
+  <ul id="uploadList" class="upload-list" aria-label="已选文件"></ul>
+  <p id="uploadStatus" role="status" aria-live="polite">文件上传后保留在所选会话，后续任务可继续使用；上传同名文件会覆盖。扫描件不支持文字识别。</p>
+</section>
 <div class="options">
   <label>发送到 <select id="threadSelect" aria-label="发送到"><option value="">新会话</option></select></label>
   <label><input id="forbidNetwork" type="checkbox" /> 禁止本轮联网</label>
@@ -264,6 +282,6 @@
 <script src="/static/run-events.js?v=owner-session-v1"></script>
 <script src="/static/vendor/marked.umd.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/app.js?v=owner-session-v1"></script>
+<script src="/static/app.js?v=file-upload-v1"></script>
 </body>
 </html>
