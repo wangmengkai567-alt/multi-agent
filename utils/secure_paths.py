@@ -1,3 +1,4 @@
+# 路径安全公共层：文件名、目录边界及符号链接检查由上传、工具和下载共同使用。
 """Shared containment rules for tools, uploads, downloads and static files."""
 
 import re
@@ -43,6 +44,7 @@ def _check_reparse(path):
         raise PathDenied("Symlinks and junctions are not allowed")
 
 
+# 先拒绝路径穿越及危险路径形式，再逐级检查重解析点，最后核对解析后的真实目录边界。
 def confined_path(value, root, *, virtual=False):
     if not isinstance(value, str) or not value or "\x00" in value:
         raise PathDenied("Invalid file path")
@@ -57,6 +59,7 @@ def confined_path(value, root, *, virtual=False):
     for ancestor in root.parents:
         _check_reparse(ancestor)
     path = Path(normalized)
+    # 框架的 /uploads/a.txt 是虚拟根路径，应映射到本轮工作目录，而非本机磁盘根目录。
     if virtual and not win.drive:
         candidate = root / normalized.lstrip("/")
     else:
@@ -94,6 +97,7 @@ def iter_confined_files(root):
                 continue
 
 
+# 业务路径绑定当前轮次；技能目录单独授权且只读，上传原件和保存的查询结果也禁止改写。
 def resolve_run_path(filename, *, write=False, virtual=False):
     from agent.runtime.context import get_run_context
     from agent.runtime.policies import PROJECT_ROOT, policy_for_run

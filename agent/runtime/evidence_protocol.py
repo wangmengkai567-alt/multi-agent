@@ -1,3 +1,4 @@
+# 证据协议：把工具真实返回转换为统一来源记录，保留归属、位置和完整性摘要。
 """Explicit tool evidence adapters and runtime-owned, versioned source records."""
 
 import copy
@@ -321,6 +322,7 @@ def adapter_for_tool(tool):
     return adapter_by_id((tool.metadata or {}).get(METADATA_KEY))
 
 
+# 为工具声明明确的证据适配器；运行时据此区分控制操作、检索、数据库和文档结果。
 def evidence_tool(adapter_id):
     adapter_by_id(adapter_id)
 
@@ -359,6 +361,7 @@ def bind_framework_tools(middleware):
     return middleware
 
 
+# 身份由运行时提供，适配器只整理实际载荷；成功执行且通过校验的结果才能提供来源。
 def make_record(call, content, artifact=None):
     """Identity comes from the runtime; adapters may only normalize actual payloads."""
     from agent.results import clean
@@ -432,6 +435,7 @@ def validate_source(value, adapter):
     return source
 
 
+# 消费证据时重新核对轮次、会话、任务归属和摘要，拒绝串用或采集后被修改的记录。
 def validate_record(record, context):
     if record.get("protocol_version") != PROTOCOL_VERSION:
         raise EvidenceError("Unsupported tool evidence protocol")

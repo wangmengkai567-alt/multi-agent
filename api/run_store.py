@@ -1,3 +1,4 @@
+# 运行存储层：用事务维护运行状态和事件，所有资源读取都受持久所有者约束。
 """Versioned SQLite run records with atomic admission and terminal transitions."""
 
 import asyncio
@@ -378,6 +379,7 @@ class RunStore:
         async with self._lock:
             return await self._list_subtasks(run_id)
 
+    # 子任务状态与对应事件同事务提交，避免页面收到状态变化但数据库没有相应记录。
     async def record_subtask(self, record, event):
         """Persist the lifecycle row and its event in one transaction."""
         async with self._lock:
@@ -457,6 +459,7 @@ class RunStore:
                 await self.connection.rollback()
                 raise
 
+    # 在调用方持锁的事务内分配每轮递增序号，用于浏览器按游标回放和去重。
     async def _append_event(self, event):
         record = await self._get(event["run_id"])
         if record is None or record["thread_id"] != event["thread_id"]:
@@ -546,6 +549,7 @@ class RunStore:
             ) as cursor:
                 return [dict(row) for row in await cursor.fetchall()]
 
+    # 同一会话只允许一轮处于排队或运行中；冲突时返回已有运行 ID，供前端定位。
     async def create(self, thread_id: str, question: str, *, run_id: str | None = None, event=None) -> dict:
         run_id = run_id or str(uuid4())
         validate_identifier(run_id)
@@ -630,6 +634,7 @@ class RunStore:
                 await self.connection.rollback()
                 raise
 
+    # 只允许活动状态首次转为终态，后续成功、取消或迟到回调不能重写已保存的结果。
     async def finish(self, run_id: str, status: str, *, answer=None, error=None, event=None, coverage="unknown"):
         if status not in TERMINAL:
             raise ValueError(f"Not a terminal status: {status}")

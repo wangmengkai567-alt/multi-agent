@@ -1,3 +1,4 @@
+# 交付流程：累计实际读取范围，核对分工和来源要求，最终原子保存用户看到的正文。
 """Track actual upload reads and deliver exactly the final user-visible answer."""
 
 import json
@@ -22,6 +23,7 @@ def _range_covered(extent, ranges):
         for a, b, c, d in ranges
         if a <= bottom and b >= top and c <= right and d >= left
     ]
+    # 将行坐标按读取区间边界切成条带，再合并每条带的列区间，判断整块区域是否无缺口。
     boundaries = sorted({top, bottom + 1, *(r for a, b, _, _ in clipped for r in (a, b + 1))})
     for start, end in zip(boundaries, boundaries[1:], strict=False):
         cursor = left
@@ -48,6 +50,7 @@ def _document_read_complete(context, file, digest, artifact):
         return coverage.complete and not coverage.missing
     with context.budget_lock:
         key = str(file)
+        # 同一文件快照的分次读取可以累计；文件摘要变化后必须重新计算覆盖范围。
         state = context.document_coverage.get(key)
         if state is None or state["sha256"] != digest:
             state = dict(sha256=digest, parser=source.parser, extents=coverage.extents, ranges={}, missing=[])
@@ -130,6 +133,7 @@ async def finalize_answer(context, answer):
         for name in context.required_uploads
         if str(confined_path("uploads/" + name, context.work_dir)) not in context.upload_reads
     ]
+    # 调查任务若没有任何有效分工结果，就不能生成看似成功的调查文件。
     if (rows or context.task_rejections or missing or unread) and not successes:
         raise RuntimeError("本轮调查未取得有效分工结果，不能生成调查结论或成功文件；详见来源要求和子任务错误记录")
     allowed = set(cited_urls(context.user_query))
@@ -142,6 +146,7 @@ async def finalize_answer(context, answer):
         allowed.update(cited_urls(context.input_text))
     if {source_page(url) for url in cited_urls(answer)} - {source_page(url) for url in allowed}:
         raise ValueError("最终答复包含实际输入和工具结果中不存在的来源 URL")
+    # 分工失败、缺少必需来源或材料未读全时，保留有效结果并在正文中明确标注部分完成。
     notices = []
     for row in successes:
         if row["unfinished"]:
@@ -168,6 +173,7 @@ async def finalize_answer(context, answer):
     ]
     if limitations:
         answer += "\n\n【读取与执行限制】\n\n" + "\n\n".join(limitations)
+    # 文件与返回正文使用同一份脱敏后的 UTF-8/CRLF 字节内容，便于核对交付一致性。
     answer = redact_text(answer).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r\n")
     if not answer.strip():
         raise ValueError("Final answer must not be empty")
@@ -176,6 +182,7 @@ async def finalize_answer(context, answer):
     path = confined_path("answer.md", context.work_dir)
     temporary = confined_path(".answer.tmp", context.work_dir)
     try:
+        # 先写临时文件；持锁确认任务仍有效后再替换正式文件，避免发布半写入或迟到正文。
         with temporary.open("xb") as stream:
             stream.write(raw)
         with context.budget_lock:

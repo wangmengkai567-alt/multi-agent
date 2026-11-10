@@ -1,3 +1,4 @@
+# 受控子进程调用：阻塞的外部服务和文档解析通过 JSON 管道执行，超时或取消时回收进程。
 """Bounded local RPC: only fixed provider operations, no pickled handlers or run-context copies."""
 
 import json
@@ -39,6 +40,7 @@ def run_operation(operation, payload, *, seconds, on_event=None):
         if monotonic() >= deadline:
             raise ToolCallTimeout(operation, seconds)
 
+    # 等待进程容量时持续检查停止信号；排队时间同样计入本次操作时限。
     while not _slots.acquire(timeout=0.02):
         check()
     owned, reader, writer = None, None, None
@@ -82,6 +84,7 @@ def run_operation(operation, payload, *, seconds, on_event=None):
             except queue.Empty:
                 continue
             event = item.get("event")
+            # 外部请求发出前先由主进程授权，授权成功才通知子进程继续发送。
             if event == "progress":
                 if on_event is not None:
                     on_event(item)
@@ -105,6 +108,7 @@ def run_operation(operation, payload, *, seconds, on_event=None):
             else:
                 raise WorkerOperationError(dict(category="execution", message="Worker exited without a valid result"))
     finally:
+        # 无论成功失败都先确认子进程结束，再关闭管道并归还容量；回收失败不能继续放行。
         if owned is not None:
             owned.close()  # A failed reap retains its capacity slot and stops the run.
         if scope is not None and owned is not None:

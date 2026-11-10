@@ -1,10 +1,11 @@
-/* Run views persist identities only; the server owns answers, events and status. */
+/* 页面按运行 ID 管理视图；答案、事件和状态以服务端持久记录为准。 */
 const sessions = Object.create(null);
 let activeSessionId = null;
 let submitting = false;
 let fileRequest = 0;
 let authenticated = false;
 let csrfToken = null;
+// 登录代次用于识别过期异步响应，避免退出或重新登录后旧请求继续修改页面。
 let authEpoch = 0;
 let authTimer = null;
 const authChannel = new BroadcastChannel('multiagent.auth.v1');
@@ -22,10 +23,11 @@ let skillCatalog = null;
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[c]));
 }
-// Preserve numeric ranges like 22~23 and require ~~ for strikethrough.
+// 保留 22~23 这样的数值范围；只有双波浪号才按 Markdown 删除线解析。
 if (typeof marked !== 'undefined') marked.use({tokenizer:{del(src) {
   return src.startsWith('~~') ? false : undefined;
 }}});
+// Markdown 转成 HTML 后先清理允许的标签、属性和链接，再写入页面。
 function renderAnswer(element, text) {
   if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
     element.textContent = text;
@@ -66,6 +68,7 @@ function lockAuthentication(message = '请登录后继续。已提交的任务�
   for (const id of Object.keys(skills)) delete skills[id];
   $('#threadSelect').innerHTML = '<option value="">新会话</option>'; notify(''); updateWSStatus();
 }
+// 统一附带同源 Cookie；写请求加 CSRF 令牌，并忽略登录代次已经变化的响应。
 async function request(url, options = {}) {
   if (!authenticated) throw Object.assign(new Error('请先登录'), {status:401});
   const epoch = authEpoch;
@@ -210,6 +213,7 @@ function createSession(threadId, query, runId, select = true) {
   persist();
   return session;
 }
+// 先验证运行归属并按事件序号去重；只有更新的生命周期事件才能推进界面状态。
 function applyEvent(session, event) {
   if (sessions[session.runId] !== session || event.run_id !== session.runId || event.thread_id !== session.id) return;
   if (!Number.isSafeInteger(event.event_seq) || event.event_seq < 1 || session.seen.has(event.event_seq)) return;
@@ -253,7 +257,7 @@ async function syncSession(session) {
       event.run_id === session.runId && event.thread_id === session.id &&
       Number.isSafeInteger(event.event_seq) && event.event_seq > seq ? event.event_seq : seq, 0);
     for (const e of history.events) applyEvent(session, e);
-    // Preserve newer live lifecycle state; persisted terminal snapshots supply the full output.
+    // 历史查询不能覆盖更新的实时状态；持久化终态快照则提供完整的最终输出。
     if (session.status === 'unknown' || !activeStates.has(history.run.status) ||
         (activeStates.has(session.status) && historySeq >= session.statusSeq)) {
       session.statusSeq = Math.max(session.statusSeq, historySeq);
@@ -270,7 +274,7 @@ async function syncSession(session) {
       session.stream = new RunEventStream(session.id, session.runId, e => applyEvent(session, e), socket => {
         session.ws = socket; updateWSStatus();
       }, checkAuthentication);
-      // These events are already applied, so reconnect from the last contiguous event.
+      // 已展示的事件加入去重集合；重连游标只推进到连续序号，避免跳过中间缺失事件。
       for (const e of session.logs) session.stream.seen.add(session.runId + ':' + e.event_seq);
       while (session.seen.has(session.stream.afterSeq + 1)) session.stream.afterSeq++;
       session.stream.connect();
@@ -363,6 +367,7 @@ function renderLog(session) {
   area.innerHTML = renderCallGroups(session, openDetails) || '<div class="empty-state">等待执行记录…</div>';
   if (follow) area.scrollTop = area.scrollHeight;
 }
+// 沿调用 ID、别名和父调用关系归组，让每次工具调用显示在实际所属的专家下面。
 function callGroups(session) {
   const agents = new Map(), aliases = new Map();
   for (const event of session.logs) {
@@ -445,6 +450,7 @@ function renderCallGroups(session, openDetails = new Set()) {
       <summary>${escapeHtml(title)} · ${toolNumber} 次工具调用</summary>${rows}</details>`;
   }).join('');
 }
+// 提交后用服务端生成的会话/运行 ID 建立视图，再同步历史和订阅实时事件。
 async function sendTask() {
   const epoch = authEpoch;
   const input = $('#queryInput'), query = input.value.trim();
@@ -491,6 +497,7 @@ function updateWSStatus() {
   $('#wsStatus').textContent = !current ? '就绪' : activeStates.has(current.status) ?
     (connected ? '实时进度已连接' : '连接中断，正在重连') : '查看已保存记录';
 }
+// 文件请求递增编号：快速切换运行时，只允许最后发出的文件请求更新列表。
 async function refreshFiles() {
   const version = ++fileRequest, session = sessions[activeSessionId], list = $('#fileList');
   if (!session) { list.innerHTML = '<div class="empty-state">选择任务后查看本轮文件</div>'; return; }
@@ -505,6 +512,7 @@ async function refreshFiles() {
     if (version === fileRequest) list.textContent = error.status === 404 ? '本轮暂无文件' : '文件读取失败：' + error.message;
   }
 }
+// 本地仅恢复任务索引；每轮状态、答案和日志都重新向服务端读取。
 async function restoreSessions() {
   let saved;
   try { saved = JSON.parse(localStorage.getItem(storageKey) || '{}') || {}; }

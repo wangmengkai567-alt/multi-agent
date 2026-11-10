@@ -1,3 +1,4 @@
+# 工具执行边界：执行前校验权限和预算，返回后校验证据，并在各阶段记录事件。
 """Fixed project hook pipeline around actual execution (sync and async)."""
 
 import asyncio
@@ -40,6 +41,7 @@ class HookCall:
     source_kind: str | None = None
     evidence_adapter: str | None = None
     executed: bool = False
+    # 执行完成与结果可采信分别记录：工具返回后，结果仍可能因证据校验失败而被拒绝。
     execution_status: str = "not_started"
     result_status: str = "unavailable"
     stage: str = "admission"
@@ -137,6 +139,7 @@ class HookPipeline:
             try:
                 handler(call)
             except Exception as exc:
+                # 控制钩子失败立即阻止执行；记录钩子失败则保留错误，并继续调用其余记录器。
                 if name in CONTROL_HOOKS and not getattr(handler, "record_only", False):
                     raise
                 logger.exception("Hook record was NOT saved: %s", name)
@@ -210,6 +213,7 @@ class HookToolMiddleware(AgentMiddleware):
             target=tool["args"].get("subagent_type") if tool["name"] == "task" else None,
         )
 
+    # 工具真正执行前统一检查：当前轮次仍有效、工具已注册、参数合法、目标专家获准。
     def _before(self, request, call):
         if context := get_run_context():
             context.check_active()
@@ -239,9 +243,8 @@ class HookToolMiddleware(AgentMiddleware):
                 raise HookRejected("本轮联网权限不允许执行该工具")
             try:
                 parsed_args = tool.tool_call_schema.model_validate(call.args).model_dump(exclude_unset=True)
-                # Validate policy against the same values the tool will actually use
-                # (e.g. compatible transports encode integers/arrays as strings).
-                # Preserve unknown fields so policy can still reject extra task args.
+                # 按工具实际使用的类型解析参数，再进行策略检查，例如把字符串形式的整数转回整数。
+                # 保留未知字段，让策略层仍能识别并拒绝多余的 task 参数。
                 call.args = {**call.args, **parsed_args}
                 request.tool_call["args"] = call.args
             except ValidationError as exc:
@@ -277,7 +280,7 @@ class HookToolMiddleware(AgentMiddleware):
 
         name = call.actor.rsplit(":", 1)[-1]
         if name == "task":
-            return None  # The run deadline controls sequential expert execution.
+            return None  # 专家串行执行由整轮截止时间约束，不套用普通工具的单次时限。
         if "admitted_timeout" in call.workflow_data:
             return call.workflow_data["admitted_timeout"]
         return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None
@@ -310,6 +313,7 @@ class HookToolMiddleware(AgentMiddleware):
             additional_kwargs={"runtime_error": dict(error_details(call), message=error_message(call.error))},
         )
 
+    # 返回消息必须对应本次调用；显式错误响应即使没有抛异常，也不能记为成功。
     def _returned(self, call):
         if context := get_run_context():
             context.check_active()
@@ -326,6 +330,7 @@ class HookToolMiddleware(AgentMiddleware):
         else:
             call.status = "completed"
 
+    # 每次尝试只收尾一次：采集并验证工具证据，再发出 after_tool 事件。
     def _after(self, request, call, started):
         if call.terminal_recorded:
             return
@@ -425,6 +430,7 @@ class HookToolMiddleware(AgentMiddleware):
         finally:
             active_call.reset(token)
 
+    # 异步执行也走相同的校验和记录链；仅按恢复策略允许的错误安排有界重试。
     async def awrap_tool_call(self, request, handler):
         call = self._call(request)
         token = active_call.set(call)

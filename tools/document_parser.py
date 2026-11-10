@@ -1,3 +1,4 @@
+# 文档解析：统一输出正文、可定位片段和覆盖范围；不执行 OCR、公式计算或文档中的指令。
 """Bounded, located document extraction. No OCR, formula evaluation or silent previews."""
 
 import io
@@ -9,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# 大文件需先读取目录再按范围取内容，超过上限时明确报错，不能把截断内容当完整读取。
 MAX_TEXT_CHARS = 200_000
 MAX_CELLS = 20_000
 TEXT_SUFFIXES = {
@@ -85,6 +87,7 @@ class Extraction:
     def result(self, parser, limitations, *, selected=False):
         catalog_only = self.selection.mode == "catalog"
         complete = not catalog_only and not selected and not self.missing
+        # catalog 只代表查看目录，selection 只代表局部读取；同时记录实际区间供交付层累计。
         coverage = dict(
             complete=complete,
             scope="catalog" if catalog_only else "selection" if selected else "supported_content",
@@ -370,6 +373,7 @@ def _word(result, raw):
     )
 
 
+# 按明确支持的后缀分派解析器；统一返回正文、片段、计算项、解析器信息、说明和覆盖元数据。
 def extract_document(file, raw, selection=None):
     result = Extraction(file, DocumentSelection.model_validate(selection or {}))
     suffix = file.suffix.lower()

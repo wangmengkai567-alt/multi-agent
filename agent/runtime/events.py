@@ -1,3 +1,4 @@
+# 事件统一出口：先写入 SQLite，再通知浏览器；通知失败不改变已保存的业务结果。
 """Single persistence outlet for runtime events; delivery follows the DB commit."""
 
 import asyncio
@@ -27,6 +28,7 @@ def redact_text(value: str) -> str:
     return re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", value)
 
 
+# 日志中隐藏参数字符串、正文和敏感字段，并限制深度与长度，避免泄露上传材料或凭据。
 def sanitize(value, *, arguments=False, depth=0):
     """Parameter strings and document bodies are omitted, not merely truncated."""
     if depth > 8:
@@ -129,6 +131,7 @@ class EventSink:
             else:
                 self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
 
+    # 单个消费者按提交顺序持久化事件，数据库为每轮事件生成可回放的递增序号。
     async def _consume(self):
         while True:
             event = await self.queue.get()
@@ -153,7 +156,7 @@ class EventSink:
         self.submit(dict(event, _subtask=dict(record)))
 
     async def flush(self, run_id=None):
-        # Flush thread-safe queue insertions scheduled by synchronous tools.
+        # 先让同步工具线程安排的入队回调执行，再等待队列中的事件全部落库。
         await asyncio.sleep(0)
         await self.queue.join()
         failures = [item for item in self.failures if run_id is None or item[0] == run_id]
@@ -184,7 +187,7 @@ class EventSink:
             await self.flush(context.run_id)
         except EventPersistenceError as exc:
             recording_error = exc
-        # Like Codex task completion, recheck cancellation after the recording barrier.
+        # 等待事件落库期间也可能发生取消，发布完成结果前必须再次核对停止状态。
         if status == "completed":
             status = getattr(context, "stop_status", None) or status
             if status != "completed":
@@ -215,7 +218,7 @@ class EventSink:
             status=status,
             call_id=context.run_id,
         )
-        # Final answers/errors are durable business output, not raw tool parameters.
+        # 最终答复和错误是需完整保存的业务输出，此处使用已脱敏正文，保留完整交付内容。
         event["data"] = data
         saved = await self.store.finish(
             context.run_id,

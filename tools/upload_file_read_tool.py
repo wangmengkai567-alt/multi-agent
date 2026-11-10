@@ -1,3 +1,4 @@
+# 文件读取入口：普通查看与文档证据分开处理，文档证据必须对应本轮契约中的原始上传。
 """Read allowed files; original uploads also expose owned document evidence artifacts."""
 
 import base64
@@ -81,6 +82,7 @@ def read_document(
     contract = assert_contract(context)
     if not file.is_relative_to((context.work_dir / "uploads").resolve()) or not file.is_file():
         raise PathDenied("Document evidence accepts original uploads only")
+    # 仅目录在 uploads 内还不够，还需确认文件已经登记为当前任务的输入。
     relative = file.relative_to(context.work_dir.resolve()).as_posix()
     if not any(m.kind == "upload" and m.reference == relative for m in contract.materials):
         raise PathDenied("Document is not a bound input of the current task")
@@ -92,6 +94,7 @@ def read_document(
         selection.model_dump() if isinstance(selection, DocumentSelection) else selection,
     )
     context.check_active()
+    # 模型看到正文；证据载荷另保留文件摘要、解析器、位置和读取覆盖范围。
     return content, dict(
         document=dict(
             path=file.relative_to(context.work_dir.resolve()).as_posix(),

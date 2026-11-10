@@ -1,3 +1,4 @@
+# 专家工厂：按注册表构建子助手图，再包装为由运行时管理生命周期的可调用对象。
 """Build the three registered expert graphs with the same controlled tool boundary."""
 
 from deepagents.middleware.filesystem import FilesystemMiddleware
@@ -18,6 +19,7 @@ from agent.runtime.skills import ProjectSkillsMiddleware, SkillReadMiddleware
 def validate_model(model, *, needs_tools=False, tools=()):
     if not isinstance(model, BaseChatModel):
         raise ValueError("Model profiles require BaseChatModel")
+    # 客户端不能自行重试，否则会绕过外层预算和调用记录。
     if getattr(model, "max_retries", 0) != 0:
         raise ValueError("Model SDK retries must be zero")
     if needs_tools:
@@ -40,6 +42,7 @@ def build_subagents(registry, models, *, hooks=None):
         maximum = (raw.profile or {}).get("max_input_tokens")
         if type(maximum) is int and spec.summary.trigger_tokens >= maximum:
             raise ValueError("Configure the expert summary trigger below the model context limit")
+        # 子助手对话和框架摘要都经过同一个预算模型，防止摘要调用漏计。
         model = budget_model(raw, "sub_model")
         graph = create_agent(
             model=model,
@@ -64,6 +67,7 @@ def build_subagents(registry, models, *, hooks=None):
             dict(
                 name=spec.agent_id,
                 description=f"{spec.display_name}：{spec.description}",
+                # 图只负责推理；任务身份、排队、来源校验和成功失败状态由此包装层负责。
                 runnable=DelegationRunnable(spec, graph, hooks=hooks, registry=registry),
             )
         )

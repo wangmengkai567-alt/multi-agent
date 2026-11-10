@@ -1,3 +1,4 @@
+# 浏览器认证与请求防护：访问口令、Cookie 和 CSRF 信息只在接口层处理。
 """Single-owner browser sessions. Credentials never enter the agent runtime."""
 
 import asyncio
@@ -78,6 +79,7 @@ def _derive(password, salt):
     return hashlib.scrypt(password.encode("utf-8"), salt=salt, n=16384, r=8, p=1, dklen=32)
 
 
+# 服务与离线迁移共用进程锁，防止同时操作安全数据库。
 class DataLease:
     """A process lease shared by the server and the offline migration command."""
 
@@ -138,7 +140,7 @@ class AuthService:
         return cls(store, settings, (salt, verifier))
 
     async def login(self, password):
-        # Persist a single-owner throttle before expensive password verification.
+        # 先持久化单人账号的尝试次数，再进行较耗时的口令校验，限制连续猜测。
         now = int(time.time())
         async with self.store._lock:
             async with self.store.connection.execute(
@@ -156,6 +158,7 @@ class AuthService:
         candidate = await asyncio.to_thread(_derive, password, self.verifier[0])
         if not hmac.compare_digest(candidate, self.verifier[1]):
             return None, 401
+        # 浏览器持有随机令牌，数据库仅保存其摘要；CSRF 令牌另行生成。
         token = secrets.token_urlsafe(32)
         session = dict(
             token_hash=self.digest(token),
@@ -245,6 +248,7 @@ class SecurityMiddleware:
                 ]
             await send(message)
 
+        # 依次校验访问主机、来源、登录会话和写请求 CSRF，再进入实际接口。
         if headers.get("host", "").lower() != settings.authority:
             return await reject(403, "Host rejected")
         path = scope["path"]
@@ -274,7 +278,7 @@ class SecurityMiddleware:
 
         if not websocket:
             return await self.app(scope, receive, guarded_send)
-        # Check every event as well as idle connections; logout never cancels jobs.
+        # WebSocket 发消息和空闲时都检查会话有效性；退出登录只断开订阅，不取消后台任务。
         ws_lock = asyncio.Lock()
         ws_closed = False
 

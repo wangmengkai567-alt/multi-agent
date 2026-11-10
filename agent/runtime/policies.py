@@ -1,3 +1,4 @@
+# 运行策略集中入口：读取严格配置，校验 SQL 与工具参数，并在调用前核算预算和时限。
 """Validated runtime limits, atomic reservations and fail-closed tool policies."""
 
 import os
@@ -219,6 +220,7 @@ def calls_available(*kinds):
     return True
 
 
+# 同一锁内先检查所有类别，再一次性扣减，避免部分扣费或并发越过预算上限。
 def _reserve_calls(*kinds, charge):
     if not kinds or set(kinds) - set(KINDS):
         raise ValueError("Unknown or empty call category")
@@ -253,6 +255,7 @@ def _reserve_calls(*kinds, charge):
                     task_counts[kind] = task_counts.get(kind, 0) + count
 
 
+# 单次请求取所有适用时限的最小值，不能超过整轮剩余时间。
 def request_timeout(maximum=None, *, model_request=False):
     context = get_run_context()
     context.check_active()
@@ -338,6 +341,7 @@ def validate_sql(query, limits=None):
     Comments, variables, locks, recursive CTEs, external schemas and unapproved
     functions are deliberately outside the first version's SQL contract.
     """
+    # 解析 SQL 语法树，逐节点检查只读结构和表白名单，最后重建带行数上限的查询。
     limits = require_sql_tables(limits)
     if not isinstance(query, str) or not query.strip() or len(query) > limits.max_query_chars:
         raise PolicyError("Invalid SQL query length")
@@ -381,14 +385,14 @@ def validate_sql(query, limits=None):
                 name = node.name.upper() if isinstance(node, exp.Anonymous) else node.sql_name().upper()
                 if name not in SAFE_FUNCTIONS:
                     raise PolicyError(f"SQL function is not permitted: {name}")
-        # Sources resolved as Scope are CTEs/derived queries, never physical tables.
+        # CTE 和派生查询由作用域解析；仅真实物理表需要核对数据库与表白名单。
         for scope in traverse_scope(tree):
             for _, source in scope.sources.items():
                 if isinstance(source, exp.Table):
                     if source.db or source.catalog or not isinstance(source.this, exp.Identifier):
                         raise PolicyError("Cross-schema and table functions are not permitted")
                     validate_table(source.name, limits)
-        # Direct table references must all be scope-resolved (no parser fallback).
+        # 无法解析作用域时直接拒绝，不能跳过表权限检查。
         if not traverse_scope(tree):
             raise PolicyError("SQL scope could not be validated")
         limit = tree.args.get("limit")
@@ -510,6 +514,7 @@ def before_run_policy(call):
     policy_for_run()
 
 
+# 先验证参数和权限，再登记本回合工具次数、搜索次数及重试预算。
 def before_tool_policy(call):
     from agent.runtime.hooks import HookRejected
 

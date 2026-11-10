@@ -1,3 +1,4 @@
+# 主助手入口：构建带权限和预算约束的智能体，并执行每一轮独立任务。
 """Async agent runtime; importing this module does not create clients or files."""
 
 import asyncio
@@ -29,7 +30,7 @@ _initialization_lock = asyncio.Lock()
 
 
 def _build_agent(saver):
-    # These modules load credentials and construct clients, so import only at startup.
+    # 这些模块会加载凭据并创建客户端，延迟到服务启动时导入，避免仅导入模块就产生副作用。
     from deepagents.middleware.filesystem import FilesystemMiddleware
     from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
     from deepagents.middleware.subagents import SubAgentMiddleware
@@ -47,6 +48,7 @@ def _build_agent(saver):
     from agent.subagent_registry import SummaryConfig, load_default_registry
     from tools.upload_file_read_tool import read_file_content
 
+    # 注册表决定有哪些专家及其模型配置；主助手通过 task 工具使用这些专家。
     registry = load_default_registry()
     profiles = {"MAIN"} | {spec.model_config.profile for spec in registry.specs.values()}
     models = {name: create_role_model(name) for name in sorted(profiles)}
@@ -62,6 +64,7 @@ def _build_agent(saver):
         system_prompt=main_agent_content["system_prompt"],
         tools=tools,
         checkpointer=saver,
+        # 中间件将专家选择、只读文件访问、任务契约和工具执行检查接入同一个图。
         middleware=[
             ExpertRegistryMiddleware(registry),
             SerialDelegationMiddleware(),
@@ -81,12 +84,13 @@ def _build_agent(saver):
 async def initialize_agent():
     """Initialize once per service lifetime, including concurrent callers."""
     global main_agent, checkpointer, _resources
+    # 并发请求共享一次初始化；资源全部创建成功后，才向其他请求公开可用实例。
     async with _initialization_lock:
         if main_agent is not None:
             return main_agent
         stack = AsyncExitStack()
         try:
-            load_runtime_policy()  # Reject malformed limits before opening resources or constructing clients.
+            load_runtime_policy()  # 先校验配置，再打开数据库或创建模型客户端。
             checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
             saver = await stack.enter_async_context(AsyncSqliteSaver.from_conn_string(str(checkpoint_db_path)))
             await saver.setup()
@@ -115,6 +119,7 @@ async def run_deep_agent(task_query, session_id):
     """Run the root graph using this round's context and output directory."""
     validate_identifier(session_id)
     context = get_run_context()
+    # API 已提供本轮上下文；直接调用本函数时才自行创建运行 ID、目录并负责收尾。
     standalone = context is None
     if standalone:
         run_id = str(uuid4())
@@ -135,6 +140,7 @@ async def run_deep_agent(task_query, session_id):
             pipeline.emit("before_run", HookCall("main", context.run_id))
         confined_path(".", session_dir)
         session_dir.mkdir(parents=True, exist_ok=True)
+        # 上传区按会话保存，执行前复制到本轮目录，使工具只访问当前轮次的材料。
         upload_dir = project_root_path / "updated" / f"session_{session_id}"
         upload_prompt = ""
         if upload_dir.exists():
@@ -167,7 +173,7 @@ async def run_deep_agent(task_query, session_id):
         禁止访问本机真实绝对路径或其他轮次目录。
         """
         path_instruction += instruction(context)
-        # Each run owns a separate graph frame; historical checkpoints are never resumed.
+        # thread_id 是业务会话 ID；图的检查点使用本轮 run_id，避免恢复上一轮的执行状态。
         config = {"configurable": {"thread_id": validate_identifier(context.run_id)}}
         agent = await initialize_agent()
         monitor.report_session_dir(str(session_dir))
@@ -188,7 +194,7 @@ async def run_deep_agent(task_query, session_id):
         seen_events = set()
         async with aclosing(stream):
             async for chunk in stream:
-                # updates keys identify graph nodes; message type defines the action.
+                # 流式更新按图节点返回；根据消息类型识别工具请求和返回，并按调用 ID 去重。
                 for state in chunk.values():
                     if not isinstance(state, dict):
                         continue
@@ -234,8 +240,7 @@ async def run_deep_agent(task_query, session_id):
                             else:
                                 monitor.report_tool_request(call["name"], call["args"], call["id"])
 
-        # Only the completed root state is authoritative. Intermediate AI text,
-        # tool messages and subagent updates are not final task answers.
+        # 只从已结束的主图状态提取最终答复；中间模型文本、工具消息和子助手更新不算最终结果。
         snapshot = await agent.aget_state(config)
         messages = snapshot.values.get("messages", [])
         final = messages[-1] if messages else None
@@ -255,5 +260,6 @@ async def run_deep_agent(task_query, session_id):
             monitor._emit("error", f"执行主智能发生异常信息：{exc}")
         raise
     finally:
+        # 用 token 恢复调用前的上下文，防止同一服务中的后续任务串用目录或身份。
         reset_session_context(session_token, thread_token)
         reset_run_context(run_token)

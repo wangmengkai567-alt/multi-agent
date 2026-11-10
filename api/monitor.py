@@ -221,6 +221,7 @@ class ConnectionManager:
         self.loop = None
         monitor.set_websocket_manager(None)
 
+    # 从数据库读取游标后的持久事件，既用于首次连接，也用于实时发送时补齐遗漏。
     async def _catch_up(self, websocket, state, run_id):
         if self.store is None:
             return
@@ -232,6 +233,7 @@ class ConnectionManager:
                 await asyncio.wait_for(websocket.send_json(dict(event, type="monitor_event")), timeout=5)
                 state["cursors"][run_id] = event["event_seq"]
 
+    # 连接锁串行化历史回放和实时推送，避免并发发送导致重复或顺序混乱。
     async def connect(self, websocket: WebSocket, thread_id: str, *, run_id=None, after_seq=0):
         await websocket.accept()
         state = {"lock": asyncio.Lock(), "run_id": run_id, "cursors": {run_id: after_seq} if run_id else {}}

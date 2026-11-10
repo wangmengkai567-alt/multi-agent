@@ -1,3 +1,4 @@
+# 委派生命周期：为专家签发任务 ID，控制执行槽位，并核验真实工具来源和最终返回。
 """One lifecycle owner for sequential, runtime-identified expert execution.
 
 Based on openai/codex multi_agents_v2/spawn.rs: model supplies the task,
@@ -34,6 +35,7 @@ class DelegationRunnable(Runnable):
         self.spec, self.executor, self.registry = spec, executor, registry
         self.hooks = hooks or pipeline
 
+    # 执行前校验契约和专家权限，再用程序生成的 ID 建立排队记录。
     def _prepare(self, inputs):
         context = get_run_context()
         if context is None:
@@ -90,7 +92,7 @@ class DelegationRunnable(Runnable):
         return context, call, record
 
     def _save(self, context, call, record, status):
-        # Commit success under the same lock as stop(); late results cannot win.
+        # 与 stop() 共用锁：保存成功前复查停止状态，取消后的迟到结果不能覆盖终态。
         with context.budget_lock:
             if status in ("running", "completed"):
                 context.check_active()
@@ -129,8 +131,10 @@ class DelegationRunnable(Runnable):
         final = messages[-1] if messages else None
         if not isinstance(final, AIMessage) or final.tool_calls or not final.text.strip():
             raise ValueError("Expert did not return a final assistant answer")
+        # 需要工具的专家必须取得有效来源；仅有模型文字不能算调查成功。
         if self.spec.tools and not sources:
             raise ValueError("子任务未取得有效工具结果，不能声明已完成调查")
+        # 最终引用只能来自该子任务实际取得的工具结果，不能凭空生成来源链接。
         allowed = set(source_urls(evidence))
         allowed.update(url for row in sources for url in cited_urls(row["content"]))
         if {source_page(url) for url in cited_urls(final.text)} - {source_page(url) for url in allowed}:
@@ -147,7 +151,7 @@ class DelegationRunnable(Runnable):
         record["result"] = call.result = None
         call.error = error
         status = context.stop_status or ("cancelled" if isinstance(error, asyncio.CancelledError) else "failed")
-        # Like Codex Errored(reason), keep the execution state separate from its timeout cause.
+        # 子任务执行状态记为失败，超时原因另放 error_category，便于界面准确说明。
         if status == "timed_out":
             status = "failed"
         row = context.task_results[call.call_id]
@@ -200,7 +204,7 @@ class DelegationRunnable(Runnable):
         self.hooks.emit("after_subagent", call)
 
     def _inputs(self, context, inputs):
-        # The task stays intact; program-owned materials and permissions are data.
+        # 保留完整任务说明，另附程序绑定的材料索引和联网权限。
         contract = context.task_contract
         binding = json.dumps(
             dict(
@@ -245,6 +249,7 @@ class DelegationRunnable(Runnable):
                 if context.stop_status:
                     context.scheduler.forget_run(context.run_id)
 
+    # 异步入口与同步入口遵循同一流程；ContextVar 将工具证据归到当前子任务。
     async def ainvoke(self, input, config=None, **kwargs):
         context, call, record = self._prepare(input)
         token = active_call.set(call)
@@ -260,6 +265,7 @@ class DelegationRunnable(Runnable):
                     context.scheduler.gate("children"),
                     context.scheduler.expert_gate(self.spec.resources),
                 ):
+                    # 依次约束本轮串行委派、服务总子任务数、该专家资源组并发数。
                     lease = await context.scheduler.aacquire(gate, context, "expert")
                     stack.callback(lease.release)
                 self._start(context, call, record)

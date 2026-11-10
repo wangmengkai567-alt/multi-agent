@@ -1,3 +1,4 @@
+# Web 服务入口：认证后接收任务，安排后台执行，并提供取消、事件回放、上传和下载接口。
 import asyncio
 import json
 import logging
@@ -16,12 +17,12 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles as FastAPIStaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator, model_validator
 
-# Add project root to sys.path
+# 直接执行 api/server.py 时，将项目根目录加入模块搜索路径。
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 sys.path.insert(0, str(project_root))
 
-# Import agent runner and monitor
+# 根目录设置完成后，再导入智能体执行入口和监控模块。
 from agent.main_agent import initialize_agent, run_deep_agent, shutdown_agent  # noqa: E402
 from agent.runtime.context import RunContext, RunStopped, reset_run_context, set_run_context  # noqa: E402
 from agent.runtime.events import EventSink  # noqa: E402
@@ -77,6 +78,7 @@ async def _run_body(record, context):
         reset_run_context(token)
 
 
+# 总时限从提交时开始计算，等待服务执行槽的时间也包含在内。
 async def _execute_run(record, context):
     if context.deadline is None:
         duration = context.policy.timeouts.total_seconds
@@ -113,6 +115,7 @@ async def _execute_run_inner(record, context):
         executions = getattr(app.state, "execution_tasks", set())
         executions.add(worker)
         worker.add_done_callback(lambda task: _execution_finished(task, executions))
+        # 外层只等待本轮剩余时间；超时先设置共享停止状态，收尾时再取消执行协程。
         done, _ = await asyncio.wait({worker}, timeout=max(0, context.remaining()))
         if not done:
             context.stop("timed_out")
@@ -156,6 +159,7 @@ async def lifespan(app):
         lease.close()
 
 
+# 服务启动时打开资源并结算上次中断的运行；关闭时停止接收任务，再依次结束执行和记录。
 @asynccontextmanager
 async def runtime_lifespan(app):
     app.state.agent_tasks = set()
@@ -191,7 +195,7 @@ async def runtime_lifespan(app):
         yield
     finally:
         app.state.stopping = True
-        # Wait for an admission already in progress before snapshotting tasks.
+        # 等待已进入提交阶段的请求结束，再收集任务，避免关机时遗漏刚接收的运行。
         async with app.state.submission_lock:
             tasks = list(app.state.agent_tasks)
         for context in list(app.state.run_contexts.values()):
@@ -234,7 +238,7 @@ async def scheduling_backpressure(request, error):
     return JSONResponse(status_code=503, content={"status": "busy", "detail": str(error)})
 
 
-# Artifact roots are private; downloads always resolve through an owned run.
+# 产物根目录不直接公开；下载必须先通过所属运行记录定位目录。
 output_dir = project_root / "output"
 
 
@@ -263,7 +267,7 @@ def auth_view(session):
 
 @app.post("/api/auth/login")
 async def login(request: Request):
-    # Keep password validation outside Pydantic errors, which echo invalid inputs.
+    # 单独校验登录体，避免 Pydantic 校验错误把用户输入的口令回显到响应。
     if request.url.query:
         raise HTTPException(status_code=400, detail="Login does not accept URL parameters")
     if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
@@ -394,6 +398,7 @@ async def run_task(request: TaskRequest):
         thread_id = request.thread_id
     else:
         thread_id = await app.state.run_store.create_thread()
+    # 提交与关机、取消共用锁，避免它们在运行登记完成前读取到不完整的任务集合。
     async with app.state.submission_lock:
         if app.state.stopping:
             raise HTTPException(status_code=503, detail="Service is shutting down")
@@ -464,6 +469,7 @@ async def get_run(run_id: str):
     return record
 
 
+# 先写入停止信号和终态，再取消协程；正在返回的工具或模型结果会被上下文检查拒绝。
 @app.post("/api/runs/{run_id}/cancel")
 async def cancel_run(run_id: str):
     async with app.state.submission_lock:
@@ -526,7 +532,7 @@ async def upload_files(files: list[UploadFile] = File(...), thread_id: str = For
     if any(file.size is not None and file.size > limit for file in files):
         raise HTTPException(status_code=413, detail="Upload exceeds the configured size limit")
     target_dir.mkdir(parents=True, exist_ok=True)
-    # Stage and validate the whole batch before replacing any existing upload.
+    # 整批文件先写入临时目录并通过大小检查，再逐一替换上传文件，避免校验失败时提前覆盖。
     with tempfile.TemporaryDirectory(dir=target_dir, prefix="upload-") as staging:
         for file, name in zip(files, names, strict=True):
             size = 0
@@ -553,6 +559,7 @@ async def run_workspace(run_id):
         raise HTTPException(status_code=403, detail="Run workspace rejected") from exc
 
 
+# 临时正文不对外提供；answer.md 只有在持久化状态为完成后才能下载。
 def _published_run_file(record, base, file):
     """The durable terminal winner owns final-answer publication."""
     if file == base / ".answer.tmp":
@@ -598,6 +605,7 @@ async def list_files(run_id: str):
     return {"files": files}
 
 
+# 实时订阅绑定具体会话和运行，并用 after_seq 回放断线期间尚未收到的事件。
 @app.websocket("/ws/{thread_id}")
 async def websocket_endpoint(
     websocket: WebSocket, thread_id: str, run_id: str | None = None, after_seq: int = Query(0, ge=0)

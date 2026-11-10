@@ -1,3 +1,4 @@
+# 根据 MAIN、SUB 等角色分别读取 LLM_<角色>_* 配置，创建兼容 OpenAI 协议的客户端。
 """OpenAI-compatible clients with explicit, independent role configuration."""
 
 import json
@@ -26,6 +27,7 @@ def model_options(raw, field_name):
 def create_role_model(role):
     if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,31}", role):
         raise ValueError("Invalid model profile name")
+    # 每个角色独立校验模型名、地址和密钥，缺项直接报错。
     prefix = f"LLM_{role}_"
     settings = {name: os.getenv(prefix + name, "").strip() for name in ("MODEL", "BASE_URL", "API_KEY")}
     missing = [prefix + name for name, value in settings.items() if not value]
@@ -63,11 +65,12 @@ def create_role_model(role):
             "resource_group": load_runtime_policy().scheduler.model_accounts.get(role)
             or account_group("openai", settings["BASE_URL"], settings["API_KEY"])
         },
+        # 禁用 SDK 内部重试，使请求次数和重试都能由运行时统一计量。
         max_retries=0,
         timeout=load_runtime_policy().timeouts.request_seconds,
         **options,
     )
 
 
-# This module is imported only when the application initializes its agent.
+# 仅在应用初始化智能体时导入本模块并加载环境配置。
 load_dotenv(find_dotenv())

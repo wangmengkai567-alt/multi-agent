@@ -1,3 +1,4 @@
+# 本轮共享状态：保存身份、工作目录、权限、预算、停止信号和各专家返回结果。
 """Per-run context shared by async execution and its synchronous tools."""
 
 from contextvars import ContextVar, Token
@@ -16,6 +17,7 @@ class RunStopped(ExecutionTerminated):
 
 @dataclass
 class RunContext:
+    # thread_id 标识可重复提问的会话；run_id 标识其中一次执行，work_dir 只属于这一轮。
     run_id: str
     thread_id: str
     work_dir: Path
@@ -56,6 +58,7 @@ class RunContext:
     call_labels: dict = field(default_factory=dict, repr=False)
     scheduler_ticket: str | None = None
     scheduler: object | None = field(default=None, repr=False)
+    # 异步任务及同步工具线程共用可重入锁，统一保护预算和停止状态。
     budget_lock: object = field(default_factory=RLock, repr=False)
     task_rejections: list = field(default_factory=list, repr=False)
     search_counts: dict = field(default_factory=dict, repr=False)
@@ -76,6 +79,7 @@ class RunContext:
     def task_instruction(self):
         return self.task_contract.instruction_text if self.task_contract is not None else self.user_query
 
+    # 首次停止原因生效；后续取消、超时或完成操作不能覆盖已确定的状态。
     def stop(self, status):
         with self.budget_lock:
             if self.stop_status is None:
@@ -89,6 +93,7 @@ class RunContext:
                 self.terminal_error = error
                 self.stop("failed")
 
+    # 单调时钟不受系统校时影响，优先用于计算剩余执行时间。
     def remaining(self):
         if self.deadline_clock is not None:
             return self.deadline_clock - monotonic()
@@ -96,6 +101,7 @@ class RunContext:
             return (self.deadline - datetime.now(UTC)).total_seconds()
         return None
 
+    # 外部调用前、结果返回后都要检查，阻止已停止任务继续执行或接收迟到结果。
     def check_active(self):
         with self.budget_lock:
             if self.terminal_error is not None:
@@ -107,6 +113,7 @@ class RunContext:
                 raise RunStopped(f"Run has ended: {self.stop_status}")
 
 
+# ContextVar 按当前执行上下文取值，让深层工具无需逐层传参即可找到所属运行。
 _current_run: ContextVar[RunContext | None] = ContextVar("current_run", default=None)
 
 

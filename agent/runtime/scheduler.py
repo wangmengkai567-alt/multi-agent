@@ -1,3 +1,4 @@
+# 服务调度：按先进先出分配运行、专家和外部服务槽位，同时约束账号请求速率。
 """One-process FIFO admission, child concurrency and per-account request pacing."""
 
 import asyncio
@@ -13,6 +14,7 @@ _run_owner = ContextVar("scheduler_run_owner", default=None)
 child_owner = ContextVar("expert_execution_branch", default=None)
 
 
+# 新后台运行不能继承提交请求已有的槽位归属或上一轮上下文。
 def detached_context():
     context = copy_context()
     context.run(_run_owner.set, None)
@@ -41,13 +43,14 @@ class Gate:
 
     def enqueue(self):
         with self.lock:
-            # An available slot does not consume queue capacity.
+            # 可立即运行的名额不占等待队列容量，因此总容量为并发数加排队上限。
             if self.active + len(self.waiters) >= self.limits.concurrency + self.limits.queue_capacity:
                 raise QueueFull("Scheduling queue is full")
             ticket = str(uuid4())
             self.waiters.append(ticket)
             return ticket
 
+    # 只有队首且满足并发和发送间隔时才能进入，避免后来请求越过排队者。
     def ready(self, ticket):
         with self.lock:
             if not self.waiters or self.waiters[0] != ticket or self.active >= self.limits.concurrency:
@@ -113,6 +116,7 @@ class ServiceScheduler:
                 self.gates[key] = Gate(limits)
             return self.gates[key]
 
+    # 每轮最多同时运行一个专家；不同轮次仍共享服务级子任务资源池。
     def child_gate(self, context):
         from agent.runtime.policies import PoolLimits
 
@@ -177,13 +181,13 @@ class ServiceScheduler:
                     self._check_wait(context)
                     if gate.ready(ticket):
                         break
-                    # No network, model budget or execution slot is held by a waiter.
+                    # 等待期间不发送请求、不扣模型预算，也不占用正在等待的执行槽。
                     sleep(0.02)
             self._check_wait(context)
             self.event(context, "started", label, started)
             return Lease(gate)
         except BaseException:
-            # ready() has consumed the ticket iff it is absent; release only our lease.
+            # 票据已被 ready() 消费时释放槽位；仍在队列中则只取消排队。
             with gate.lock:
                 if ticket not in gate.waiters:
                     gate.release()
@@ -220,7 +224,7 @@ class ServiceScheduler:
     @asynccontextmanager
     async def run_slot(self, context):
         if _run_owner.get() is self:
-            # Reentrant execution shares the existing service slot.
+            # 同一执行上下文重入时复用已持有的服务槽位，避免重复占用。
             yield
             return
         lease = await self.aacquire(self.gate("runs"), context, "runs", context.scheduler_ticket)

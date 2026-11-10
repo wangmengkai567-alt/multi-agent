@@ -1,3 +1,4 @@
+# 数据库工具：语法树校验、表白名单、账号权限检查和只读事务共同约束实际查询。
 """Read-only MySQL tools: validated SQL, verified grants and bounded reads."""
 
 import csv
@@ -81,6 +82,7 @@ def readonly_cursor(config, limits):
     with connect(**config) as connection:
         try:
             with connection.cursor() as cursor:
+                # 不只相信只读账号名称，还要核验实际授权，然后开启只读事务。
                 cursor.execute("SHOW GRANTS")
                 validate_readonly_grants(cursor.fetchall(), config["database"])
                 cursor.execute("SET SESSION MAX_EXECUTION_TIME = %s", (limits.timeout_seconds * 1000,))
@@ -135,6 +137,7 @@ def execute_worker(payload):
         cursor.execute(query)
         if not cursor.description:
             raise PolicyError("Query did not return a read-only result set")
+        # SQL 本身和结果读取都限制行数，避免将整张大表装入内存或模型上下文。
         rows = cursor.fetchmany(limits.max_rows)
         output = io.StringIO(newline="")
         writer = csv.writer(output, lineterminator="\n")
@@ -151,6 +154,7 @@ def execute_worker(payload):
         return output.getvalue()
 
 
+# 数据库连接和查询放到受控子进程中，整次操作受运行时剩余时限约束。
 def database_operation(action, **parameters):
     from agent.runtime.workers import run_operation
 

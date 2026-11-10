@@ -1,3 +1,4 @@
+# 任务契约：把用户输入、上传文件摘要和权限绑定为不可变快照，供后续动作核对。
 """Program-owned input snapshots and permissions, with no model routing prerequisite."""
 
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ class TaskContract:
         return self.network_policy == "allowed"
 
 
+# 绑定的是本轮上传副本和显式输入；模型生成的说明不能改变这些权限。
 def bind_contract(context):
     context.check_active()
     if context.task_contract is not None:
@@ -87,6 +89,7 @@ def assert_contract(context):
         context.business_mode,
     ):
         raise ValueError("Locked task inputs or permissions changed")
+    # 每次校验都核对上传文件字节摘要，避免绑定之后材料被替换而仍沿用旧来源。
     for material in contract.materials:
         if material.kind == "upload":
             path = confined_path(material.reference, context.work_dir)

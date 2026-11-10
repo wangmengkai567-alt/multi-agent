@@ -1,3 +1,4 @@
+# 模型包装层：主助手、子助手和摘要调用统一受并发、上下文大小、预算和超时约束。
 """Count every model invocation, including framework summarization."""
 
 import asyncio
@@ -86,6 +87,7 @@ class BudgetChatModel(BaseChatModel):
         finally:
             measured.finish(message, error)
 
+    # 先取得账号执行槽，再校验上下文和扣减预算；模型返回后复查本轮是否已经停止。
     async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
         context = get_run_context()
         measured = self._measurement(messages, run_manager)
@@ -117,6 +119,7 @@ class BudgetChatModel(BaseChatModel):
             measured.finish(message, error)
 
 
+# 保留模型工具能力和资源分组，同时禁止缓存跳过实际调用的计量过程。
 def budget_model(model, category):
     if isinstance(model, BudgetChatModel) and model.category == category:
         return model

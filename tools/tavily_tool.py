@@ -1,3 +1,4 @@
+# 联网工具：模型只接收有界摘要，工具原始响应保留为证据，并受联网权限与调用预算约束。
 """Bounded search output for models; original provider evidence stays in the artifact."""
 
 import ipaddress
@@ -142,9 +143,11 @@ def internet_search(
         include_raw_content=include_raw_content,
         search_depth=search_depth,
     )
+    # content 提供给模型阅读，artifact 保留原始响应供证据协议核验。
     return compact_search_response(payload, limits, query), payload
 
 
+# 网页读取只允许当前子任务观察到的公开域名，或任务中用户给出的 URL 所属域名。
 def validate_page_request(url, query):
     """Only this delegation's observed public origins (or user-provided URLs)."""
     from agent.reflection import source_urls, tool_evidence
@@ -201,7 +204,7 @@ def read_web_page(
     payload = provider_operation(
         "extract", key, limits, urls=[url], query=query, chunks_per_source=5, extract_depth="advanced", format="text"
     )
-    # Keep rejected rows as failure evidence, never as readable/citable page results.
+    # 登录页、错误页等保留为失败记录，不混入可供引用的有效正文来源。
     results = web_results(payload)
     rejected = [
         dict(
@@ -239,6 +242,7 @@ def provider_operation(kind, key, limits, **parameters):
     context = get_run_context()
     attempts = 0
 
+    # 每次操作仅授权一次实际发送，防止服务 SDK 的隐式重试绕开预算和事件记录。
     def authorize_transport(event):
         nonlocal attempts
         context.check_active()

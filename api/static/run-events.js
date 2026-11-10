@@ -1,4 +1,4 @@
-/* Durable run events: reconnect with a cursor and deduplicate by run/sequence. */
+/* 持久事件订阅：按运行 ID 和事件序号去重，断线后携带游标补齐历史。 */
 class RunEventStream {
   constructor(threadId, runId, onEvent, onState, checkAuthentication) {
     this.threadId = threadId;
@@ -28,9 +28,10 @@ class RunEventStream {
       if (!Number.isSafeInteger(event.event_seq) || event.event_seq < 1) return;
       const id = event.run_id + ':' + event.event_seq;
       if (this.seen.has(id)) return;
-      // Apply before advancing the cursor so a rendering failure can be replayed.
+      // 先应用事件，再更新游标；若页面处理失败，重连后仍能回放该事件。
       this.onEvent(event);
       this.seen.add(id);
+      // 仅跨过连续收到的序号，乱序收到较大序号时保留缺口供下一次重连补齐。
       while (this.seen.has(this.runId + ':' + (this.afterSeq + 1))) this.afterSeq++;
     };
     socket.onerror = () => socket.close();
@@ -38,6 +39,7 @@ class RunEventStream {
       this.onState(null);
       if (event.code === 4403) { this.close(); return; }
       if (!this.closed) {
+        // 断线重连逐步延长间隔，上限 10 秒；重连前先确认登录仍有效。
         const delay = Math.min(10000, 500 * 2 ** Math.min(this.attempt++, 5));
         this.timer = setTimeout(async () => {
           this.timer = null;
