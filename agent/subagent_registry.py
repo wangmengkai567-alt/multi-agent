@@ -23,6 +23,7 @@ RESERVED_NAMES = {
 }
 
 
+# 专家使用的模型配置：profile 对应环境变量角色名，max_retries 必须为 0。
 @dataclass(frozen=True)
 class ModelConfig:
     profile: str = "SUB"
@@ -35,6 +36,7 @@ class ModelConfig:
             raise ValueError("Model SDK retries must be zero")
 
 
+# source_kind 用于交付时核对来源要求；network_access 控制专家是否允许联网。
 @dataclass(frozen=True)
 class ExecutionConfig:
     source_kind: str = "other"
@@ -45,6 +47,7 @@ class ExecutionConfig:
             raise ValueError("Invalid expert execution permissions")
 
 
+# group 共用并发槽和等待队列；concurrency、queue_capacity 分别表示执行和排队上限。
 @dataclass(frozen=True)
 class ResourceConfig:
     group: str = "queries"
@@ -60,6 +63,7 @@ class ResourceConfig:
             raise ValueError("Invalid expert queue capacity")
 
 
+# 对话达到 trigger_tokens 后生成摘要；其余字段控制保留的消息及工具参数数量。
 @dataclass(frozen=True)
 class SummaryConfig:
     trigger_tokens: int = 12000
@@ -85,6 +89,7 @@ class SummaryConfig:
         )
 
 
+# 专家定义汇总身份、提示词、工具、Skill、模型与执行资源；注册时统一校验。
 @dataclass(frozen=True)
 class SubagentSpec:
     agent_id: str
@@ -136,6 +141,7 @@ class SubagentSpec:
                 raise ValueError("Tool evidence binding contradicts the expert network permission")
             convert_to_openai_tool(t)
 
+    # 生成本轮锁定的专家能力快照，包含工具 Schema 和证据适配器。
     def contract(self):
         from agent.runtime.evidence_protocol import adapter_for_tool
 
@@ -156,6 +162,7 @@ class SubagentSpec:
         )
 
 
+# 校验专家名称及共享资源组限制，构建不可修改的专家索引。
 class SubagentRegistry:
     def __init__(self, specs):
         registered, groups = {}, {}

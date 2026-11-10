@@ -18,6 +18,7 @@ from utils.secure_paths import confined_path, resource_path, validate_identifier
 ROOT = Path(__file__).resolve().parent.parent
 
 
+# 迁移前备份 data 中已有的 runs.db 和 jobs.db，并记录哪些源数据库存在。
 def backup_databases(data):
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
     directory = data / ("security-backup-" + stamp)
@@ -36,6 +37,7 @@ def backup_databases(data):
     return directory
 
 
+# 在单个事务中迁移任务库，为旧任务绑定所有者；失败时回滚该库的更改。
 def migrate_jobs(path, owner_id, migration_id):
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
@@ -91,6 +93,7 @@ def migrate_jobs(path, owner_id, migration_id):
         connection.close()
 
 
+# 先备份两库，再迁移运行和任务记录；data 是数据库目录，root 是项目根目录。
 async def migrate(data, root):
     backup = backup_databases(data)
     print(f"SQLite backups: {backup}")
@@ -121,6 +124,7 @@ async def migrate(data, root):
                 )
                 await connection.execute("""CREATE TRIGGER immutable_thread_owner BEFORE UPDATE OF owner_id,thread_id ON threads
                     BEGIN SELECT RAISE(ABORT,'Thread ownership is immutable'); END""")
+                # 为历史运行建立独立工作目录关联，并将旧会话绑定到迁移生成的所有者。
                 await connection.execute("ALTER TABLE runs ADD COLUMN workspace TEXT")
                 async with connection.execute("SELECT run_id,thread_id FROM runs") as cursor:
                     runs = await cursor.fetchall()

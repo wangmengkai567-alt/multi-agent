@@ -11,6 +11,7 @@ from agent.runtime.recovery import ToolCallTimeout
 active_tool_scope = ContextVar("active_tool_scope", default=None)
 
 
+# 管理单次工具调用的截止时间和子进程；seconds 为秒，None 表示无单次截止时间。
 class ToolScope:
     def __init__(self, name, seconds):
         self.name, self.seconds = name, seconds
@@ -47,6 +48,7 @@ class ToolScope:
             raise failure
 
 
+# 在工具执行前后检查期限，并在退出时关闭该调用持有的子进程。
 @contextmanager
 def bounded_tool(name, seconds):
     scope = ToolScope(name, seconds)

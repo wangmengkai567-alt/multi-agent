@@ -4,6 +4,7 @@ from copy import deepcopy
 from hashlib import sha256
 
 
+# 核对最终答复、交付摘要与 answer.md 字节完全一致。
 def validate_delivery(context, answer):
     context.check_active()
     draft = context.delivery_draft or {}
@@ -21,6 +22,7 @@ def validate_delivery(context, answer):
         raise RuntimeError("Delivered Markdown is missing or differs from the final answer")
 
 
+# 汇总执行状态、覆盖情况与文件交付状态；只有成功终态才发布交付文件信息。
 def completion_snapshot(context, execution_status):
     draft = getattr(context, "delivery_draft", None) or {}
     # Prepared files become delivery artifacts only for the committed success path.

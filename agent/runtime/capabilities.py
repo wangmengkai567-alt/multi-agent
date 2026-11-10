@@ -22,6 +22,7 @@ def expert_available(context, spec):
     return not (spec.execution.network_access and context.network_policy == "forbidden")
 
 
+# 根据本轮联网权限、输入材料和可用专家判断工具是否可用；network 标识工具实际需要联网。
 def tool_available(context, name, *, network=False, target_specs=None):
     if name in FILE_ACTIONS:
         return False
@@ -42,6 +43,7 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
     def __init__(self, target_specs=None):
         self.target_specs = dict(target_specs or {})
 
+    # 过滤模型可见工具，并将文档引用和专家目标限定为本轮可用值。
     def prepare(self, request):
         context = get_run_context()
         if context is None:

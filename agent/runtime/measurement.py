@@ -39,6 +39,7 @@ def totals(context):
     )
 
 
+# 跟踪一次模型调用的排队、传输、耗时与服务商返回的 Token 用量，不保存请求正文。
 class RequestMeasurement:
     def __init__(self, category, phase, messages):
         from agent.runtime.hooks import active_call
@@ -96,8 +97,7 @@ class RequestMeasurement:
 
         try:
             with self.context.budget_lock:
-                # The adapter synthesizes zero for missing dimensions in normalized
-                # usage_metadata. Use only the supplier's preserved raw usage instead.
+                # 标准化用量可能把缺失项填成 0，因此只采用服务商原始用量，缺失项记为未知。
                 usage = ((message.response_metadata or {}).get("token_usage") or {}) if message is not None else {}
 
                 def units(value):
@@ -154,6 +154,7 @@ class RequestMeasurement:
             active_request.reset(self.token)
 
 
+# HTTP 发送前重新检查实际请求大小并记录字节数；同一次调用只允许一次发送。
 def observe_http_request(request):
     """Runs at the SDK's public HTTP send hook; headers and text never enter the ledger."""
     measurement = active_request.get()
@@ -193,6 +194,7 @@ def observe_http_request(request):
         measurement.http_started = monotonic()
 
 
+# 记录服务商响应状态和收到响应头的耗时，不记录响应内容。
 def observe_http_response(response):
     measurement = active_request.get()
     if measurement is None or measurement.row["transport"] is None:

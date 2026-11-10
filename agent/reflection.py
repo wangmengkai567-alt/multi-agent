@@ -12,6 +12,7 @@ from agent.runtime.hooks import error_category
 tool_evidence = ContextVar("delegated_tool_evidence", default=None)
 
 
+# 将当前工具调用的消息和 artifact 归入所属子任务，并保存逐次调用的证据记录。
 def capture_tool(call):
     collector = tool_evidence.get()
     if collector is None:
@@ -43,6 +44,7 @@ def capture_tool(call):
         write_json(context.work_dir / "results" / "tools" / f"{key}-{call.attempt}.json", item)
 
 
+# 从有效证据中提取去重后的网页 URL。
 def source_urls(evidence):
     from agent.runtime.evidence_protocol import source_rows
 

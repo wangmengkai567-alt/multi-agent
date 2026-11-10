@@ -16,6 +16,7 @@ def append_system(message, text):
     return SystemMessage(content=blocks)
 
 
+# 将专家能力绑定到当前轮次；执行期间定义改变则中断，避免前后使用不同权限。
 def bind_registry(context, registry):
     contract = registry.contract()
     with context.budget_lock:
@@ -40,6 +41,7 @@ class ExpertRegistryMiddleware(AgentMiddleware):
         bind_registry(get_run_context(), self.registry)
 
 
+# 关闭模型并行工具调用；调度器仍会对批量委派执行串行约束。
 class SerialDelegationMiddleware(AgentMiddleware):
     """Ask for one tool at a time; the runtime also serializes batched tasks."""
 

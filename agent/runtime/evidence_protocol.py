@@ -43,6 +43,7 @@ class CalculationSection(DocumentSection):
     parameters: dict
 
 
+# scope 区分目录、选定范围和支持的全文；extents/read_ranges 记录内容边界与实际读取区域。
 class DocumentCoverage(ArtifactModel):
     complete: bool
     scope: Literal["catalog", "selection", "supported_content"]
@@ -76,6 +77,7 @@ class CalculationArtifact(ArtifactModel):
     calculations: list[CalculationSection] = Field(min_length=1)
 
 
+# 标准化来源：locator 标记原文位置，inputs 保留输入文件，digest 校验来源正文。
 class EvidenceSource(ArtifactModel):
     key: str = Field(min_length=1)
     kind: Literal["web", "sql", "document", "calculation", "record"]
@@ -90,6 +92,7 @@ class EvidenceSource(ArtifactModel):
     origin_source_id: str = Field(min_length=1)
 
 
+# normalize 将工具载荷转成来源；network 标识联网工具，capture 控制是否采集。
 @dataclass(frozen=True)
 class EvidenceAdapter:
     adapter_id: str

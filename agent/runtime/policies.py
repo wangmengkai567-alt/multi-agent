@@ -37,6 +37,7 @@ class StrictConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
+# 限制整轮和分类调用次数；tools_per_turn 限制单回合，task_* 限制单个子任务。
 class Budgets(StrictConfig):
     total: int = Field(ge=1, le=10000)
     main_model: int = Field(ge=1, le=10000)
@@ -63,6 +64,7 @@ class SQLLimits(StrictConfig):
         return self
 
 
+# concurrency 是并发上限，queue_capacity 是等待上限，requests_per_second 为 0 时不限制速率。
 class PoolLimits(StrictConfig):
     concurrency: int = Field(ge=1, le=128)
     queue_capacity: int = Field(ge=0, le=1000)
@@ -90,6 +92,7 @@ class SchedulerLimits(StrictConfig):
     )
 
 
+# 按子任务和整轮限制搜索、网页读取次数，以及请求时限和返回字符量。
 class SearchLimits(StrictConfig):
     calls_per_task: int = Field(default=2, ge=1, le=20)
     max_tasks_per_run: int = Field(default=8, ge=1, le=32)
@@ -139,6 +142,7 @@ class RetryLimits(StrictConfig):
         return self
 
 
+# 总运行、单次请求、关机等待和工具调用的时间上限，单位均为秒。
 class TimeoutLimits(StrictConfig):
     total_seconds: float = Field(default=300.0, gt=0, le=86400)
     request_seconds: float = Field(default=30.0, gt=0, le=300)
@@ -162,6 +166,7 @@ class ModelWindow(StrictConfig):
         return self
 
 
+# 约束请求字节数、Skill 元数据大小和各模型上下文窗口，并为输入预留安全余量。
 class ContextLimits(StrictConfig):
     max_request_bytes: int = Field(ge=1024, le=10485760)
     skill_metadata_bytes: int = Field(ge=1024, le=1048576)

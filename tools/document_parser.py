@@ -39,6 +39,7 @@ TEXT_SUFFIXES = {
 }
 
 
+# mode=catalog 只查看目录；content 可用工作表/单元格范围或 PDF 起止页限定读取。
 class DocumentSelection(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     mode: Literal["content", "catalog"] = "content"
@@ -62,6 +63,7 @@ class DocumentSelection(BaseModel):
         return self
 
 
+# 汇总解析片段、位置、缺失项和读取范围，供各格式解析器生成统一结果。
 class Extraction:
     def __init__(self, file, selection):
         self.file, self.selection = file, selection

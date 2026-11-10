@@ -18,6 +18,7 @@ def encoded_size(value):
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+# 合并模型绑定的工具、输出配置和消息，构造调用前用于容量检查的请求。
 def prepared_payload(messages, delegate, kwargs):
     """Include bound tools, response schemas and model options before charging a call."""
     bindings = []
@@ -44,6 +45,7 @@ def positive_limit(payload, key, maximum):
     return value
 
 
+# 根据请求字节、工具数量和模型配置估算输入容量；request_bytes 可传实际 HTTP 字节数。
 def context_status(payload, *, request_bytes=None):
     limits = policy_for_run().context
     request_bytes = encoded_size(payload) if request_bytes is None else request_bytes
@@ -93,6 +95,7 @@ def context_status(payload, *, request_bytes=None):
             if effort not in budgets:
                 raise MissingConfiguration("Unverified Qwen reasoning_effort setting")
             reasoning_tokens = budgets[effort]
+    # 从窗口中预留输出、推理和安全余量后，计算本次允许的最大输入。
     input_limit = min(
         model.max_thinking_input_tokens if thinking else model.max_input_tokens,
         model.window_tokens - output_tokens - reasoning_tokens - limits.safety_tokens,
@@ -109,6 +112,7 @@ def context_status(payload, *, request_bytes=None):
     return status
 
 
+# 保存容量检查结果；超出字节或上下文限制时拒绝发送，并报告对应的使用量和上限。
 def admit_context(measurement, payload, *, request_bytes=None):
     status = context_status(payload, request_bytes=request_bytes)
     with measurement.context.budget_lock:

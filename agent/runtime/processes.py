@@ -10,6 +10,7 @@ from time import monotonic, sleep
 from agent.runtime.errors import ExecutionTerminated
 
 
+# 管理隔离的子进程及其后代；close 会终止并等待进程退出。
 class OwnedProcess:
     def __init__(self, command, *, cwd):
         self.lock, self.closed, self.job = RLock(), False, None
@@ -34,7 +35,7 @@ class OwnedProcess:
                 import win32api
                 import win32con
 
-                # Duplicate Popen's original handle; never reacquire ownership through a reusable PID.
+                # 复制已创建进程的句柄并加入 Job，避免使用可能被复用的 PID 查找进程。
                 current = win32api.GetCurrentProcess()
                 handle = win32api.DuplicateHandle(
                     current, int(self.process._handle), current, 0, False, win32con.DUPLICATE_SAME_ACCESS

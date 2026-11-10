@@ -18,6 +18,7 @@ from utils.path_utils import PathDenied, confined_path
 from utils.secure_paths import iter_confined_files
 
 
+# 将文件操作限制在 root 内；readonly 禁止全部写入，上传、Skill 和结果目录始终禁止改写。
 class GuardedFilesystemBackend(BackendProtocol):
     def __init__(self, root, *, readonly=False):
         self.cwd = Path(root).resolve()
@@ -43,6 +44,7 @@ class GuardedFilesystemBackend(BackendProtocol):
                 continue
         return result
 
+    # offset 和 limit 按行分页，offset 从 0 开始。
     def read(self, file_path, offset=0, limit=2000):
         path = self.resolve_path(file_path)
         return self.delegate.read(self.virtual_path(path), offset=offset, limit=limit)
@@ -110,6 +112,7 @@ class GuardedFilesystemBackend(BackendProtocol):
             or (pattern.startswith("**/") and fnmatch(file.relative_to(base).as_posix(), pattern[3:]))
         ]
 
+    # 在允许目录内按字面内容搜索；glob 限制文件名，忽略过大或无法读取的文件。
     def grep_raw(self, pattern, path=None, glob=None):
         results = []
         for file in self._safe_files(path):
@@ -126,6 +129,7 @@ class GuardedFilesystemBackend(BackendProtocol):
         return results
 
 
+# 本轮工作目录作为默认根目录；/skills/ 单独挂载为受授权范围约束的只读目录。
 def run_backend(runtime):
     from agent.runtime.skills import SkillBackend, skill_scope
 

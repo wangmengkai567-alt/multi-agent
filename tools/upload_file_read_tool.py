@@ -32,6 +32,7 @@ def _read_local(file, maximum, selection=None):
         raise ValueError("File format cannot be read as UTF-8 text") from exc
 
 
+# 在受控进程中解析文件；maximum 限制原文件字节数，selection 指定文档读取范围。
 def _read(file, maximum=None, selection=None):
     from agent.runtime.policies import policy_for_run, request_timeout
     from agent.runtime.workers import run_operation

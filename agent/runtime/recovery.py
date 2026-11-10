@@ -32,6 +32,7 @@ def http_status(error):
     return getattr(response, "status_code", None) or getattr(error, "status_code", None)
 
 
+# 解析服务端 Retry-After，返回等待秒数；无法解析时返回 None。
 def retry_after(error, now=None):
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None) or getattr(error, "headers", {}) or {}
@@ -50,6 +51,7 @@ def retry_after(error, now=None):
             return None
 
 
+# 只允许只读操作或工具自身声明了安全保障的调用重试。
 def safe_to_retry(request, call):
     name = request.tool_call["name"]
     if name in READ_ONLY:
@@ -62,6 +64,7 @@ def safe_to_retry(request, call):
     return metadata.get("retry_safety") in ("transaction", "compensated")
 
 
+# 根据错误类别、次数、剩余时间和预算决定是否重试；返回延迟秒数或 None。
 def retry_delay(request, call, error):
     from agent.runtime.policies import classify_tool_error, policy_for_run
 
@@ -84,7 +87,7 @@ def retry_delay(request, call, error):
     cap = min(limits.max_delay_seconds, limits.delay_seconds * 2**call.attempt)
     delay = cap / 2 + random.uniform(0, cap / 2)
     if status == 429:
-        # Without a usable header use the configured backoff, never a model guess.
+        # 限流响应若提供 Retry-After，等待时间至少达到服务端要求。
         delay = max(delay, retry_after(error) or 0)
     remaining = context.remaining()
     if remaining is not None and delay + min(policy_for_run().timeouts.tool_seconds, 1.0) >= remaining:

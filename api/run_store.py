@@ -509,6 +509,7 @@ class RunStore:
             rows = await cursor.fetchall()
         return [dict(row, data=json.loads(row["data"])) for row in rows]
 
+    # 按递增序号读取运行事件；after_seq 是已收到的最后序号，limit 是本次最多返回条数。
     async def list_events(self, run_id: str, *, after_seq=0, limit=None):
         async with self._lock:
             if await self._get(run_id) is None:
@@ -527,6 +528,7 @@ class RunStore:
             ) as cursor:
                 return [row["run_id"] for row in await cursor.fetchall()]
 
+    # 返回运行记录及其事件、子任务和结果；运行不存在时返回 None。
     async def history(self, run_id: str):
         async with self._lock:
             record = await self._get(run_id)

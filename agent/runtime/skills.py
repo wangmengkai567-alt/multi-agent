@@ -26,6 +26,7 @@ from agent.runtime.policies import PROJECT_ROOT, MissingConfiguration, policy_fo
 from utils.secure_paths import PathDenied, confined_path
 
 
+# label 用于展示，files 是该 Skill 可读取的说明文件和参考文件白名单。
 @dataclass(frozen=True)
 class SkillDefinition:
     label: str
@@ -97,6 +98,7 @@ def skill_root():
     return Path(context.skill_dir or PROJECT_ROOT / policy_for_run().files.skill_directory)
 
 
+# 检查路径是否属于允许的 Skill 文件；directories 为真时也允许访问必要的目录。
 def authorize_skill_path(path, root=None, *, directories=False, allowed=None):
     root = Path(root or skill_root()).resolve()
     path = Path(path)
@@ -172,6 +174,7 @@ def selected_skills():
     return tuple(dict.fromkeys((*explicit, *required)))
 
 
+# 按实际可见行累计 Skill 读取范围；offset 从 0 开始，limit 是行数，visible 是最终工具输出。
 def record_read(file, content, *, offset=0, limit=None, reason="automatic", visible=None, numbered=False):
     context = get_run_context()
     if context is None:
@@ -205,8 +208,7 @@ def record_read(file, content, *, offset=0, limit=None, reason="automatic", visi
         if visible is None or not numbered and content in visible:
             coverage.update(range(offset, end))
         elif numbered:
-            # The framework may shorten output after the backend has returned it.
-            # Count only complete numbered lines actually delivered by the tool.
+            # 框架可能截短结果，只累计最终输出中完整可见的带行号内容。
             coverage.update(
                 index
                 for index in range(offset, end)
@@ -295,6 +297,7 @@ class SkillReadMiddleware(AgentMiddleware):
             pending_skill_read.reset(token)
 
 
+# 加载本轮显式选择及业务模式要求的 Skill，且只加载当前执行者获准的项目。
 def load_selected_skills(allowed):
     context = get_run_context()
     actor, owner, _ = scope_identity()

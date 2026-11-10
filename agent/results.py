@@ -9,6 +9,7 @@ from sqlglot import exp, parse_one
 from agent.runtime.events import EventPersistenceError, redact_text
 
 
+# 递归清理结果中的凭据；JSON 字符串先解析后清理，再还原为字符串。
 def clean(value):
     if isinstance(value, str):
         if value.lstrip().startswith(("{", "[")):
@@ -31,6 +32,7 @@ def clean(value):
     return str(value)
 
 
+# 核对 evidence 属于 task_id，返回来源、未完成事项和读取限制三个列表。
 def task_evidence(evidence, task_id):
     """Accept only this task's observations and retain unresolved execution limits."""
     from agent.runtime.context import get_run_context
@@ -45,7 +47,7 @@ def task_evidence(evidence, task_id):
     sources = [row for _, row, _ in source_rows(evidence)]
     unfinished, limitations = [], []
     documents = {}
-    # A successful runtime retry resolves earlier attempts of that same call.
+    # 同一调用只按最后一次尝试判断未完成事项；成功重试可消除先前失败。
     latest = {item["call_id"]: item for item in evidence}
     for item in latest.values():
         reason = item["error"] if item["status"] != "completed" else ""
@@ -82,8 +84,7 @@ def task_evidence(evidence, task_id):
         )
         item = state["item"]
         requires_full = state["full_read"] or path in {"uploads/" + name for name in context.required_uploads}
-        # A successful selected-range read need not reach the whole-file boundary.
-        # Keep actual gaps and explicit full-read obligations separate from scope.
+        # 区分局部读取限制与未完成事项；缺口、要求完整读取或没有读取范围时需报告。
         if state["missing"] or not covered and (requires_full or not state["ranges"]):
             reason = path + "：" + "；".join(sorted(state["missing"]) or ["材料尚未完整读取"])
             unfinished.append(dict(call_id=item["call_id"], tool=item["name"], status=item["status"], reason=reason))
@@ -98,6 +99,7 @@ def task_evidence(evidence, task_id):
     return sources, unfinished, limitations
 
 
+# 将子任务记录整理成返回给主助手的状态、结论、来源和限制。
 def delegation_payload(row):
     """One result shape for success, failure, timeout and cancellation snapshots."""
     return dict(
@@ -119,6 +121,7 @@ def delegation_payload(row):
     )
 
 
+# 从实际 SQL 提取查询对象，并将文本中声明的时间范围和统计口径单独保留。
 def metadata(text, evidence):
     """Keep declared scope separate from actual SQL; never infer missing dates."""
 

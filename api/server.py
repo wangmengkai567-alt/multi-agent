@@ -344,12 +344,15 @@ async def get_skills():
     return skill_catalog()
 
 
+# 一次任务的用户输入、联网权限、Skill 和来源要求；thread_id 为空时创建新会话。
 class TaskRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: StrictStr = Field(min_length=1)
+    # 随任务绑定的原文；与 query 的任务指令分开保存。
     input_text: StrictStr | None = Field(default=None, min_length=1, max_length=100000)
     network_policy: Literal["allowed", "forbidden"] = "allowed"
     skill_ids: list[StrictStr] | None = Field(default=None, max_length=len(SKILL_IDS))
+    # 业务模式决定额外要求；required_sources 和 required_uploads 指定必需来源与文件名。
     business_mode: Literal["ordinary", "internal_external"] = "ordinary"
     required_sources: list[Literal["db", "search"]] = Field(default_factory=list, max_length=2)
     required_uploads: list[StrictStr] = Field(default_factory=list, max_length=20)
