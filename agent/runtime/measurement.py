@@ -7,6 +7,7 @@ from time import monotonic
 from uuid import uuid4
 
 from agent.runtime.context import get_run_context
+from agent.runtime.finalization import finalization_active, validate_final_payload
 
 active_request = ContextVar("active_model_request", default=None)
 PHASE_LABELS = {"research": "资料收集", "coordination": "任务协调", "summarization": "上下文摘要"}
@@ -55,6 +56,7 @@ class RequestMeasurement:
             run_id=self.context.run_id,
             category=category,
             phase=phase,
+            finalization=finalization_active.get(),
             actor=call.target if call and call.target else "main",
             task_id=call.task_id if call else None,
             parent_call_id=call.call_id if call else self.context.run_id,
@@ -174,6 +176,8 @@ def observe_http_request(request):
 
     if not isinstance(data.get("model"), str) or not isinstance(data.get("messages"), list):
         raise ValueError("Model context admission requires a model ID and chat messages")
+    if row["finalization"]:
+        validate_final_payload(data)
     admit_context(measurement, data, request_bytes=len(raw))
     with context.budget_lock:
         if row["transport"] is not None:
@@ -187,6 +191,7 @@ def observe_http_request(request):
             schema_bytes=size(data["response_format"]) if "response_format" in data else 0,
             component_encoding="canonical_utf8_json",
             tool_definition_count=len(data.get("tools", [])),
+            tool_choice=data.get("tool_choice"),
             http_status=None,
             headers_ms=None,
         )

@@ -4,6 +4,7 @@ from copy import deepcopy
 from urllib.parse import urlsplit
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
@@ -11,6 +12,7 @@ from agent.reflection import source_urls, tool_evidence
 from agent.runtime.context import get_run_context
 from agent.runtime.evidence_protocol import adapter_for_tool
 from agent.runtime.experts import append_system
+from agent.runtime.finalization import final_answer_mode, prepare_final_request
 from agent.runtime.hooks import active_call
 from agent.runtime.output import cited_urls
 from agent.runtime.policies import PolicyError, calls_available, search_call_available
@@ -180,9 +182,6 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             tools.append(tool)
         settings = dict(request.model_settings)
         choice = request.tool_choice
-        if not tools:
-            choice = "none"
-            settings["tool_choice"] = "none"
         instruction = (
             "本回合只可使用当前提供的工具；额度耗尽的工具已移除，不得再次请求。"
             "没有可用取证工具或现有证据已足够时，直接根据实际结果返回结论、来源与缺口。"
@@ -216,25 +215,38 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 + ("、".join(domains) or "无")
                 + "。其他域名必须先通过本分工搜索发现；搜索额度耗尽时，使用已取得的来源答复并说明缺口。"
             )
-        return request.override(
+        prepared = request.override(
             tools=tools,
             tool_choice=choice,
             model_settings=settings,
             system_message=append_system(request.system_message, instruction),
         )
+        return prepare_final_request(prepared) if not tools else prepared
 
     @staticmethod
     def validate_response(request, response):
         result = getattr(response, "model_response", response)
         messages = getattr(result, "result", [result])
-        if not request.tools and any(getattr(message, "tool_calls", None) for message in messages):
-            raise PolicyError("Model returned tool calls during a final-answer-only turn; no further calls are allowed")
+        if not request.tools:
+            if any(
+                getattr(message, "tool_calls", None)
+                or getattr(message, "invalid_tool_calls", None)
+                or getattr(message, "additional_kwargs", {}).get("function_call")
+                for message in messages
+            ):
+                raise PolicyError(
+                    "Model returned tool calls during a final-answer-only turn; no further calls are allowed"
+                )
+            if not any(isinstance(message, AIMessage) and message.text.strip() for message in messages):
+                raise PolicyError("Final-answer model response must contain non-empty assistant text")
         return response
 
     def wrap_model_call(self, request, handler):
         prepared = self.prepare(request)
-        return self.validate_response(prepared, handler(prepared))
+        with final_answer_mode(not prepared.tools):
+            return self.validate_response(prepared, handler(prepared))
 
     async def awrap_model_call(self, request, handler):
         prepared = self.prepare(request)
-        return self.validate_response(prepared, await handler(prepared))
+        with final_answer_mode(not prepared.tools):
+            return self.validate_response(prepared, await handler(prepared))
