@@ -544,11 +544,15 @@ def before_tool_policy(call):
         owner = call.parent_call_id or context.run_id
         turn = context.tool_turns.get((owner, call.call_id), owner)
         with context.budget_lock:
+            from agent.runtime.capabilities import tool_available
+
+            name = call.actor.rsplit(":", 1)[-1]
+            if not tool_available(context, name):
+                raise PolicyError("工具不在当前分工允许的执行阶段内；请根据已有证据返回结论和缺口")
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
             if call.actor.rsplit(":", 1)[-1] != "task":
                 call.workflow_data["admitted_timeout"] = request_timeout(context.policy.timeouts.tool_seconds)
-            name = call.actor.rsplit(":", 1)[-1]
             if name in ("internet_search", "read_web_page"):
                 task_key = (owner, name)
                 if not search_call_available(name, owner):

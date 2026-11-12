@@ -34,6 +34,15 @@ def tool_available(context, name, *, network=False, target_specs=None):
         return False
     if context is None:
         return True
+    call = active_call.get()
+    if call and call.task_id and call.actor.partition(":")[0] == "search":
+        with context.budget_lock:
+            if not any(search_call_available(tool, call.task_id) for tool in NETWORK_ACTIONS):
+                return False
+            if name not in NETWORK_ACTIONS and any(
+                context.search_counts.get((call.task_id, tool), 0) for tool in NETWORK_ACTIONS
+            ):
+                return False
     if (network or name in NETWORK_ACTIONS) and context.network_policy == "forbidden":
         return False
     if name == "read_bound_material" and context.task_contract is not None:
