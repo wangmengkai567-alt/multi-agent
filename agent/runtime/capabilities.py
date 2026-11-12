@@ -77,6 +77,15 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         can_use_tools = calls_available(
             category, "tool", category, *(("main_model",) if category == "sub_model" else ())
         )
+        # Tool disclosure must leave time for this coordination request and its next delegation.
+        # Otherwise a long answer can remain tool-enabled until acquisition cancels it.
+        remaining = context.collection_remaining()
+        if not (call and call.task_id) and (
+            not context.can_delegate()
+            or remaining is not None
+            and remaining <= 2 * context.policy.timeouts.request_seconds
+        ):
+            can_use_tools = False
         evidence = tool_evidence.get() or []
         if call and call.actor == "document" and context.task_contract is not None:
             from agent.runtime.workflows import _range_covered

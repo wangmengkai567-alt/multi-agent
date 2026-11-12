@@ -279,10 +279,17 @@ def request_timeout(maximum=None, *, model_request=False):
     call = active_call.get()
     admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
     remaining = context.remaining() if context.report_started else context.collection_remaining()
+    request_limit = limits.request_seconds
+    if model_request and context.report_started and not (call and call.task_id):
+        from agent.runtime.finalization import finalization_active
+
+        if finalization_active.get():
+            # The sole final report owns the reserved interval, including time beyond acquisition requests.
+            request_limit = limits.report_reserve_seconds - limits.shutdown_seconds
     if remaining is not None and remaining <= 0:
         context.check_active()  # The total deadline takes precedence over a phase boundary.
         raise CollectionEnded("取证阶段时限已到；保留已取得的证据并转入最终报告")
-    return min(value for value in (limits.request_seconds, maximum, remaining, admitted) if value is not None)
+    return min(value for value in (request_limit, maximum, remaining, admitted) if value is not None)
 
 
 SAFE_FUNCTIONS = frozenset(

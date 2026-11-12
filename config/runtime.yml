@@ -3,7 +3,7 @@ timeouts:
   request_seconds: 60.0
   shutdown_seconds: 5.0
   tool_seconds: 25.0
-  # End acquisition at 210 seconds and retain the last 90 seconds for the report.
+  # End acquisition at 210 seconds; final reporting gets up to 85 seconds plus 5 seconds for shutdown.
   report_reserve_seconds: 90.0
 context:
   # Project request budget, measured over the complete UTF-8 JSON payload.

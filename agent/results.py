@@ -127,13 +127,26 @@ def delegation_payload(row):
     accepted = (
         task_evidence_payload(row["evidence"], row["call_id"]) if row["sources"] else dict(sources=[], observations=[])
     )
+    # Metadata appears once in sources; each observation references its exact positions.
+    # Keep the visible tool text intact, including excerpts shorter than provider artifacts.
+    observations, position = [], 0
+    for observation in accepted["observations"]:
+        end = position + len(observation["sources"])
+        observations.append(
+            dict(
+                content=observation["content"],
+                source_indexes=list(range(position, end)),
+                evidence_note=observation["evidence_note"],
+            )
+        )
+        position = end
     return dict(
         task_id=row["call_id"],
         expert=row["target"],
         status=row["status"],
         result=row["result"],
         sources=[{key: source[key] for key in SOURCE_FIELDS} for source in accepted["sources"]],
-        observations=accepted["observations"],
+        observations=observations,
         unfinished=row["unfinished"],
         limitations=row["limitations"],
         error=row["error"],
