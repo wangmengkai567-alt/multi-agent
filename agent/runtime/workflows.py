@@ -123,36 +123,40 @@ async def finalize_answer(context, answer):
     assert_contract(context)
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("Final answer must not be empty")
+    from agent.results import delegation_payload
+
     rows = list(context.task_results.values())
+    handoffs = [(row, delegation_payload(row)) for row in rows]
+    observed = [(row, payload) for row, payload in handoffs if payload["observations"]]
     successes = [row for row in rows if row["status"] == "completed"]
     failures = [row for row in rows if row["status"] != "completed"]
-    obtained = {context.expert_contract[row["target"]]["execution"]["source_kind"] for row in successes}
+    obtained = {context.expert_contract[row["target"]]["execution"]["source_kind"] for row, _ in observed}
     missing = sorted(required_sources(context) - obtained)
     unread = [
         name
         for name in context.required_uploads
         if str(confined_path("uploads/" + name, context.work_dir)) not in context.upload_reads
     ]
-    # 调查任务若没有任何有效分工结果，就不能生成看似成功的调查文件。
-    if (rows or context.task_rejections or missing or unread) and not successes:
+    # 成功工具证据可以支撑部分报告；既无分工结果也无有效证据时仍拒绝交付。
+    if (rows or context.task_rejections or missing or unread) and not successes and not observed:
         raise RuntimeError("本轮调查未取得有效分工结果，不能生成调查结论或成功文件；详见来源要求和子任务错误记录")
     allowed = set(cited_urls(context.user_query))
-    for row in successes:
-        for source in row["sources"]:
+    for _, payload in observed:
+        for source in payload["sources"]:
             if source["url"]:
                 allowed.add(source["url"])
-            allowed.update(cited_urls(source["content"]))
+        for observation in payload["observations"]:
+            allowed.update(cited_urls(observation["content"]))
     if context.input_text:
         allowed.update(cited_urls(context.input_text))
     if {source_page(url) for url in cited_urls(answer)} - {source_page(url) for url in allowed}:
         raise ValueError("最终答复包含实际输入和工具结果中不存在的来源 URL")
     # 分工失败、缺少必需来源或材料未读全时，保留有效结果并在正文中明确标注部分完成。
     notices = []
-    for row in successes:
-        if row["unfinished"]:
-            notices.append(
-                row["display_name"] + "的未完成事项：" + "；".join(item["reason"] for item in row["unfinished"])
-            )
+    for row in rows:
+        reasons = [item["reason"] for item in row["unfinished"] if item["reason"] != row["error"]]
+        if reasons:
+            notices.append(row["display_name"] + "的未完成事项：" + "；".join(reasons))
     if failures:
         notices.append(
             "未完成的分工："

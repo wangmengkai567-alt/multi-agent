@@ -8,6 +8,8 @@ from sqlglot import exp, parse_one
 
 from agent.runtime.events import EventPersistenceError, redact_text
 
+SOURCE_FIELDS = ("key", "kind", "title", "url", "locator", "inputs", "retrieval", "provenance")
+
 
 # 递归清理结果中的凭据；JSON 字符串先解析后清理，再还原为字符串。
 def clean(value):
@@ -99,21 +101,39 @@ def task_evidence(evidence, task_id):
     return sources, unfinished, limitations
 
 
-# 将子任务记录整理成返回给主助手的状态、结论、来源和限制。
+def task_evidence_payload(evidence, task_id):
+    """Validate owned records and expose only excerpts actually returned by successful tools."""
+    sources, unfinished, limitations = task_evidence(evidence, task_id)
+    return dict(
+        sources=sources,
+        observations=[
+            dict(
+                content=record["content"],
+                sources=[{key: source[key] for key in SOURCE_FIELDS} for source in record["sources"]],
+                evidence_note=record["evidence_note"],
+            )
+            for record in evidence
+            if record["status"] == "completed" and record["executed"] and record["sources"]
+        ],
+        unfinished=unfinished,
+        limitations=limitations,
+    )
+
+
+# 将子任务记录整理成返回给主助手的状态、结论、证据片段、来源和限制。
 def delegation_payload(row):
-    """One result shape for success, failure, timeout and cancellation snapshots."""
+    """Keep task failure separate from accepted successful-tool observations."""
+    # A collection rejected during evidence validation has no accepted factual sources.
+    accepted = (
+        task_evidence_payload(row["evidence"], row["call_id"]) if row["sources"] else dict(sources=[], observations=[])
+    )
     return dict(
         task_id=row["call_id"],
         expert=row["target"],
         status=row["status"],
         result=row["result"],
-        sources=[
-            {
-                key: source[key]
-                for key in ("key", "kind", "title", "url", "locator", "inputs", "retrieval", "provenance")
-            }
-            for source in row["sources"]
-        ],
+        sources=[{key: source[key] for key in SOURCE_FIELDS} for source in accepted["sources"]],
+        observations=accepted["observations"],
         unfinished=row["unfinished"],
         limitations=row["limitations"],
         error=row["error"],

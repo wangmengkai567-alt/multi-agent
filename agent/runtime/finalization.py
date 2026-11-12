@@ -7,14 +7,13 @@ from contextvars import ContextVar
 from langchain_core.messages import HumanMessage
 
 from agent.reflection import tool_evidence
-from agent.results import delegation_payload, task_evidence
+from agent.results import delegation_payload, task_evidence_payload
 from agent.runtime.context import get_run_context
 from agent.runtime.contracts import assert_contract
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import PolicyError
 
 finalization_active = ContextVar("finalization_active", default=False)
-SOURCE_FIELDS = ("key", "kind", "title", "url", "locator", "inputs", "retrieval", "provenance")
 
 
 def prepare_final_request(request):
@@ -33,24 +32,16 @@ def prepare_final_request(request):
         if not isinstance(description, str) or not description.strip():
             raise PolicyError("Final answer requires the original delegated task description")
         evidence = tool_evidence.get() or []
-        _, unfinished, limitations = task_evidence(evidence, call.task_id)
+        accepted = task_evidence_payload(evidence, call.task_id)
         # Retain the exact visible excerpts, not unseen provider artifacts or dialogue.
         payload.update(
             delegated_task=description,
-            observations=[
-                dict(
-                    content=record["content"],
-                    sources=[{key: source[key] for key in SOURCE_FIELDS} for source in record["sources"]],
-                    evidence_note=record["evidence_note"],
-                )
-                for record in evidence
-                if record["status"] == "completed" and record["executed"] and record["sources"]
-            ],
-            unfinished=unfinished,
-            limitations=limitations,
+            observations=accepted["observations"],
+            unfinished=accepted["unfinished"],
+            limitations=accepted["limitations"],
         )
     else:
-        # Use the existing delegate return contract; failed-task evidence handoff is separate.
+        # Rebuild handoffs from validated observations, including failed tasks with accepted evidence.
         payload["task_results"] = [delegation_payload(row) for row in context.task_results.values()]
     settings = dict(request.model_settings)
     for name in ("tools", "functions", "function_call", "parallel_tool_calls"):
