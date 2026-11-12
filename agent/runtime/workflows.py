@@ -180,7 +180,9 @@ async def finalize_answer(context, answer):
     if notices:
         answer += "\n\n【部分完成】\n\n" + "\n\n".join(notices)
     limitations = [
-        row["display_name"] + "的读取或执行限制：" + "；".join(item["reason"] for item in row["limitations"])
+        row["display_name"]
+        + "的读取或执行限制："
+        + "；".join(dict.fromkeys(item["reason"] for item in row["limitations"]))
         for row in rows
         if row["limitations"]
     ]
