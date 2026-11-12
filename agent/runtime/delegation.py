@@ -20,7 +20,7 @@ from agent.reflection import source_urls, tool_evidence
 from agent.results import clean, delegation_payload, sync_result, task_evidence
 from agent.runtime.checkpoints import write_json
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import ExecutionTerminated
+from agent.runtime.errors import CollectionEnded, ExecutionTerminated
 from agent.runtime.events import EventPersistenceError, make_event
 from agent.runtime.evidence_protocol import EvidenceError
 from agent.runtime.experts import bind_registry
@@ -41,6 +41,8 @@ class DelegationRunnable(Runnable):
         if context is None:
             raise HookRejected("Expert execution requires a run context")
         context.check_active()
+        if not context.can_delegate():
+            raise HookRejected("剩余取证时间不足以启动新分工；请依据已有证据整理最终报告")
         from agent.runtime.capabilities import expert_available
         from agent.runtime.contracts import assert_contract
 
@@ -149,6 +151,14 @@ class DelegationRunnable(Runnable):
         return {"messages": [AIMessage(content=json.dumps(delegation_payload(row), ensure_ascii=False))]}
 
     def _failed(self, context, call, record, error, evidence):
+        remaining = context.collection_remaining()
+        if (
+            isinstance(error, asyncio.CancelledError)
+            and context.stop_status is None
+            and remaining is not None
+            and remaining <= 0
+        ):
+            error = CollectionEnded("取证阶段时限已到；已停止当前分工并保留成功工具证据")
         if isinstance(error, ExecutionTerminated):
             context.terminate(error)
         record["error"] = error_message(error)

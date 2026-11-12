@@ -5,6 +5,10 @@ class ExecutionTerminated(RuntimeError):
     """The run must stop; do not turn this exception into model feedback."""
 
 
+class CollectionEnded(RuntimeError):
+    """The acquisition phase ended; the owning coordinator must enter final reporting."""
+
+
 class ContextCapacityExceeded(ExecutionTerminated):
     """Reject oversized context before transport; never retry with silently shortened instructions."""
 

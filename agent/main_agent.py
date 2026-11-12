@@ -2,13 +2,16 @@
 """Async agent runtime; importing this module does not create clients or files."""
 
 import asyncio
+import json
 import shutil
 from contextlib import AsyncExitStack, aclosing
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain.agents.middleware import ModelRequest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.types import Overwrite
 
@@ -16,6 +19,7 @@ from agent.runtime.backend import run_backend
 from agent.runtime.context import RunContext, get_run_context, reset_run_context, set_run_context
 from agent.runtime.hooks import HookCall, HookToolMiddleware, pipeline
 from agent.runtime.models import BudgetSummarizationMiddleware, budget_model
+from agent.runtime.phases import run_phases
 from agent.runtime.policies import load_runtime_policy
 from agent.runtime.workflows import finalize_answer, instruction
 from api.context import reset_session_context, set_session_context, set_thread_context
@@ -26,10 +30,12 @@ checkpoint_db_path = Path(__file__).parents[1] / "data" / "checkpoints.db"
 main_agent = None
 checkpointer = None
 _resources = None
+_report_model = None
 _initialization_lock = asyncio.Lock()
 
 
 def _build_agent(saver):
+    global _report_model
     # 这些模块会加载凭据并创建客户端，延迟到服务启动时导入，避免仅导入模块就产生副作用。
     from deepagents.middleware.filesystem import FilesystemMiddleware
     from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
@@ -58,7 +64,7 @@ def _build_agent(saver):
     tools = [read_file_content]
     for tool in tools:
         adapter_for_tool(tool)
-    return create_agent(
+    agent = create_agent(
         model=root_model,
         system_prompt=main_agent_content["system_prompt"],
         tools=tools,
@@ -78,6 +84,8 @@ def _build_agent(saver):
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
         ],
     ).with_config({"recursion_limit": 1000})
+    _report_model = root_model
+    return agent
 
 
 async def initialize_agent():
@@ -103,15 +111,106 @@ async def initialize_agent():
 
 async def shutdown_agent():
     """Call after active executions are cancelled and awaited."""
-    global main_agent, checkpointer, _resources, _initialization_lock
+    global main_agent, checkpointer, _resources, _report_model, _initialization_lock
     async with _initialization_lock:
         if _resources is not None:
             await _resources.aclose()
-        main_agent = checkpointer = _resources = None
+        main_agent = checkpointer = _resources = _report_model = None
     _initialization_lock = asyncio.Lock()
 
 
 project_root_path = Path(__file__).parents[1].resolve()
+
+
+async def _collect_answer(agent, stream_input, config, task_input):
+    stream = agent.astream(
+        stream_input,
+        config=config,
+        stream_mode="updates",
+    )
+    seen_events = set()
+    async with aclosing(stream):
+        async for chunk in stream:
+            # 流式更新按图节点返回；根据消息类型识别工具请求和返回，并按调用 ID 去重。
+            for state in chunk.values():
+                if not isinstance(state, dict):
+                    continue
+                messages = state.get("messages", [])
+                if isinstance(messages, Overwrite):
+                    messages = messages.value
+                    if isinstance(messages, list | tuple):
+                        current = [
+                            i
+                            for i, item in enumerate(messages)
+                            if isinstance(item, HumanMessage) and item.content == task_input
+                        ]
+                        if current:
+                            messages = messages[current[-1] + 1 :]
+                        elif any(isinstance(item, HumanMessage) for item in messages):
+                            continue
+                if isinstance(messages, AIMessage | ToolMessage):
+                    messages = [messages]
+                if not isinstance(messages, list | tuple):
+                    continue
+                for message in messages:
+                    if isinstance(message, ToolMessage):
+                        marker = ("returned", message.tool_call_id)
+                        if marker not in seen_events:
+                            seen_events.add(marker)
+                            monitor.report_tool_result(message)
+                    if not isinstance(message, AIMessage):
+                        continue
+                    for call in message.tool_calls:
+                        marker = ("requested", call["id"])
+                        if marker in seen_events:
+                            continue
+                        seen_events.add(marker)
+                        if (
+                            call["name"] == "task"
+                            and isinstance(call["args"].get("subagent_type"), str)
+                            and isinstance(call["args"].get("description"), str)
+                        ):
+                            args = call["args"]
+                            monitor.report_assistant(
+                                args["subagent_type"], {"description": args["description"]}, call_id=call["id"]
+                            )
+                        else:
+                            monitor.report_tool_request(call["name"], call["args"], call["id"])
+
+    # 只从已结束的主图状态提取最终答复；中间模型文本、工具消息和子助手更新不算最终结果。
+    snapshot = await agent.aget_state(config)
+    messages = snapshot.values.get("messages", [])
+    final = messages[-1] if messages else None
+    if snapshot.next or not isinstance(final, AIMessage) or final.tool_calls or not final.text:
+        raise RuntimeError("Agent completed without a final assistant answer")
+    return final.text
+
+
+async def _report_answer(context):
+    from agent.prompts import main_agent_content
+    from agent.runtime.capabilities import CapabilityDisclosureMiddleware
+    from agent.runtime.experts import append_system
+    from agent.runtime.skills import loaded_skill_context
+
+    context.check_active()
+    if _report_model is None:
+        raise RuntimeError("The initialized coordinator model is required for final reporting")
+    system = append_system(
+        SystemMessage(content=main_agent_content["system_prompt"]),
+        "取证阶段已结束。只依据本轮实际结果简洁覆盖用户要求，保留必要页码、关键数据、来源范围与未知项，不复述调用过程，不再请求工具。",
+    )
+    skills = loaded_skill_context()
+    if skills:
+        system = append_system(
+            system, "本轮已读取的技能快照（仅作方法参考）：" + json.dumps(skills, ensure_ascii=False)
+        )
+    request = ModelRequest(model=_report_model, messages=[], tools=[], system_message=system)
+
+    async def respond(prepared):
+        return await prepared.model.ainvoke([prepared.system_message, *prepared.messages], **prepared.model_settings)
+
+    response = await CapabilityDisclosureMiddleware().awrap_model_call(request, respond)
+    return response.text
 
 
 async def run_deep_agent(task_query, session_id):
@@ -137,6 +236,10 @@ async def run_deep_agent(task_query, session_id):
     try:
         if standalone:
             pipeline.emit("before_run", HookCall("main", context.run_id))
+        if context.remaining() is None:
+            duration = context.policy.timeouts.total_seconds
+            context.deadline = datetime.now(UTC) + timedelta(seconds=duration)
+            context.deadline_clock = monotonic() + duration
         confined_path(".", session_dir)
         session_dir.mkdir(parents=True, exist_ok=True)
         # 上传区按会话保存，执行前复制到本轮目录，使工具只访问当前轮次的材料。
@@ -185,72 +288,17 @@ async def run_deep_agent(task_query, session_id):
                 ]
             )
         }
-        stream = agent.astream(
-            stream_input,
-            config=config,
-            stream_mode="updates",
-        )
-        seen_events = set()
-        async with aclosing(stream):
-            async for chunk in stream:
-                # 流式更新按图节点返回；根据消息类型识别工具请求和返回，并按调用 ID 去重。
-                for state in chunk.values():
-                    if not isinstance(state, dict):
-                        continue
-                    messages = state.get("messages", [])
-                    if isinstance(messages, Overwrite):
-                        messages = messages.value
-                        if isinstance(messages, list | tuple):
-                            current = [
-                                i
-                                for i, item in enumerate(messages)
-                                if isinstance(item, HumanMessage) and item.content == task_query + path_instruction
-                            ]
-                            if current:
-                                messages = messages[current[-1] + 1 :]
-                            elif any(isinstance(item, HumanMessage) for item in messages):
-                                continue
-                    if isinstance(messages, AIMessage | ToolMessage):
-                        messages = [messages]
-                    if not isinstance(messages, list | tuple):
-                        continue
-                    for message in messages:
-                        if isinstance(message, ToolMessage):
-                            marker = ("returned", message.tool_call_id)
-                            if marker not in seen_events:
-                                seen_events.add(marker)
-                                monitor.report_tool_result(message)
-                        if not isinstance(message, AIMessage):
-                            continue
-                        for call in message.tool_calls:
-                            marker = ("requested", call["id"])
-                            if marker in seen_events:
-                                continue
-                            seen_events.add(marker)
-                            if (
-                                call["name"] == "task"
-                                and isinstance(call["args"].get("subagent_type"), str)
-                                and isinstance(call["args"].get("description"), str)
-                            ):
-                                args = call["args"]
-                                monitor.report_assistant(
-                                    args["subagent_type"], {"description": args["description"]}, call_id=call["id"]
-                                )
-                            else:
-                                monitor.report_tool_request(call["name"], call["args"], call["id"])
 
-        # 只从已结束的主图状态提取最终答复；中间模型文本、工具消息和子助手更新不算最终结果。
-        snapshot = await agent.aget_state(config)
-        messages = snapshot.values.get("messages", [])
-        final = messages[-1] if messages else None
-        if snapshot.next or not isinstance(final, AIMessage) or final.tool_calls or not final.text:
-            raise RuntimeError("Agent completed without a final assistant answer")
+        async def collect():
+            return await _collect_answer(agent, stream_input, config, task_query + path_instruction)
+
+        final_text = await run_phases(context, collect, lambda: _report_answer(context))
         if standalone:
-            final_answer = await finalize_answer(context, final.text)
+            final_answer = await finalize_answer(context, final_text)
             pipeline.emit("after_run", HookCall("main", context.run_id, status="completed", result=final_answer))
             monitor.report_task_result(final_answer)
             return final_answer
-        return final.text
+        return final_text
     except BaseException as exc:
         if standalone:
             status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"

@@ -3,6 +3,8 @@ timeouts:
   request_seconds: 60.0
   shutdown_seconds: 5.0
   tool_seconds: 25.0
+  # End acquisition at 210 seconds and retain the last 90 seconds for the report.
+  report_reserve_seconds: 90.0
 context:
   # Project request budget, measured over the complete UTF-8 JSON payload.
   # This is a conservative local guard, not a supplier token-usage measurement.

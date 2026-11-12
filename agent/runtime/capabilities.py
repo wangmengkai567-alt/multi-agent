@@ -36,6 +36,11 @@ def tool_available(context, name, *, network=False, target_specs=None):
         return False
     if context is None:
         return True
+    remaining = context.collection_remaining()
+    if context.report_started or remaining is not None and remaining <= 0:
+        return False
+    if name == "task" and not context.can_delegate():
+        return False
     call = active_call.get()
     if call and call.task_id and call.actor.partition(":")[0] == "search":
         with context.budget_lock:

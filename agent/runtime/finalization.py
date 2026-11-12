@@ -41,6 +41,7 @@ def prepare_final_request(request):
             limitations=accepted["limitations"],
         )
     else:
+        context.start_report("主助手已进入结果整理回合")
         # Rebuild handoffs from validated observations, including failed tasks with accepted evidence.
         payload["task_results"] = [delegation_payload(row) for row in context.task_results.values()]
     settings = dict(request.model_settings)

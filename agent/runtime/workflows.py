@@ -138,7 +138,14 @@ async def finalize_answer(context, answer):
         if str(confined_path("uploads/" + name, context.work_dir)) not in context.upload_reads
     ]
     # 成功工具证据可以支撑部分报告；既无分工结果也无有效证据时仍拒绝交付。
-    if (rows or context.task_rejections or missing or unread) and not successes and not observed:
+    investigation = (
+        rows
+        or context.task_rejections
+        or missing
+        or unread
+        or (context.collection_timed_out and context.task_contract.materials)
+    )
+    if investigation and not successes and not observed:
         raise RuntimeError("本轮调查未取得有效分工结果，不能生成调查结论或成功文件；详见来源要求和子任务错误记录")
     allowed = set(cited_urls(context.user_query))
     for _, payload in observed:
@@ -153,6 +160,8 @@ async def finalize_answer(context, answer):
         raise ValueError("最终答复包含实际输入和工具结果中不存在的来源 URL")
     # 分工失败、缺少必需来源或材料未读全时，保留有效结果并在正文中明确标注部分完成。
     notices = []
+    if context.collection_timed_out:
+        notices.append("取证阶段已达到时限；本报告仅依据截止前实际取得的证据，未完成的核验保留为未知。")
     for row in rows:
         reasons = [item["reason"] for item in row["unfinished"] if item["reason"] != row["error"]]
         if reasons:

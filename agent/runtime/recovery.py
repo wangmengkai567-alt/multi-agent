@@ -89,8 +89,12 @@ def retry_delay(request, call, error):
     if status == 429:
         # 限流响应若提供 Retry-After，等待时间至少达到服务端要求。
         delay = max(delay, retry_after(error) or 0)
-    remaining = context.remaining()
-    if remaining is not None and delay + min(policy_for_run().timeouts.tool_seconds, 1.0) >= remaining:
+    remaining = context.collection_remaining()
+    if (
+        context.report_started
+        or remaining is not None
+        and delay + min(policy_for_run().timeouts.tool_seconds, 1.0) >= remaining
+    ):
         call.workflow_data["retry_blocked"] = "剩余时长预算不足，未安排重试"
         return None
     with context.budget_lock:

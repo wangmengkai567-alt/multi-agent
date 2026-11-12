@@ -8,7 +8,9 @@ from pathlib import Path
 from threading import Event, RLock
 from time import monotonic
 
-from agent.runtime.errors import ExecutionTerminated
+from agent.runtime.errors import CollectionEnded, ExecutionTerminated
+
+collection_active = ContextVar("collection_active", default=False)
 
 
 class RunStopped(ExecutionTerminated):
@@ -26,6 +28,9 @@ class RunContext:
     reference_time: datetime = field(default_factory=lambda: datetime.now().astimezone())
     deadline_clock: float | None = None
     stop_status: str | None = None
+    report_started: bool = False
+    report_reason: str = ""
+    collection_timed_out: bool = False
     terminal_error: ExecutionTerminated | None = field(default=None, repr=False)
     event_sink: object | None = field(default=None, repr=False)
     hook_failures: list[str] = field(default_factory=list, repr=False)
@@ -69,11 +74,14 @@ class RunContext:
     )
 
     def __post_init__(self):
-        if self.scheduler is None:
+        if self.policy is None:
             from agent.runtime.policies import load_runtime_policy
+
+            self.policy = load_runtime_policy()
+        if self.scheduler is None:
             from agent.runtime.scheduler import ServiceScheduler
 
-            self.scheduler = ServiceScheduler((self.policy or load_runtime_policy()).scheduler)
+            self.scheduler = ServiceScheduler(self.policy.scheduler)
 
     @property
     def task_instruction(self):
@@ -101,6 +109,39 @@ class RunContext:
             return (self.deadline - datetime.now(UTC)).total_seconds()
         return None
 
+    def collection_remaining(self):
+        remaining = self.remaining()
+        return None if remaining is None else remaining - self.policy.timeouts.report_reserve_seconds
+
+    def can_delegate(self):
+        remaining = self.collection_remaining()
+        return not self.report_started and (remaining is None or remaining > self.policy.timeouts.request_seconds)
+
+    def start_report(self, reason, *, collection_timed_out=False):
+        with self.budget_lock:
+            self.check_active()
+            if self.report_started:
+                return
+            self.report_started, self.report_reason = True, reason
+            self.collection_timed_out = collection_timed_out
+            if self.event_sink:
+                from agent.runtime.events import make_event
+
+                self.event_sink.submit(
+                    make_event(
+                        self.thread_id,
+                        self.run_id,
+                        "report_started",
+                        "已结束取证，开始整理最终报告",
+                        dict(
+                            reason=reason, remaining_seconds=self.remaining(), collection_timed_out=collection_timed_out
+                        ),
+                        actor="main",
+                        status="running",
+                        call_id=self.run_id,
+                    )
+                )
+
     # 外部调用前、结果返回后都要检查，阻止已停止任务继续执行或接收迟到结果。
     def check_active(self):
         with self.budget_lock:
@@ -111,6 +152,16 @@ class RunContext:
                 self.stop_status = "timed_out"
             if self.stop_status is not None:
                 raise RunStopped(f"Run has ended: {self.stop_status}")
+            if collection_active.get():
+                available = self.collection_remaining()
+                if self.report_started or available is not None and available <= 0:
+                    from agent.runtime.finalization import finalization_active
+                    from agent.runtime.hooks import active_call
+
+                    call = active_call.get()
+                    root_report = self.report_started and finalization_active.get() and not (call and call.task_id)
+                    if not root_report:
+                        raise CollectionEnded("取证阶段时限已到；保留已取得的证据并转入最终报告")
 
 
 # ContextVar 按当前执行上下文取值，让深层工具无需逐层传参即可找到所属运行。

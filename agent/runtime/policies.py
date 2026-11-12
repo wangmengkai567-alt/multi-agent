@@ -14,7 +14,7 @@ from sqlglot import exp
 from sqlglot.optimizer.scope import traverse_scope
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
+from agent.runtime.errors import CollectionEnded, DependencyUnavailable, ExecutionTerminated
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_CONFIG_PATH = PROJECT_ROOT / "config" / "runtime.yml"
@@ -148,6 +148,15 @@ class TimeoutLimits(StrictConfig):
     request_seconds: float = Field(default=30.0, gt=0, le=300)
     shutdown_seconds: float = Field(default=5.0, gt=0, le=30)
     tool_seconds: float = Field(default=25.0, gt=0, le=300)
+    report_reserve_seconds: float = Field(default=90.0, gt=0, le=86400)
+
+    @model_validator(mode="after")
+    def valid_report_reserve(self):
+        if self.report_reserve_seconds >= self.total_seconds:
+            raise ValueError("Report reserve must be smaller than the total run limit")
+        if self.report_reserve_seconds < self.request_seconds + self.shutdown_seconds:
+            raise ValueError("Report reserve must cover one model request and collection shutdown")
+        return self
 
 
 class ModelWindow(StrictConfig):
@@ -269,7 +278,11 @@ def request_timeout(maximum=None, *, model_request=False):
 
     call = active_call.get()
     admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
-    return min(value for value in (limits.request_seconds, maximum, context.remaining(), admitted) if value is not None)
+    remaining = context.remaining() if context.report_started else context.collection_remaining()
+    if remaining is not None and remaining <= 0:
+        context.check_active()  # The total deadline takes precedence over a phase boundary.
+        raise CollectionEnded("取证阶段时限已到；保留已取得的证据并转入最终报告")
+    return min(value for value in (limits.request_seconds, maximum, remaining, admitted) if value is not None)
 
 
 SAFE_FUNCTIONS = frozenset(
@@ -437,6 +450,8 @@ def classify_tool_error(error):
         return "configuration"
     if isinstance(error, BudgetExceeded):
         return "budget"
+    if isinstance(error, CollectionEnded):
+        return "timeout"
     if isinstance(error, PermissionError):
         return "permission"
     if provider_type in ("tavily.errors.InvalidAPIKeyError", "tavily.errors.ForbiddenError"):

@@ -21,11 +21,26 @@ from agent.runtime.policies import calls_available, request_timeout, reserve_cal
 class BudgetSummarizationMiddleware(SummarizationMiddleware):
     """Admit optional summaries only when the actual answer still fits."""
 
-    def _should_summarize(self, messages, total_tokens):
+    def _can_summarize(self):
+        context = get_run_context()
+        remaining = context.collection_remaining()
+        if context.report_started or remaining is not None and remaining <= 2 * context.policy.timeouts.request_seconds:
+            return False
         category = self.model.category
-        return calls_available(
-            category, category, *(("main_model",) if category == "sub_model" else ())
-        ) and super()._should_summarize(messages, total_tokens)
+        return calls_available(category, category, *(("main_model",) if category == "sub_model" else ()))
+
+    def _should_summarize(self, messages, total_tokens):
+        return self._can_summarize() and super()._should_summarize(messages, total_tokens)
+
+    def wrap_model_call(self, request, handler):
+        if not self._can_summarize():
+            return handler(request)
+        return super().wrap_model_call(request, handler)
+
+    async def awrap_model_call(self, request, handler):
+        if not self._can_summarize():
+            return await handler(request)
+        return await super().awrap_model_call(request, handler)
 
 
 class ModelRequestTimeout(TimeoutError):
@@ -86,6 +101,7 @@ class BudgetChatModel(BaseChatModel):
                     message = self.delegate.invoke(messages, config=config, stop=stop, **kwargs)
                 except BaseException as exc:
                     if is_model_timeout(exc):
+                        context.check_active()
                         raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
                     raise
                 context.check_active()
@@ -117,6 +133,7 @@ class BudgetChatModel(BaseChatModel):
                         message = await self.delegate.ainvoke(messages, config=config, stop=stop, **kwargs)
                 except BaseException as exc:
                     if is_model_timeout(exc):
+                        context.check_active()
                         raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
                     raise
                 context.check_active()
