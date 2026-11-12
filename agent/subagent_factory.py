@@ -3,7 +3,6 @@
 
 from deepagents.middleware.filesystem import FilesystemMiddleware
 from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
-from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 
@@ -12,7 +11,7 @@ from agent.runtime.capabilities import READONLY_FILESYSTEM_PROMPT, CapabilityDis
 from agent.runtime.delegation import DelegationRunnable
 from agent.runtime.evidence_protocol import bind_framework_tools
 from agent.runtime.hooks import HookToolMiddleware
-from agent.runtime.models import budget_model
+from agent.runtime.models import BudgetSummarizationMiddleware, budget_model
 from agent.runtime.skills import ProjectSkillsMiddleware, SkillReadMiddleware
 
 
@@ -57,7 +56,7 @@ def build_subagents(registry, models, *, hooks=None):
                 bind_framework_tools(
                     FilesystemMiddleware(backend=run_backend, system_prompt=READONLY_FILESYSTEM_PROMPT)
                 ),
-                SummarizationMiddleware(model=model, backend=run_backend, **spec.summary.kwargs()),
+                BudgetSummarizationMiddleware(model=model, backend=run_backend, **spec.summary.kwargs()),
                 PatchToolCallsMiddleware(),
                 CapabilityDisclosureMiddleware(),
                 HookToolMiddleware(spec.agent_id, hooks=hooks, managed_delegation=True),

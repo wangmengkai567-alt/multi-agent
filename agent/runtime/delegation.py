@@ -45,6 +45,10 @@ class DelegationRunnable(Runnable):
         from agent.runtime.contracts import assert_contract
 
         assert_contract(context)
+        from agent.runtime.policies import calls_available
+
+        if not calls_available("sub_model", "main_model", *(("tool", "sub_model") if self.spec.tools else ())):
+            raise HookRejected("子助手剩余额度不足以完成取证与答复；请汇总已取得的结果和缺口")
         if not expert_available(context, self.spec):
             raise HookRejected("Expert is unavailable or forbidden by this run's permissions")
         if self.registry is not None:
@@ -213,7 +217,8 @@ class DelegationRunnable(Runnable):
             ),
             ensure_ascii=False,
         )
-        return dict(inputs, messages=[HumanMessage(content="本轮材料与权限：" + binding), *inputs["messages"]])
+        # A fresh expert conversation must not inherit the parent's graph/summary state.
+        return {"messages": [HumanMessage(content="本轮材料与权限：" + binding), *inputs["messages"]]}
 
     def invoke(self, input, config=None, **kwargs):
         context, call, record = self._prepare(input)

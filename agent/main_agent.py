@@ -15,7 +15,7 @@ from langgraph.types import Overwrite
 from agent.runtime.backend import run_backend
 from agent.runtime.context import RunContext, get_run_context, reset_run_context, set_run_context
 from agent.runtime.hooks import HookCall, HookToolMiddleware, pipeline
-from agent.runtime.models import budget_model
+from agent.runtime.models import BudgetSummarizationMiddleware, budget_model
 from agent.runtime.policies import load_runtime_policy
 from agent.runtime.workflows import finalize_answer, instruction
 from api.context import reset_session_context, set_session_context, set_thread_context
@@ -34,7 +34,6 @@ def _build_agent(saver):
     from deepagents.middleware.filesystem import FilesystemMiddleware
     from deepagents.middleware.patch_tool_calls import PatchToolCallsMiddleware
     from deepagents.middleware.subagents import SubAgentMiddleware
-    from deepagents.middleware.summarization import SummarizationMiddleware
     from langchain.agents import create_agent
 
     from agent.llm import create_role_model
@@ -71,7 +70,7 @@ def _build_agent(saver):
             SkillReadMiddleware(),
             bind_framework_tools(FilesystemMiddleware(backend=run_backend, system_prompt=READONLY_FILESYSTEM_PROMPT)),
             bind_framework_tools(SubAgentMiddleware(backend=run_backend, subagents=subagents)),
-            SummarizationMiddleware(model=root_model, backend=run_backend, **SummaryConfig().kwargs()),
+            BudgetSummarizationMiddleware(model=root_model, backend=run_backend, **SummaryConfig().kwargs()),
             PatchToolCallsMiddleware(),
             TaskContractMiddleware(),
             ProjectSkillsMiddleware(),

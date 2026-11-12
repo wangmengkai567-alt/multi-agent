@@ -483,6 +483,10 @@ def validate_tool_call(call):
             raise PolicyError("Search query must not be empty")
         if name == "internet_search" and not 1 <= parsed.max_results <= 20:
             raise PolicyError("max_results must be between 1 and 20")
+        if name == "read_web_page":
+            from tools.tavily_tool import validate_page_request
+
+            validate_page_request(parsed.url, parsed.query)
     if name in ("execute", "write_file", "edit_file", "generate_markdown"):
         raise PolicyError("Model-side file writes and script execution are disabled")
     if name == "task" and set(args) - {"description", "subagent_type"}:
@@ -515,6 +519,16 @@ def validate_tool_call(call):
                 raise PolicyError("Search pattern must stay within its directory")
 
 
+def search_call_available(name, owner):
+    """Use the same search quotas for model disclosure and tool admission."""
+    context = get_run_context()
+    limits = policy_for_run().search
+    with context.budget_lock:
+        per_task = limits.calls_per_task if name == "internet_search" else limits.page_reads_per_task
+        total = sum(value for (_, tool), value in context.search_counts.items() if tool == name)
+        return context.search_counts.get((owner, name), 0) < per_task and total < limits.calls_per_run
+
+
 def before_run_policy(call):
     policy_for_run()
 
@@ -536,13 +550,19 @@ def before_tool_policy(call):
                 call.workflow_data["admitted_timeout"] = request_timeout(context.policy.timeouts.tool_seconds)
             name = call.actor.rsplit(":", 1)[-1]
             if name in ("internet_search", "read_web_page"):
-                limits = context.policy.search
                 task_key = (owner, name)
-                per_task = limits.calls_per_task if name == "internet_search" else limits.page_reads_per_task
-                total = sum(value for (_, tool), value in context.search_counts.items() if tool == name)
-                if context.search_counts.get(task_key, 0) >= per_task or total >= limits.calls_per_run:
+                if not search_call_available(name, owner):
                     raise PolicyError("Search/page read budget exhausted; use the actual results already obtained")
-            reserve_calls(*(("tool", "retry") if call.attempt else ("tool",)))
+            from agent.runtime.hooks import active_call
+
+            parent = active_call.get()
+            category = "sub_model" if parent and parent.task_id else "main_model"
+            kinds = ("tool", "retry") if call.attempt else ("tool",)
+            if not calls_available(*kinds, category, *(("main_model",) if category == "sub_model" else ())):
+                raise PolicyError(
+                    "Remaining call budget is reserved for the final answer; return obtained results and gaps"
+                )
+            reserve_calls(*kinds)
             if name in ("internet_search", "read_web_page"):
                 context.search_counts[task_key] = context.search_counts.get(task_key, 0) + 1
             context.turn_counts[turn] = context.turn_counts.get(turn, 0) + 1

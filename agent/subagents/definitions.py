@@ -36,7 +36,10 @@ def default_specs():
             "联网搜索助手",
             "按分工搜索公开资料，必要时读取网页，返回实际来源 URL。",
             "按分工直接调用 internet_search，必要时 read_web_page。优先使用官方一手来源，保留日期、来源和缺口。"
-            "源码任务应定位并读取相关源码文件；搜索摘要与已读取正文分开说明，不猜测没有取得的数据或来源。",
+            "源码任务应定位并读取相关源码文件；搜索摘要与已读取正文分开说明，不猜测没有取得的数据或来源。"
+            "每个新分工先实际搜索取得本分工来源，再读取发现的网页；其他助手或上传材料给出的链接不能代替搜索。"
+            "结合剩余额度安排检索，合并相关问题；工具额度耗尽后使用已有结果回答，披露缺口，不重复请求。"
+            "引用链接必须使用本分工工具实际返回的 URL，不得自行改写版本路径或补充未取得的链接。",
             (internet_search, read_web_page),
             allowed_skill_ids=("ecommerce-analysis", "research"),
             execution=ExecutionConfig(source_kind="search", network_access=True),

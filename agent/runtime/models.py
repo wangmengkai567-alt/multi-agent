@@ -5,6 +5,7 @@ import asyncio
 from typing import Literal
 
 import httpx
+from deepagents.middleware.summarization import SummarizationMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
@@ -14,7 +15,17 @@ from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.governance import register_turn
 from agent.runtime.model_context import admit_context, prepared_payload
 from agent.runtime.output import normalize_model_message
-from agent.runtime.policies import request_timeout, reserve_calls
+from agent.runtime.policies import calls_available, request_timeout, reserve_calls
+
+
+class BudgetSummarizationMiddleware(SummarizationMiddleware):
+    """Admit optional summaries only when the actual answer still fits."""
+
+    def _should_summarize(self, messages, total_tokens):
+        category = self.model.category
+        return calls_available(
+            category, category, *(("main_model",) if category == "sub_model" else ())
+        ) and super()._should_summarize(messages, total_tokens)
 
 
 class ModelRequestTimeout(TimeoutError):
