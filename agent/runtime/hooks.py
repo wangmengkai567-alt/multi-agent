@@ -280,7 +280,7 @@ class HookToolMiddleware(AgentMiddleware):
 
         name = call.actor.rsplit(":", 1)[-1]
         if name == "task":
-            return None  # 专家串行执行由整轮截止时间约束，不套用普通工具的单次时限。
+            return None  # 委派生命周期统一持有阶段截止与清理边界，不套用普通工具时限。
         if "admitted_timeout" in call.workflow_data:
             return call.workflow_data["admitted_timeout"]
         return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None

@@ -9,6 +9,14 @@ class CollectionEnded(RuntimeError):
     """The acquisition phase ended; the owning coordinator must enter final reporting."""
 
 
+class StageEnded(RuntimeError):
+    """Only this expert stage ended; the coordinator may still execute downstream work."""
+
+
+class StageCleanupFailed(ExecutionTerminated):
+    """An owned stage did not release or persist within its cleanup boundary."""
+
+
 class ContextCapacityExceeded(ExecutionTerminated):
     """Reject oversized context before transport; never retry with silently shortened instructions."""
 

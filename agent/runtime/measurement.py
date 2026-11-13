@@ -50,6 +50,7 @@ class RequestMeasurement:
             raise ValueError("Model measurement requires a run and a known request phase")
         call = active_call.get()
         self.started = None
+        self.deadline_clock = None
         self.closed = False
         self.row = dict(
             request_id=str(uuid4()),

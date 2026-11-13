@@ -20,7 +20,7 @@ from agent.reflection import source_urls, tool_evidence
 from agent.results import clean, delegation_context, delegation_payload, sync_result, task_evidence
 from agent.runtime.checkpoints import write_json
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import CollectionEnded, ExecutionTerminated
+from agent.runtime.errors import CollectionEnded, ExecutionTerminated, StageCleanupFailed, StageEnded
 from agent.runtime.events import EventPersistenceError, make_event
 from agent.runtime.evidence_protocol import EvidenceError
 from agent.runtime.experts import bind_registry
@@ -28,6 +28,14 @@ from agent.runtime.hooks import HookCall, HookRejected, active_call, error_categ
 from agent.runtime.output import cited_urls, source_page
 from agent.runtime.required_work import active_work_item, associate_work_task, required_work_snapshot
 from agent.runtime.skills import skill_scope
+from agent.runtime.stage_budget import (
+    admit_stage,
+    begin_stage,
+    close_limited_work,
+    record_decision,
+    run_stage,
+    run_stage_sync,
+)
 
 
 class DelegationRunnable(Runnable):
@@ -42,18 +50,9 @@ class DelegationRunnable(Runnable):
         if context is None:
             raise HookRejected("Expert execution requires a run context")
         context.check_active()
-        if not context.can_delegate():
-            raise HookRejected("剩余取证时间不足以启动新分工；请依据已有证据整理最终报告")
-        from agent.runtime.capabilities import expert_available
         from agent.runtime.contracts import assert_contract
 
         assert_contract(context)
-        from agent.runtime.policies import calls_available
-
-        if not calls_available("sub_model", "main_model", *(("tool", "sub_model") if self.spec.tools else ())):
-            raise HookRejected("子助手剩余额度不足以完成取证与答复；请汇总已取得的结果和缺口")
-        if not expert_available(context, self.spec):
-            raise HookRejected("Expert is unavailable or forbidden by this run's permissions")
         if self.registry is not None:
             bind_registry(context, self.registry)
         messages = inputs.get("messages", [])
@@ -89,6 +88,11 @@ class DelegationRunnable(Runnable):
         )
         with context.budget_lock:
             context.check_active()
+            decision = admit_stage(context, self.spec)
+            record_decision(context, decision, "execution", self.spec.agent_id)
+            if not decision.allowed:
+                close_limited_work(context, decision, [decision.item_id] if decision.item_id else None)
+                raise HookRejected(decision.reason)
             item_id = active_work_item(context)
             if context.required_work and item_id is None:
                 raise HookRejected("请先将当前待执行事项设为 in_progress，再启动分工")
@@ -106,6 +110,7 @@ class DelegationRunnable(Runnable):
             if parent:
                 context.delegation_calls.setdefault(parent.call_id, []).append(record)
             associate_work_task(context, item_id, call.call_id)
+            begin_stage(context, call.call_id, decision)
         return context, call, record
 
     def _save(self, context, call, record, status):
@@ -162,6 +167,8 @@ class DelegationRunnable(Runnable):
         return self._handoff(context, row)
 
     def _failed(self, context, call, record, error, evidence):
+        from agent.runtime.policies import BudgetExceeded
+
         remaining = context.collection_remaining()
         if (
             isinstance(error, asyncio.CancelledError)
@@ -193,6 +200,12 @@ class DelegationRunnable(Runnable):
             if context.stop_status == "timed_out"
             else "cancelled"
             if status in ("cancelled", "interrupted")
+            else "stage_cleanup"
+            if isinstance(error, StageCleanupFailed)
+            else "call_budget"
+            if isinstance(error, BudgetExceeded)
+            else "stage_budget"
+            if isinstance(error, StageEnded)
             else error_category(error)
         )
         row.update(
@@ -203,6 +216,23 @@ class DelegationRunnable(Runnable):
             error_category=category,
         )
         self._save(context, call, record, status)
+        if row["work_item_id"] is not None:
+            from agent.runtime.required_work import limit_required_work
+
+            reason_code = (
+                "cancelled"
+                if status in ("cancelled", "interrupted")
+                else "cleanup_timeout"
+                if isinstance(error, StageCleanupFailed)
+                else "call_budget"
+                if isinstance(error, BudgetExceeded)
+                else "time_budget"
+                if isinstance(error, StageEnded | CollectionEnded)
+                else "request_timeout"
+                if isinstance(error, TimeoutError)
+                else "service_failure"
+            )
+            limit_required_work(context, [row["work_item_id"]], reason_code, record["error"])
         self.hooks.emit("on_error", call)
         if (
             not isinstance(error, Exception)
@@ -223,6 +253,24 @@ class DelegationRunnable(Runnable):
         row["evidence"] = list(evidence)
         write_json(context.work_dir / "results" / (call.call_id + ".json"), row)
         self.hooks.emit("after_subagent", call)
+
+    @staticmethod
+    def _cleanup_seconds(context, call):
+        remaining = context.task_results[call.call_id]["stage_budget"]["deadline"] - monotonic()
+        return max(
+            0.0,
+            min(
+                value
+                for value in (remaining, context.remaining(), context.policy.timeouts.shutdown_seconds)
+                if value is not None
+            ),
+        )
+
+    @staticmethod
+    def _cleanup_failed(context, error):
+        failure = StageCleanupFailed("阶段清理未在预留时限内完成，不能启动后续取证或重复最终报告")
+        context.terminate(failure)
+        raise failure from error
 
     def _inputs(self, context, call, inputs):
         # 保留完整任务说明，另附程序绑定的材料索引和联网权限。
@@ -252,8 +300,16 @@ class DelegationRunnable(Runnable):
         evidence = []
         evidence_token = tool_evidence.set(evidence)
         started = monotonic()
-        try:
-            self._save(context, call, record, "queued")
+
+        def execute():
+            if context.event_sink:
+                sync_result(
+                    context.event_sink.flush(context.run_id),
+                    context.event_sink,
+                    timeout=max(
+                        0.0, context.task_results[call.call_id]["stage_budget"]["handoff_deadline"] - monotonic()
+                    ),
+                )
             with ExitStack() as stack:
                 for gate in (
                     context.scheduler.child_gate(context),
@@ -264,14 +320,34 @@ class DelegationRunnable(Runnable):
                     stack.callback(lease.release)
                 self._start(context, call, record)
                 result = self.executor.invoke(self._inputs(context, call, input), config, **kwargs)
-                return self._result(context, call, record, result, evidence)
+                if context.event_sink:
+                    sync_result(
+                        context.event_sink.flush(context.run_id),
+                        context.event_sink,
+                        timeout=max(
+                            0.0, context.task_results[call.call_id]["stage_budget"]["handoff_deadline"] - monotonic()
+                        ),
+                    )
+                return result
+
+        try:
+            self._save(context, call, record, "queued")
+            result = run_stage_sync(context, call.call_id, execute)
+            return self._result(context, call, record, result, evidence)
         except BaseException as error:
             return self._failed(context, call, record, error, evidence)
         finally:
             try:
                 self._finish(context, call, record, started, evidence)
                 if context.event_sink:
-                    sync_result(context.event_sink.flush(context.run_id), context.event_sink)
+                    try:
+                        sync_result(
+                            context.event_sink.flush(context.run_id),
+                            context.event_sink,
+                            timeout=self._cleanup_seconds(context, call),
+                        )
+                    except TimeoutError as error:
+                        self._cleanup_failed(context, error)
             finally:
                 tool_evidence.reset(evidence_token)
                 skill_scope.reset(skill_token)
@@ -287,27 +363,39 @@ class DelegationRunnable(Runnable):
         evidence = []
         evidence_token = tool_evidence.set(evidence)
         started = monotonic()
-        try:
-            self._save(context, call, record, "queued")
+
+        async def execute():
+            if context.event_sink:
+                await context.event_sink.flush(context.run_id)
             with ExitStack() as stack:
                 for gate in (
                     context.scheduler.child_gate(context),
                     context.scheduler.gate("children"),
                     context.scheduler.expert_gate(self.spec.resources),
                 ):
-                    # 依次约束本轮串行委派、服务总子任务数、该专家资源组并发数。
                     lease = await context.scheduler.aacquire(gate, context, "expert")
                     stack.callback(lease.release)
                 self._start(context, call, record)
                 result = await self.executor.ainvoke(self._inputs(context, call, input), config, **kwargs)
-                return self._result(context, call, record, result, evidence)
+                if context.event_sink:
+                    await context.event_sink.flush(context.run_id)
+                return result
+
+        try:
+            self._save(context, call, record, "queued")
+            result = await run_stage(context, call.call_id, execute)
+            return self._result(context, call, record, result, evidence)
         except BaseException as error:
             return self._failed(context, call, record, error, evidence)
         finally:
             try:
                 self._finish(context, call, record, started, evidence)
                 if context.event_sink:
-                    await context.event_sink.flush(context.run_id)
+                    try:
+                        async with asyncio.timeout(self._cleanup_seconds(context, call)):
+                            await context.event_sink.flush(context.run_id)
+                    except TimeoutError as error:
+                        self._cleanup_failed(context, error)
             finally:
                 tool_evidence.reset(evidence_token)
                 skill_scope.reset(skill_token)

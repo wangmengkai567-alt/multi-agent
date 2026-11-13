@@ -23,8 +23,13 @@ class BudgetSummarizationMiddleware(SummarizationMiddleware):
 
     def _can_summarize(self):
         context = get_run_context()
-        remaining = context.collection_remaining()
-        if context.report_started or remaining is not None and remaining <= 2 * context.policy.timeouts.request_seconds:
+        from agent.runtime.stage_budget import coordination_window, current_stage, stage_remaining
+
+        remaining = stage_remaining(context, tools=True)
+        minimum = 2 * context.policy.stages.expert_request_min_seconds
+        if context.report_started or remaining is not None and remaining <= minimum:
+            return False
+        if current_stage(context) is None and coordination_window(context) <= 0:
             return False
         category = self.model.category
         return calls_available(category, category, *(("main_model",) if category == "sub_model" else ()))
@@ -99,6 +104,9 @@ class BudgetChatModel(BaseChatModel):
         measured = self._measurement(messages, run_manager)
         message, error = None, None
         try:
+            from time import monotonic
+
+            measured.deadline_clock = monotonic() + request_timeout(model_request=True)
             with context.scheduler.provider(context, "models", self.resource_group):
                 measured.admit()
                 admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
@@ -115,6 +123,7 @@ class BudgetChatModel(BaseChatModel):
                         raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
                     raise
                 context.check_active()
+                request_timeout(model_request=True)
                 return ChatResult(generations=[ChatGeneration(message=register_turn(normalize_model_message(message)))])
         except BaseException as exc:
             if isinstance(exc, ExecutionTerminated):
@@ -130,6 +139,9 @@ class BudgetChatModel(BaseChatModel):
         measured = self._measurement(messages, run_manager)
         message, error = None, None
         try:
+            from time import monotonic
+
+            measured.deadline_clock = monotonic() + request_timeout(model_request=True)
             async with context.scheduler.aprovider(context, "models", self.resource_group):
                 measured.admit()
                 admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
@@ -147,6 +159,7 @@ class BudgetChatModel(BaseChatModel):
                         raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
                     raise
                 context.check_active()
+                request_timeout(model_request=True)
                 return ChatResult(generations=[ChatGeneration(message=register_turn(normalize_model_message(message)))])
         except BaseException as exc:
             if isinstance(exc, ExecutionTerminated):

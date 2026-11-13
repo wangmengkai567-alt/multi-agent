@@ -5,6 +5,12 @@ timeouts:
   tool_seconds: 25.0
   # End acquisition at 210 seconds; final reporting gets up to 85 seconds plus 5 seconds for shutdown.
   report_reserve_seconds: 90.0
+stages:
+  # Minimum admission windows, not predictions of provider latency. All actual deadlines are hard bounds.
+  coordination_seconds: 10.0
+  expert_request_min_seconds: 10.0
+  tool_min_seconds: 5.0
+  handoff_seconds: 10.0
 context:
   # Project request budget, measured over the complete UTF-8 JSON payload.
   # Text uses conservative UTF-8 bounds; inline images use verified per-image token bounds.

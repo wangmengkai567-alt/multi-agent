@@ -18,6 +18,13 @@ from agent.runtime.hooks import active_call
 from agent.runtime.output import cited_urls
 from agent.runtime.policies import PolicyError, calls_available, search_call_available
 from agent.runtime.required_work import active_work_item, required_work_snapshot
+from agent.runtime.stage_budget import (
+    admit_stage,
+    close_limited_work,
+    coordination_window,
+    record_decision,
+    tools_admitted,
+)
 
 FILE_ACTIONS = frozenset(("write_file", "edit_file", "generate_markdown", "execute"))
 NETWORK_ACTIONS = frozenset(("internet_search", "read_web_page"))
@@ -38,12 +45,21 @@ def tool_available(context, name, *, network=False, target_specs=None):
         return False
     if context is None:
         return True
+    if context.stop_status is not None or context.terminal_error is not None:
+        return False
     remaining = context.collection_remaining()
     if context.report_started or remaining is not None and remaining <= 0:
         return False
     if name == "task" and not context.can_delegate():
         return False
     call = active_call.get()
+    if not (call and call.task_id) and coordination_window(context) <= 0:
+        decision = admit_stage(context)
+        record_decision(context, decision, "tool_admission")
+        close_limited_work(context, decision)
+        return False
+    if call and call.task_id and not tools_admitted(context):
+        return False
     if name == "update_required_work" and call and call.task_id:
         return False
     if name == "task" and context.required_work and active_work_item(context) is None:
@@ -83,14 +99,12 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         can_use_tools = calls_available(
             category, "tool", category, *(("main_model",) if category == "sub_model" else ())
         )
-        # Tool disclosure must leave time for this coordination request and its next delegation.
-        # Otherwise a long answer can remain tool-enabled until acquisition cancels it.
-        remaining = context.collection_remaining()
-        if not (call and call.task_id) and (
-            not context.can_delegate()
-            or remaining is not None
-            and remaining <= 2 * context.policy.timeouts.request_seconds
-        ):
+        if call and call.task_id:
+            can_use_tools &= tools_admitted(context)
+        elif not context.report_started and coordination_window(context) <= 0:
+            decision = admit_stage(context)
+            close_limited_work(context, decision)
+            context.start_report(decision.reason)
             can_use_tools = False
         evidence = tool_evidence.get() or []
         if call and call.actor == "document" and context.task_contract is not None:
@@ -163,17 +177,10 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 )
             if name == "task":
                 targets = {
-                    target: spec
-                    for target, spec in self.target_specs.items()
-                    if expert_available(context, spec)
-                    and calls_available(
-                        category,
-                        "tool",
-                        category,
-                        "sub_model",
-                        *(("tool", "sub_model") if spec.tools else ()),
-                    )
+                    target: spec for target, spec in self.target_specs.items() if admit_stage(context, spec).allowed
                 }
+                for target, spec in self.target_specs.items():
+                    record_decision(context, admit_stage(context, spec), "disclosure", target)
                 if not targets:
                     continue
                 schema = deepcopy(convert_to_openai_tool(tool))

@@ -28,6 +28,7 @@ async def run_phases(context, collect, report):
     task = asyncio.create_task(collecting(), name=f"collection:{context.run_id}")
     task.add_done_callback(_consume)
     answer = None
+    reason = "取证阶段时限已到"
     try:
         while True:
             wait = context.remaining() if context.report_started else context.collection_remaining()
@@ -35,8 +36,8 @@ async def run_phases(context, collect, report):
             if done:
                 try:
                     answer = task.result()
-                except CollectionEnded:
-                    pass  # Explicit phase boundary, never a retry of an unexpected model/tool failure.
+                except CollectionEnded as error:
+                    reason = str(error)
                 break
             context.check_active()
             if context.report_started:
@@ -59,7 +60,8 @@ async def run_phases(context, collect, report):
                 raise error
     context.check_active()
     context.start_report(
-        "取证阶段已完成" if answer is not None else "取证阶段时限已到", collection_timed_out=answer is None
+        "取证阶段已完成" if answer is not None else reason,
+        collection_timed_out=context.collection_remaining() is not None and context.collection_remaining() <= 0,
     )
     if answer is not None:
         return answer

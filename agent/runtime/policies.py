@@ -159,6 +159,27 @@ class TimeoutLimits(StrictConfig):
         return self
 
 
+class StageLimits(StrictConfig):
+    coordination_seconds: float = Field(default=10.0, gt=0, le=300)
+    expert_request_min_seconds: float = Field(default=10.0, gt=0, le=300)
+    tool_min_seconds: float = Field(default=5.0, gt=0, le=300)
+    handoff_seconds: float = Field(default=10.0, gt=0, le=300)
+
+    @model_validator(mode="after")
+    def valid_handoff(self):
+        if self.handoff_seconds < self.expert_request_min_seconds:
+            raise ValueError("Stage handoff must cover an expert answer request")
+        return self
+
+    def expert_minimum(self, cleanup, tools=1):
+        return (
+            (tools + 1) * self.expert_request_min_seconds
+            + tools * self.tool_min_seconds
+            + self.handoff_seconds
+            + cleanup
+        )
+
+
 class ModelWindow(StrictConfig):
     window_tokens: int = Field(ge=1)
     max_input_tokens: int = Field(ge=1)
@@ -196,6 +217,7 @@ class RuntimePolicy(StrictConfig):
     context: ContextLimits
     scheduler: SchedulerLimits = Field(default_factory=SchedulerLimits)
     timeouts: TimeoutLimits = Field(default_factory=TimeoutLimits)
+    stages: StageLimits = Field(default_factory=StageLimits)
     budgets: Budgets
     sql: SQLLimits
     search: SearchLimits = Field(default_factory=SearchLimits)
@@ -223,25 +245,31 @@ def policy_for_run():
 
 def reserve_calls(*kinds):
     """Reserve all categories or none, before performing any external action."""
-    _reserve_calls(*kinds, charge=True)
+    _reserve_calls(get_run_context(), *kinds, charge=True)
 
 
 def calls_available(*kinds):
     """Use the same admission calculation without charging a future call."""
+    return calls_available_for(get_run_context(), *kinds)
+
+
+def calls_available_for(context, *kinds):
+    """Project the same call ledger for an explicitly supplied run."""
     try:
-        _reserve_calls(*kinds, charge=False)
+        _reserve_calls(context, *kinds, charge=False)
     except (BudgetExceeded, PolicyError):
         return False
     return True
 
 
 # 同一锁内先检查所有类别，再一次性扣减，避免部分扣费或并发越过预算上限。
-def _reserve_calls(*kinds, charge):
+def _reserve_calls(context, *kinds, charge):
     if not kinds or set(kinds) - set(KINDS):
         raise ValueError("Unknown or empty call category")
-    context = get_run_context()
+    if context is None:
+        raise MissingConfiguration("A run context is required for controlled call admission")
     context.check_active()
-    limits = policy_for_run().budgets
+    limits = context.policy.budgets
     requested = {kind: kinds.count(kind) for kind in set(kinds)}
     with context.budget_lock:
         context.check_active()
@@ -280,6 +308,34 @@ def request_timeout(maximum=None, *, model_request=False):
     call = active_call.get()
     admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
     remaining = context.remaining() if context.report_started else context.collection_remaining()
+    from agent.runtime.stage_budget import coordination_window, current_stage, stage_remaining
+
+    stage = current_stage(context)
+    if stage is not None:
+        from agent.runtime.finalization import finalization_active
+
+        handing_off = model_request and finalization_active.get()
+        stage_left = stage_remaining(context, tools=not handing_off)
+        if model_request and not handing_off:
+            stage_left -= context.policy.stages.tool_min_seconds
+        remaining = stage_left if remaining is None else min(remaining, stage_left)
+        if handing_off:
+            maximum = (
+                min(maximum, context.policy.stages.handoff_seconds)
+                if maximum is not None
+                else context.policy.stages.handoff_seconds
+            )
+    elif not context.report_started:
+        maximum = min(maximum, coordination_window(context)) if maximum is not None else coordination_window(context)
+    if model_request:
+        from time import monotonic
+
+        from agent.runtime.measurement import active_request
+
+        measured = active_request.get()
+        deadline = measured.deadline_clock if measured is not None else None
+        if deadline is not None:
+            remaining = min(value for value in (remaining, deadline - monotonic()) if value is not None)
     from agent.runtime.tool_timeout import active_tool_scope
 
     scope = active_tool_scope.get()
@@ -297,9 +353,29 @@ def request_timeout(maximum=None, *, model_request=False):
         if finalization_active.get():
             # The sole final report owns the reserved interval, including time beyond acquisition requests.
             request_limit = limits.report_reserve_seconds - limits.shutdown_seconds
-    if remaining is not None and remaining <= 0:
+    if (remaining is not None and remaining <= 0) or maximum is not None and maximum <= 0:
         context.check_active()  # The total deadline takes precedence over a phase boundary.
-        raise CollectionEnded("取证阶段时限已到；保留已取得的证据并转入最终报告")
+        if stage is not None:
+            from agent.runtime.errors import StageEnded
+
+            raise StageEnded("当前分工的取证或交接窗口已耗尽")
+        if context.report_started:
+            from agent.runtime.models import ModelRequestTimeout
+
+            raise ModelRequestTimeout("main_model", limits.report_reserve_seconds - limits.shutdown_seconds)
+        from dataclasses import replace
+
+        from agent.runtime.stage_budget import admit_stage, close_limited_work, record_decision
+
+        decision = replace(
+            admit_stage(context),
+            allowed=False,
+            code="time_budget",
+            reason="协调请求窗口已耗尽；保留已有证据进入单次最终汇总",
+        )
+        record_decision(context, decision, "request_deadline")
+        close_limited_work(context, decision)
+        raise CollectionEnded(decision.reason)
     return min(value for value in (request_limit, maximum, remaining, admitted) if value is not None)
 
 

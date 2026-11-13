@@ -194,6 +194,7 @@ def associate_work_task(context, item_id, task_id):
         ):
             raise PolicyError("分工身份与本轮事项不一致")
         item["task_ids"].append(task_id)
+        item["ready_for_delegation"] = False
         _save(context, items)
 
 
@@ -242,10 +243,12 @@ def apply_work_updates(context, updates):
                 raise PolicyError("标记未完成时必须说明进度及未完成原因")
             items[key].update(
                 status=update.status,
+                ready_for_delegation=update.status == "in_progress",
                 progress=update.progress,
                 completion_basis=values["completion_basis"],
                 validation_errors=[],
                 permission_conflict="",
+                budget_reason="",
             )
         _check_dependencies(items)
         # Process dependencies first, including items registered in the same call.
@@ -281,6 +284,10 @@ def apply_work_updates(context, updates):
 
 
 def remaining_work_budget(context):
+    from dataclasses import asdict
+
+    from agent.runtime.stage_budget import admit_stage, current_stage, stage_snapshot
+
     with context.budget_lock:
         return dict(
             total_seconds=context.remaining(),
@@ -288,7 +295,25 @@ def remaining_work_budget(context):
             report_reserve_seconds=context.policy.timeouts.report_reserve_seconds,
             calls_used=dict(context.call_counts),
             call_limits=context.policy.budgets.model_dump(),
+            stage=stage_snapshot(context),
+            admission=asdict(admit_stage(context)) if current_stage(context) is None else None,
         )
+
+
+def limit_required_work(context, item_ids, code, reason):
+    with context.budget_lock:
+        items = deepcopy(context.required_work)
+        for key in item_ids:
+            item = items[key]
+            if item["status"] != "completed":
+                item.update(
+                    status="unfinished",
+                    ready_for_delegation=False,
+                    progress=reason,
+                    validation_errors=[reason],
+                    budget_reason=code,
+                )
+        _save(context, items)
 
 
 def required_work_snapshot(context):

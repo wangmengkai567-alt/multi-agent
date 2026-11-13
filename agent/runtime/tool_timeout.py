@@ -6,6 +6,7 @@ from threading import Event, RLock
 from time import monotonic
 
 from agent.runtime.context import get_run_context
+from agent.runtime.errors import StageEnded
 from agent.runtime.recovery import ToolCallTimeout
 
 active_tool_scope = ContextVar("active_tool_scope", default=None)
@@ -16,12 +17,23 @@ class ToolScope:
     def __init__(self, name, seconds):
         self.name, self.seconds = name, seconds
         self.deadline = monotonic() + seconds if seconds is not None else None
+        from agent.runtime.stage_budget import current_stage
+
+        context = get_run_context()
+        stage = current_stage(context) if context else None
+        self.stage_deadline = stage["tool_deadline"] if stage else None
+        if self.stage_deadline is not None:
+            self.deadline = (
+                min(self.deadline, self.stage_deadline) if self.deadline is not None else self.stage_deadline
+            )
         self.cancelled, self.lock, self.workers = Event(), RLock(), set()
 
     def check(self):
         context = get_run_context()
         if context is not None:
             context.check_active()
+        if self.stage_deadline is not None and monotonic() >= self.stage_deadline:
+            raise StageEnded("当前分工取证窗口已到，不再追加工具调用；保留已有证据交接")
         if self.cancelled.is_set() or self.deadline is not None and monotonic() >= self.deadline:
             raise ToolCallTimeout(self.name, self.seconds or 0)
 

@@ -228,7 +228,7 @@ def metadata(text, evidence):
     )
 
 
-def sync_result(coro, sink):
+def sync_result(coro, sink, *, timeout):
     """Sync framework executors run in workers; DB work stays on its owner loop."""
     try:
         same_loop = asyncio.get_running_loop() is sink.loop
@@ -237,4 +237,9 @@ def sync_result(coro, sink):
     if same_loop:
         coro.close()
         raise EventPersistenceError("Use ainvoke on the event loop for durable result handoff")
-    return asyncio.run_coroutine_threadsafe(coro, sink.loop).result()
+    future = asyncio.run_coroutine_threadsafe(coro, sink.loop)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        raise

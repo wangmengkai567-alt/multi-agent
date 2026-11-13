@@ -69,6 +69,7 @@ class RunContext:
     search_counts: dict = field(default_factory=dict, repr=False)
     task_results: dict = field(default_factory=dict, repr=False)
     required_work: dict = field(default_factory=dict, repr=False)
+    budget_decisions: dict = field(default_factory=dict, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "tool", "retry"), 0)
@@ -114,9 +115,10 @@ class RunContext:
         remaining = self.remaining()
         return None if remaining is None else remaining - self.policy.timeouts.report_reserve_seconds
 
-    def can_delegate(self):
-        remaining = self.collection_remaining()
-        return not self.report_started and (remaining is None or remaining > self.policy.timeouts.request_seconds)
+    def can_delegate(self, spec=None):
+        from agent.runtime.stage_budget import admit_stage
+
+        return admit_stage(self, spec).allowed
 
     def start_report(self, reason, *, collection_timed_out=False):
         with self.budget_lock:
@@ -125,6 +127,11 @@ class RunContext:
                 return
             self.report_started, self.report_reason = True, reason
             self.collection_timed_out = collection_timed_out
+            if collection_timed_out and self.required_work:
+                from agent.runtime.required_work import limit_required_work
+                from agent.runtime.stage_budget import investigation_items
+
+                limit_required_work(self, investigation_items(self), "time_budget", reason)
             if self.event_sink:
                 from agent.runtime.events import make_event
 
@@ -153,6 +160,9 @@ class RunContext:
                 self.stop_status = "timed_out"
             if self.stop_status is not None:
                 raise RunStopped(f"Run has ended: {self.stop_status}")
+            from agent.runtime.stage_budget import check_stage
+
+            check_stage(self)
             if collection_active.get():
                 available = self.collection_remaining()
                 if self.report_started or available is not None and available <= 0:

@@ -89,7 +89,9 @@ def retry_delay(request, call, error):
     if status == 429:
         # 限流响应若提供 Retry-After，等待时间至少达到服务端要求。
         delay = max(delay, retry_after(error) or 0)
-    remaining = context.collection_remaining()
+    from agent.runtime.stage_budget import stage_remaining
+
+    remaining = stage_remaining(context, tools=True)
     if (
         context.report_started
         or remaining is not None
