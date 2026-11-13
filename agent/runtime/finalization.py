@@ -12,6 +12,7 @@ from agent.runtime.context import get_run_context
 from agent.runtime.contracts import assert_contract
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import PolicyError
+from agent.runtime.required_work import required_work_snapshot
 
 finalization_active = ContextVar("finalization_active", default=False)
 
@@ -44,6 +45,7 @@ def prepare_final_request(request):
         context.start_report("主助手已进入结果整理回合")
         # Rebuild handoffs from validated observations, including failed tasks with accepted evidence.
         payload["task_results"] = [delegation_payload(row) for row in context.task_results.values()]
+        payload["required_work"] = required_work_snapshot(context)
     settings = dict(request.model_settings)
     for name in ("tools", "functions", "function_call", "parallel_tool_calls"):
         settings.pop(name, None)

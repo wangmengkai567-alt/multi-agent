@@ -68,6 +68,7 @@ class RunContext:
     task_rejections: list = field(default_factory=list, repr=False)
     search_counts: dict = field(default_factory=dict, repr=False)
     task_results: dict = field(default_factory=dict, repr=False)
+    required_work: dict = field(default_factory=dict, repr=False)
     delegation_calls: dict[str, list[dict]] = field(default_factory=dict, repr=False)
     call_counts: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(("main_model", "sub_model", "tool", "retry"), 0)

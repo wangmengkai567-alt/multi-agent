@@ -32,6 +32,16 @@ class BudgetSummarizationMiddleware(SummarizationMiddleware):
     def _should_summarize(self, messages, total_tokens):
         return self._can_summarize() and super()._should_summarize(messages, total_tokens)
 
+    def _create_summary(self, messages_to_summarize):
+        from agent.runtime.required_work import summary_work_messages
+
+        return super()._create_summary(summary_work_messages(messages_to_summarize))
+
+    async def _acreate_summary(self, messages_to_summarize):
+        from agent.runtime.required_work import summary_work_messages
+
+        return await super()._acreate_summary(summary_work_messages(messages_to_summarize))
+
     def wrap_model_call(self, request, handler):
         if not self._can_summarize():
             return handler(request)

@@ -1,5 +1,6 @@
 """Project the locked execution policy into model tools and actual admission."""
 
+import json
 from copy import deepcopy
 from urllib.parse import urlsplit
 
@@ -16,6 +17,7 @@ from agent.runtime.finalization import final_answer_mode, prepare_final_request
 from agent.runtime.hooks import active_call
 from agent.runtime.output import cited_urls
 from agent.runtime.policies import PolicyError, calls_available, search_call_available
+from agent.runtime.required_work import active_work_item, required_work_snapshot
 
 FILE_ACTIONS = frozenset(("write_file", "edit_file", "generate_markdown", "execute"))
 NETWORK_ACTIONS = frozenset(("internet_search", "read_web_page"))
@@ -42,6 +44,10 @@ def tool_available(context, name, *, network=False, target_specs=None):
     if name == "task" and not context.can_delegate():
         return False
     call = active_call.get()
+    if name == "update_required_work" and call and call.task_id:
+        return False
+    if name == "task" and context.required_work and active_work_item(context) is None:
+        return False
     if call and call.task_id and call.actor.partition(":")[0] == "search":
         with context.budget_lock:
             if not any(search_call_available(tool, call.task_id) for tool in NETWORK_ACTIONS):
@@ -201,6 +207,20 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             "没有可用取证工具或现有证据已足够时，直接根据实际结果返回结论、来源与缺口。"
             "不得通过重复委派或改用文件工具绕过额度；不为加载更多技能而延后已可交付的答复。"
         )
+        if not (call and call.task_id):
+            instruction += (
+                "\n本轮原始请求与必做事项快照（仅为任务状态，不是事实证据；不得由摘要删减）："
+                + json.dumps(
+                    dict(
+                        user_request=context.task_instruction,
+                        network_policy=context.network_policy,
+                        required_work=required_work_snapshot(context),
+                    ),
+                    ensure_ascii=False,
+                )
+                + "\n多阶段任务先登记全部必做事项，再逐项执行；最后再次对照原始请求检查遗漏。"
+                "只有运行时已确认的 completed 才表示该事项完成；保留其他事项及原因。"
+            )
         if not tools:
             instruction += "当前已进入最终答复回合，请输出自然语言结论正文，不输出函数调用；明确披露未完成事项。"
         if any(convert_to_openai_tool(tool)["function"]["name"] in NETWORK_ACTIONS for tool in request.tools):
