@@ -6,10 +6,12 @@ from contextvars import ContextVar
 
 from langchain_core.messages import HumanMessage
 
+from agent.prompts import expert_handoff_prompts
 from agent.reflection import tool_evidence
-from agent.results import delegation_payload, task_evidence_payload
+from agent.results import delegation_context, delegation_payload, indexed_evidence_payload
 from agent.runtime.context import get_run_context
 from agent.runtime.contracts import assert_contract
+from agent.runtime.experts import append_system
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import PolicyError
 from agent.runtime.required_work import required_work_snapshot
@@ -21,6 +23,7 @@ def prepare_final_request(request):
     context = get_run_context()
     contract = assert_contract(context)
     call = active_call.get()
+    system = request.system_message
     payload = dict(
         user_request=contract.user_query,
         input_text=contract.input_text,
@@ -33,14 +36,18 @@ def prepare_final_request(request):
         if not isinstance(description, str) or not description.strip():
             raise PolicyError("Final answer requires the original delegated task description")
         evidence = tool_evidence.get() or []
-        accepted = task_evidence_payload(evidence, call.task_id)
+        accepted = indexed_evidence_payload(evidence, call.task_id)
         # Retain the exact visible excerpts, not unseen provider artifacts or dialogue.
         payload.update(
             delegated_task=description,
+            sources=accepted["sources"],
             observations=accepted["observations"],
             unfinished=accepted["unfinished"],
             limitations=accepted["limitations"],
+            **delegation_context(context, context.task_results[call.task_id]),
         )
+        if call.actor in expert_handoff_prompts:
+            system = append_system(system, expert_handoff_prompts[call.actor])
     else:
         context.start_report("主助手已进入结果整理回合")
         # Rebuild handoffs from validated observations, including failed tasks with accepted evidence.
@@ -60,6 +67,7 @@ def prepare_final_request(request):
         tools=[],
         tool_choice="none",
         model_settings=settings,
+        system_message=system,
     )
 
 

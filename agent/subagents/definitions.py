@@ -1,5 +1,6 @@
 """The small production expert set and its explicit permissions."""
 
+from agent.prompts import expert_handoff_prompts
 from agent.subagent_registry import ExecutionConfig, SubagentSpec
 from tools.db_tools import execute_sql_query, get_table_data, list_sql_tables
 from tools.tavily_tool import internet_search, read_web_page
@@ -29,7 +30,8 @@ def default_specs():
             "表格结果保留行列索引、表头与合并跨度，图片描述和OCR均为模型识别结果；保留模糊区域，不猜测未识别内容。"
             "read_document 已返回原文、位置和读取范围，取得所需内容后直接回答分工。"
             "read_bound_material 仅接受本轮披露的文本 reference，上传文件路径不能作为该工具的 reference。"
-            "依据实际解析结果说明位置和读取限制；材料记载不等于独立核实的外部事实。",
+            "依据实际解析结果说明位置和读取限制；材料记载不等于独立核实的外部事实。\n"
+            + expert_handoff_prompts["document"],
             (read_document, read_bound_material),
             allowed_skill_ids=("document-analysis", "data-analysis"),
         ),
@@ -44,7 +46,8 @@ def default_specs():
             "源码任务应定位并读取相关源码文件；搜索摘要与已读取正文分开说明，不猜测没有取得的数据或来源。"
             "每个新分工先实际搜索取得本分工来源，再读取发现的网页；其他助手或上传材料给出的链接不能代替搜索。"
             "结合剩余额度安排检索，合并相关问题；工具额度耗尽后使用已有结果回答，披露缺口，不重复请求。"
-            "引用链接必须使用本分工工具实际返回的 URL，不得自行改写版本路径或补充未取得的链接。",
+            "引用链接必须使用本分工工具实际返回的 URL，不得自行改写版本路径或补充未取得的链接。\n"
+            + expert_handoff_prompts["search"],
             (internet_search, read_web_page),
             allowed_skill_ids=("ecommerce-analysis", "research"),
             execution=ExecutionConfig(source_kind="search", network_access=True),

@@ -5,7 +5,6 @@ from copy import deepcopy
 from hashlib import sha256
 from typing import Literal
 
-from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -176,6 +175,28 @@ def _save(context, items):
     context.required_work = items
 
 
+def associate_work_task(context, item_id, task_id):
+    """The delegation lifecycle binds its issued identity before the expert starts."""
+    if item_id is None:
+        return
+    with context.budget_lock:
+        context.check_active()
+        items = deepcopy(context.required_work)
+        item = items[item_id]
+        if item["status"] != "in_progress":
+            raise PolicyError("只能向当前执行中的事项关联实际分工")
+        row = context.task_results[task_id]
+        if (
+            row["work_item_id"] != item_id
+            or row["run_id"] != context.run_id
+            or row["thread_id"] != context.thread_id
+            or row["call_id"] != task_id
+        ):
+            raise PolicyError("分工身份与本轮事项不一致")
+        item["task_ids"].append(task_id)
+        _save(context, items)
+
+
 def apply_work_updates(context, updates):
     """Definitions are append-only; only runtime-validated claims can reach completed."""
     call = active_call.get()
@@ -259,6 +280,17 @@ def apply_work_updates(context, updates):
         return required_work_snapshot(context)
 
 
+def remaining_work_budget(context):
+    with context.budget_lock:
+        return dict(
+            total_seconds=context.remaining(),
+            collection_seconds=context.collection_remaining(),
+            report_reserve_seconds=context.policy.timeouts.report_reserve_seconds,
+            calls_used=dict(context.call_counts),
+            call_limits=context.policy.budgets.model_dump(),
+        )
+
+
 def required_work_snapshot(context):
     with context.budget_lock:
         items = deepcopy(list(context.required_work.values()))
@@ -270,13 +302,7 @@ def required_work_snapshot(context):
                 item["evidence_error"] = str(error)
         return dict(
             items=items,
-            remaining_budget=dict(
-                total_seconds=context.remaining(),
-                collection_seconds=context.collection_remaining(),
-                report_reserve_seconds=context.policy.timeouts.report_reserve_seconds,
-                calls_used=dict(context.call_counts),
-                call_limits=context.policy.budgets.model_dump(),
-            ),
+            remaining_budget=remaining_work_budget(context),
         )
 
 
@@ -322,39 +348,3 @@ def update_required_work(updates: list[WorkUpdate]) -> str:
     except PolicyError as error:
         payload = dict(error=str(error), **required_work_snapshot(context))
     return json.dumps(payload, ensure_ascii=False)
-
-
-class RequiredWorkMiddleware(AgentMiddleware):
-    """Associate runtime-issued delegation identities without changing task's public arguments."""
-
-    @staticmethod
-    def _associate(context, item_id, request_id):
-        if item_id is None:
-            return
-        with context.budget_lock:
-            items = deepcopy(context.required_work)
-            item = items[item_id]
-            for record in context.delegation_calls.get(request_id, []):
-                if record["call_id"] not in item["task_ids"]:
-                    item["task_ids"].append(record["call_id"])
-            _save(context, items)
-
-    def wrap_tool_call(self, request, handler):
-        context = get_run_context()
-        if context is None or request.tool_call["name"] != "task":
-            return handler(request)
-        item_id = active_work_item(context)
-        try:
-            return handler(request)
-        finally:
-            self._associate(context, item_id, request.tool_call["id"])
-
-    async def awrap_tool_call(self, request, handler):
-        context = get_run_context()
-        if context is None or request.tool_call["name"] != "task":
-            return await handler(request)
-        item_id = active_work_item(context)
-        try:
-            return await handler(request)
-        finally:
-            self._associate(context, item_id, request.tool_call["id"])

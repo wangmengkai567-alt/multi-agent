@@ -48,7 +48,7 @@ def _build_agent(saver):
     from agent.runtime.contracts import TaskContractMiddleware
     from agent.runtime.evidence_protocol import adapter_for_tool, bind_framework_tools
     from agent.runtime.experts import ExpertRegistryMiddleware, SerialDelegationMiddleware
-    from agent.runtime.required_work import RequiredWorkMiddleware, update_required_work
+    from agent.runtime.required_work import update_required_work
     from agent.runtime.skills import ProjectSkillsMiddleware, SkillReadMiddleware
     from agent.subagent_factory import build_subagents, validate_model
     from agent.subagent_registry import SummaryConfig, load_default_registry
@@ -82,7 +82,6 @@ def _build_agent(saver):
             TaskContractMiddleware(),
             ProjectSkillsMiddleware(),
             CapabilityDisclosureMiddleware(registry.specs),
-            RequiredWorkMiddleware(),
             HookToolMiddleware(allowed_targets=registry.specs, managed_delegation=True),
         ],
     ).with_config({"recursion_limit": 1000})

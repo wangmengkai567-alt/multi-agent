@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from copy import deepcopy
 
 from sqlglot import exp, parse_one
 
@@ -120,13 +121,9 @@ def task_evidence_payload(evidence, task_id):
     )
 
 
-# 将子任务记录整理成返回给主助手的状态、结论、证据片段、来源和限制。
-def delegation_payload(row):
-    """Keep task failure separate from accepted successful-tool observations."""
-    # A collection rejected during evidence validation has no accepted factual sources.
-    accepted = (
-        task_evidence_payload(row["evidence"], row["call_id"]) if row["sources"] else dict(sources=[], observations=[])
-    )
+def indexed_evidence_payload(evidence, task_id):
+    """Use one source index space in expert final requests and coordinator handoffs."""
+    accepted = task_evidence_payload(evidence, task_id)
     # Metadata appears once in sources; each observation references its exact positions.
     # Keep the visible tool text intact, including excerpts shorter than provider artifacts.
     observations, position = [], 0
@@ -141,17 +138,65 @@ def delegation_payload(row):
         )
         position = end
     return dict(
+        sources=[{key: source[key] for key in SOURCE_FIELDS} for source in accepted["sources"]],
+        observations=observations,
+        unfinished=accepted["unfinished"],
+        limitations=accepted["limitations"],
+    )
+
+
+# 将子任务记录整理成返回给主助手的状态、结论、证据片段、来源和限制。
+def delegation_payload(row):
+    """Keep task failure separate from accepted successful-tool observations."""
+    # A collection rejected during evidence validation has no accepted factual sources.
+    accepted = (
+        indexed_evidence_payload(row["evidence"], row["call_id"])
+        if row["sources"]
+        else dict(sources=[], observations=[])
+    )
+    return dict(
         task_id=row["call_id"],
+        work_item_id=row["work_item_id"],
         expert=row["target"],
         status=row["status"],
         result=row["result"],
-        sources=[{key: source[key] for key in SOURCE_FIELDS} for source in accepted["sources"]],
-        observations=observations,
+        sources=accepted["sources"],
+        observations=accepted["observations"],
         unfinished=row["unfinished"],
         limitations=row["limitations"],
         error=row["error"],
         error_category=row["error_category"],
     )
+
+
+def delegation_context(context, row):
+    """Carry only declared dependencies; their material never becomes this expert's evidence."""
+    from agent.runtime.evidence_protocol import EvidenceError
+    from agent.runtime.required_work import remaining_work_budget
+
+    with context.budget_lock:
+        item_id = row["work_item_id"]
+        item = context.required_work[item_id] if item_id is not None else None
+        dependencies, seen = [], set()
+        for dependency in item["dependencies"] if item else ():
+            for task_id in context.required_work[dependency]["task_ids"]:
+                source = context.task_results[task_id]
+                if (
+                    source["call_id"] != task_id
+                    or source["run_id"] != context.run_id
+                    or source["thread_id"] != context.thread_id
+                    or source["work_item_id"] != dependency
+                    or source["status"] not in ("completed", "failed", "cancelled", "interrupted")
+                ):
+                    raise EvidenceError("上游交接必须属于本轮已结束的依赖事项分工")
+                if task_id not in seen:
+                    dependencies.append(delegation_payload(source))
+                    seen.add(task_id)
+        return dict(
+            current_work=deepcopy(item),
+            dependency_results=dependencies,
+            remaining_budget=remaining_work_budget(context),
+        )
 
 
 # 从实际 SQL 提取查询对象，并将文本中声明的时间范围和统计口径单独保留。
