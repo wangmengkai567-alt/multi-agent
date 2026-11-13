@@ -246,11 +246,11 @@
 <section class="upload-area" aria-label="上传分析材料">
   <div class="upload-controls">
     <button id="selectFilesBtn" class="btn btn-ghost" type="button">选择文件</button>
-    <input id="uploadInput" type="file" multiple hidden accept=".pdf,.docx,.xlsx,.xls,.txt,.text,.md,.csv,.json,.py,.yml,.yaml,.log,.html,.xml,.tsv,.toml,.rst,.sql,.js,.ts,.rs,.sh,.bat,.ps1">
-    <span class="upload-hint">支持 PDF、Word（.docx）、Excel 和 UTF-8 文本；最多 20 个文件，发送任务时上传。</span>
+    <input id="uploadInput" type="file" multiple hidden accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.docx,.xlsx,.xls,.txt,.text,.md,.csv,.json,.py,.yml,.yaml,.log,.html,.xml,.tsv,.toml,.rst,.sql,.js,.ts,.rs,.sh,.bat,.ps1">
+    <span class="upload-hint">支持 PDF、图片（PNG/JPEG/WebP/BMP/TIFF）、Word（.docx）、Excel 和 UTF-8 文本；最多 20 个文件，发送任务时上传。</span>
   </div>
   <ul id="uploadList" class="upload-list" aria-label="已选文件"></ul>
-  <p id="uploadStatus" role="status" aria-live="polite">文件上传后保留在所选会话，后续任务可继续使用；上传同名文件会覆盖。扫描件不支持文字识别。</p>
+  <p id="uploadStatus" role="status" aria-live="polite">文件上传后保留在所选会话，后续任务可继续使用；上传同名文件会覆盖。PDF 和图片支持 OCR、图片内容理解及表格结构识别。</p>
 </section>
 <div class="options">
   <label>发送到 <select id="threadSelect" aria-label="发送到"><option value="">新会话</option></select></label>

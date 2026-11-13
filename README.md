@@ -31,7 +31,7 @@ LLM_MAIN_BASE_URL=https://api.openai.com/v1
 LLM_MAIN_API_KEY=your-main-api-key
 LLM_MAIN_EXTRA_BODY=
 
-# Search and database agents
+# Search, document and database agents
 LLM_SUB_MODEL=your-sub-model
 LLM_SUB_BASE_URL=https://api.openai.com/v1
 LLM_SUB_API_KEY=your-sub-api-key
@@ -39,6 +39,8 @@ LLM_SUB_EXTRA_BODY=
 
 TAVILY_API_KEY=your-tavily-api-key
 ```
+
+PDF 和图片分析共用 `LLM_SUB_*` 的视觉模型与密钥；服务地址必须支持图片输入，并在 `config/runtime.yml` 的对应模型项配置经核实的 `max_image_tokens` 上限。当前配置提供 Qwen3.8 Max/Flash；无需另配 OCR 服务。
 
 MySQL 为可选功能：需要时填写 `.env.example` 中的 `MYSQL_*` 配置，`MYSQL_DATABASE` 填已有库名，并在 `config/runtime.yml` 的 `sql.allowed_tables` 中配置允许查询的表名。不使用时保留账号、库名为空，表白名单为 `[]`。
 
@@ -65,6 +67,8 @@ uv run --offline --no-project --python .venv\Scripts\python.exe python -B api\se
 主助手只需提供专家和完整任务说明。程序签发独立任务 ID，控制工具权限、预算、超时和取消，并记录真实来源；子助手直接返回结论和工具依据。搜索摘要、网页正文、文档位置与数据库实际查询分别保留。
 
 不再要求 `plan_research`、需求锚点、逐条事实 ID、额外审核模型或后台恢复流程。技能为可选说明，不能添加权限。数据库仍校验只读账号与表白名单，上传材料和每轮目录保持隔离；仅正文和 Markdown 交付，不提供文件格式转换。
+
+上传 PDF 和 PNG/JPEG/WebP/BMP/TIFF 后，文档助手会保留 PDF 原生文本，识别扫描文字、图片内容及表格行列、表头和合并单元格。超过两页先查目录，每次最多识别两页；多帧图片按帧分页。页图最长边为 2048 像素，细小文字、复杂表格或遮挡可能形成缺口；结果包含页码、区域位置及识别方式，模型识别不等于事实核验。每次识别计入子模型预算，并与渲染共用单次请求时限；目录查看不调用模型，失败会直接披露。
 
 最终正文由程序写入 `answer.md`，使用 UTF-8/CRLF；认证下载的文件字节与保存的正文一致。部分分工失败会明确标为部分完成；调查未取得有效结果时不会发布成功文件。`completion.status` 表示实际分工与交付状态，不是程序对全部自然语言结论的事实证明。
 

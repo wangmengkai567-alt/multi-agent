@@ -1,5 +1,5 @@
-# 文档解析：统一输出正文、可定位片段和覆盖范围；不执行 OCR、公式计算或文档中的指令。
-"""Bounded, located document extraction. No OCR, formula evaluation or silent previews."""
+# 原生文档提取与普通预览；PDF/图片证据的 OCR 和视觉识别由 document_vision 执行。
+"""Native document extraction and inspection; visual evidence lives in document_vision."""
 
 import io
 import json
@@ -295,7 +295,7 @@ def _pdf(result, raw):
             result.add(f"page:{index}", dict(page=index, extraction="text_only"), text)
     return result.result(
         "pypdf:" + version("pypdf"),
-        ["只提取文本层；未执行 OCR、图片识别或表格结构重建；空文本页保留缺口"],
+        ["本次普通预览仅提取 PDF 文本层；OCR、图片理解及表格结构需由文档助手调用 read_document 取得证据"],
         selected=select.page_start is not None,
     )
 

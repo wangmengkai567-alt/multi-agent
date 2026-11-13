@@ -5,6 +5,8 @@ estimates for Qwen's byte-level text tokenizer, never supplier billing figures.
 No content is truncated or a different model selected when admission fails.
 """
 
+import base64
+import binascii
 import json
 
 from langchain_core.messages import convert_to_openai_messages
@@ -70,10 +72,46 @@ def context_status(payload, *, request_bytes=None):
     model = limits.models.get(model_id)
     if model is None:
         raise MissingConfiguration(f"No verified context limits configured for model {model_id}")
+    textual_messages, image_count = [], 0
     for message in messages:
         content = message.get("content")
-        if isinstance(content, list) and any(block.get("type") != "text" for block in content):
-            raise MissingConfiguration("Context admission currently supports text input only")
+        if isinstance(content, list):
+            blocks = []
+            for block in content:
+                if block.get("type") == "text":
+                    blocks.append(block)
+                elif block.get("type") == "image_url":
+                    if model.max_image_tokens == 0:
+                        raise MissingConfiguration("Image input has no verified token limit for this model")
+                    image = block.get("image_url")
+                    url = image.get("url") if isinstance(image, dict) else None
+                    if not isinstance(url, str) or not url.startswith("data:image/jpeg;base64,"):
+                        raise MissingConfiguration("Model image input accepts owned inline JPEG pages only")
+                    try:
+                        raw = base64.b64decode(url.split(",", 1)[1], validate=True)
+                    except (ValueError, binascii.Error) as exc:
+                        raise MissingConfiguration("Invalid inline image encoding") from exc
+                    if not raw.startswith(b"\xff\xd8\xff") or not raw.endswith(b"\xff\xd9"):
+                        raise MissingConfiguration("Invalid inline JPEG image")
+                    image_count += 1
+                    blocks.append(dict(type="image_url", image_url={"url": "<owned JPEG>"}))
+                else:
+                    raise MissingConfiguration("Unsupported model input modality")
+            textual_messages.append({**message, "content": blocks})
+        else:
+            textual_messages.append(message)
+    if image_count:
+        # Base64 bytes constrain transport, not text tokens. Reserve the verified per-image upper bound.
+        textual_payload = {**payload, "messages": textual_messages}
+        status.update(
+            estimate_method="utf8_json_bytes_plus_verified_image_bounds_and_framing",
+            image_count=image_count,
+            estimated_image_units=image_count * model.max_image_tokens,
+            estimated_input_units=encoded_size(textual_payload)
+            + 32 * len(messages)
+            + 256 * len(tools)
+            + image_count * model.max_image_tokens,
+        )
     thinking = payload.get("enable_thinking", True)
     if type(thinking) is not bool:
         raise MissingConfiguration("enable_thinking must be a boolean")

@@ -165,6 +165,7 @@ class ModelWindow(StrictConfig):
     max_thinking_input_tokens: int = Field(ge=1)
     max_output_tokens: int = Field(ge=1)
     max_thinking_tokens: int = Field(ge=1)
+    max_image_tokens: int = Field(default=0, ge=0, le=1000000)
 
     @model_validator(mode="after")
     def valid_window(self):
@@ -279,6 +280,16 @@ def request_timeout(maximum=None, *, model_request=False):
     call = active_call.get()
     admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
     remaining = context.remaining() if context.report_started else context.collection_remaining()
+    from agent.runtime.tool_timeout import active_tool_scope
+
+    scope = active_tool_scope.get()
+    if scope is not None:
+        scope.check()
+        if scope.deadline is not None:
+            from time import monotonic
+
+            scope_remaining = scope.deadline - monotonic()
+            remaining = scope_remaining if remaining is None else min(remaining, scope_remaining)
     request_limit = limits.request_seconds
     if model_request and context.report_started and not (call and call.task_id):
         from agent.runtime.finalization import finalization_active
@@ -573,8 +584,16 @@ def before_tool_policy(call):
                 raise PolicyError("工具不在当前分工允许的执行阶段内；请根据已有证据返回结论和缺口")
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
-            if call.actor.rsplit(":", 1)[-1] != "task":
-                call.workflow_data["admitted_timeout"] = request_timeout(context.policy.timeouts.tool_seconds)
+            from tools.document_vision import VISUAL_SUFFIXES
+
+            visual = (
+                name == "read_document"
+                and Path(call.args.get("filename", "")).suffix.lower() in VISUAL_SUFFIXES
+                and (call.args.get("selection") or {}).get("mode") != "catalog"
+            )
+            if name != "task":
+                maximum = context.policy.timeouts.request_seconds if visual else context.policy.timeouts.tool_seconds
+                call.workflow_data["admitted_timeout"] = request_timeout(maximum)
             if name in ("internet_search", "read_web_page"):
                 task_key = (owner, name)
                 if not search_call_available(name, owner):
@@ -584,7 +603,10 @@ def before_tool_policy(call):
             parent = active_call.get()
             category = "sub_model" if parent and parent.task_id else "main_model"
             kinds = ("tool", "retry") if call.attempt else ("tool",)
-            if not calls_available(*kinds, category, *(("main_model",) if category == "sub_model" else ())):
+            visual_calls = ("sub_model",) if name == "read_document" and visual else ()
+            if not calls_available(
+                *kinds, *visual_calls, category, *(("main_model",) if category == "sub_model" else ())
+            ):
                 raise PolicyError(
                     "Remaining call budget is reserved for the final answer; return obtained results and gaps"
                 )

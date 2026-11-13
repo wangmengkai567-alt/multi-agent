@@ -24,6 +24,15 @@ def dispatch(operation, payload):
         for module in payload["modules"]:
             importlib.import_module(module)
         return {"available": True}
+    if operation == "document_render":
+        from tools.document_vision import render_upload
+
+        path = Path(payload["path"])
+        with path.open("rb") as stream:
+            raw = stream.read(payload["maximum"] + 1)
+        if len(raw) > payload["maximum"]:
+            raise ValueError("Original document exceeds the configured upload size limit")
+        return render_upload(path, raw, payload["selection"])
     if operation == "document_read":
         from tools.upload_file_read_tool import _read_local
 

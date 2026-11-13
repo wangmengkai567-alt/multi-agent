@@ -57,7 +57,7 @@ class RequestMeasurement:
             category=category,
             phase=phase,
             finalization=finalization_active.get(),
-            actor=call.target if call and call.target else "main",
+            actor=(call.target or call.actor.partition(":")[0]) if call and call.task_id else "main",
             task_id=call.task_id if call else None,
             parent_call_id=call.call_id if call else self.context.run_id,
             status="queued",

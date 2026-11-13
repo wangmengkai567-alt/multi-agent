@@ -7,13 +7,16 @@ timeouts:
   report_reserve_seconds: 90.0
 context:
   # Project request budget, measured over the complete UTF-8 JSON payload.
-  # This is a conservative local guard, not a supplier token-usage measurement.
-  max_request_bytes: 524288
+  # Text uses conservative UTF-8 bounds; inline images use verified per-image token bounds.
+  # Base64 still counts toward the transport byte cap, not the text-token estimate.
+  max_request_bytes: 2097152
   skill_metadata_bytes: 8000
   safety_tokens: 8192
   # Alibaba Cloud model cards, verified 2026-10-26. Values are tokens, not K/M abbreviations.
   # https://help.aliyun.com/zh/model-studio/qwen3-8-max
   # https://help.aliyun.com/zh/model-studio/qwen3-8-flash
+  # Image bound: 16384 visual tokens + 2 image delimiters (verified 2026-11-13).
+  # https://help.aliyun.com/zh/model-studio/vision
   models:
     qwen3.8-max:
       window_tokens: 1000000
@@ -21,12 +24,14 @@ context:
       max_thinking_input_tokens: 983616
       max_output_tokens: 131072
       max_thinking_tokens: 262144
+      max_image_tokens: 16386
     qwen3.8-flash:
       window_tokens: 1000000
       max_input_tokens: 991808
       max_thinking_input_tokens: 983616
       max_output_tokens: 131072
       max_thinking_tokens: 262144
+      max_image_tokens: 16386
 budgets:
   total: 80
   main_model: 20

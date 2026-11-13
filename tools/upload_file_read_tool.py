@@ -1,6 +1,7 @@
 # 文件读取入口：普通查看与文档证据分开处理，文档证据必须对应本轮契约中的原始上传。
 """Read allowed files; original uploads also expose owned document evidence artifacts."""
 
+import asyncio
 import base64
 from hashlib import sha256
 from pathlib import Path
@@ -66,14 +67,14 @@ def read_file_content(
 
 @evidence_tool("document.v1")
 @tool(response_format="content_and_artifact")
-def read_document(
+async def read_document(
     filename: Annotated[str, "本轮原始上传文件路径，必须位于 uploads/ 内"],
     selection: Annotated[
         DocumentSelection | None,
         "空值读取有界完整内容；catalog查看工作表/页目录；content按sheet/cell_range或page_start/page_end定位读取",
     ] = None,
 ) -> tuple[str, dict]:
-    """Read bound uploads with exact page/table/cell positions and explicit completeness. All Excel sheets are read unless selected; large files require catalog then bounded ranges. No OCR or formula evaluation."""
+    """Read bound uploads with exact page/table/cell positions and explicit completeness. All Excel sheets are read unless selected; large files require catalog then bounded ranges. PDF/images include OCR, figure interpretation and table cells with spans; at most two pages per read. No formula evaluation."""
     context = get_run_context()
     if context is None:
         raise PathDenied("Document evidence requires a run context")
@@ -89,11 +90,14 @@ def read_document(
         raise PathDenied("Document is not a bound input of the current task")
     if file.stat().st_size > context.policy.files.max_upload_bytes:
         raise ValueError("Original document exceeds the configured upload size limit")
-    raw, (content, sections, calculations, parser, description, coverage) = _read(
-        file,
-        context.policy.files.max_upload_bytes,
-        selection.model_dump() if isinstance(selection, DocumentSelection) else selection,
-    )
+    from tools.document_vision import VISUAL_SUFFIXES, read_visual
+
+    selected = selection.model_dump() if isinstance(selection, DocumentSelection) else selection
+    if file.suffix.lower() in VISUAL_SUFFIXES:
+        raw, result = await read_visual(file, context.policy.files.max_upload_bytes, selected)
+    else:
+        raw, result = await asyncio.to_thread(_read, file, context.policy.files.max_upload_bytes, selected)
+    content, sections, calculations, parser, description, coverage = result
     context.check_active()
     # 模型看到正文；证据载荷另保留文件摘要、解析器、位置和读取覆盖范围。
     return content, dict(
