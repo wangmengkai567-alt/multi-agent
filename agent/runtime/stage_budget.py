@@ -279,11 +279,12 @@ def expert_tool_turn(context, names):
         scope = active_tool_scope.get()
         if scope is not None and scope.deadline is not None:
             hard_deadline = min(hard_deadline, scope.deadline)
-        window = ThinkingWindow(
-            active_call.get().task_id,
-            min(hard_deadline - reserve, now + context.policy.timeouts.request_seconds),
-            reserve,
-        )
+        task_id = active_call.get().task_id
+        deadline = min(hard_deadline - reserve, now + context.policy.timeouts.request_seconds)
+        parent = active_thinking_window.get()
+        if parent is not None and parent.task_id == task_id:
+            deadline = min(deadline, parent.deadline)
+        window = ThinkingWindow(task_id, deadline, reserve)
     token = active_thinking_window.set(window)
     try:
         yield window
@@ -306,6 +307,74 @@ def expert_request_deadline(context):
     if window is not None and window.task_id == call.task_id:
         return window.deadline
     return stage["tool_deadline"] - operation_cost(context).seconds
+
+
+@dataclass(frozen=True)
+class ModelTurn:
+    run_id: str
+    task_id: str | None
+    deadline: float
+
+
+active_model_turn = ContextVar("summary_and_model_turn", default=None)
+
+
+@contextmanager
+def model_turn(context, names):
+    from agent.runtime.hooks import active_call
+    from agent.runtime.tool_timeout import active_tool_scope
+
+    context.check_active()
+    with expert_tool_turn(context, names):
+        call = active_call.get()
+        task_id = call.task_id if call else None
+        turn = None
+        if not context.report_started:
+            now = monotonic()
+            deadline = (
+                active_thinking_window.get().deadline
+                if current_stage(context) is not None
+                else now + coordination_window(context)
+            )
+            remaining = context.collection_remaining()
+            if remaining is not None:
+                deadline = min(deadline, now + remaining)
+            scope = active_tool_scope.get()
+            if scope is not None and scope.deadline is not None:
+                deadline = min(deadline, scope.deadline)
+            parent = active_model_turn.get()
+            if parent is not None and (parent.run_id, parent.task_id) == (context.run_id, task_id):
+                deadline = min(deadline, parent.deadline)
+            turn = ModelTurn(context.run_id, task_id, deadline)
+        token = active_model_turn.set(turn)
+        try:
+            yield turn
+        finally:
+            active_model_turn.reset(token)
+
+
+def model_turn_deadline(context, *, summary=False):
+    from agent.runtime.finalization import finalization_active
+    from agent.runtime.hooks import active_call
+
+    if context.report_started or finalization_active.get():
+        return None
+    turn = active_model_turn.get()
+    call = active_call.get()
+    task_id = call.task_id if call else None
+    if turn is None or (turn.run_id, turn.task_id) != (context.run_id, task_id):
+        return None
+    return turn.deadline - (context.policy.stages.expert_request_min_seconds if summary else 0.0)
+
+
+def check_model_turn(context, *, summary=False, minimum=0.0):
+    from agent.runtime.errors import CollectionEnded
+
+    context.check_active()
+    deadline = model_turn_deadline(context, summary=summary)
+    if deadline is not None and (deadline <= monotonic() or deadline - monotonic() < minimum):
+        error = StageEnded if current_stage(context) is not None else CollectionEnded
+        raise error("摘要与后续模型共用的回合窗口不足；保留已有证据和未完成要求进入所属阶段收尾")
 
 
 def tools_admitted(context, name=None, *, thinking=False, require=False):

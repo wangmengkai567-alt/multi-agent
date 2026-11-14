@@ -24,6 +24,7 @@ from agent.runtime.stage_budget import (
     coordination_window,
     current_stage,
     expert_tool_turn,
+    model_turn_deadline,
     operation_cost,
     record_decision,
     tools_admitted,
@@ -297,7 +298,11 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
     @staticmethod
     def validate_response(request, response):
         context = get_run_context()
-        if request.tools and context is not None and current_stage(context) is not None:
+        if (
+            request.tools
+            and context is not None
+            and (current_stage(context) is not None or model_turn_deadline(context) is not None)
+        ):
             request_timeout(model_request=True)
         result = getattr(response, "model_response", response)
         messages = getattr(result, "result", [result])

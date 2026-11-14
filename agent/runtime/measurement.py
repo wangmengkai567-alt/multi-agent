@@ -91,12 +91,13 @@ class RequestMeasurement:
             raise RuntimeError("Model request deadline is already fixed")
         now = monotonic()
         self.deadline_clock = now + seconds
-        from agent.runtime.stage_budget import expert_request_deadline
+        from agent.runtime.stage_budget import expert_request_deadline, model_turn_deadline
         from agent.runtime.tool_timeout import active_tool_scope
 
         protected = expert_request_deadline(self.context) if not self.row["finalization"] else None
         scope = active_tool_scope.get()
-        for boundary in (protected, scope.deadline if scope is not None else None):
+        turn_deadline = model_turn_deadline(self.context, summary=self.row["phase"] == "summarization")
+        for boundary in (protected, turn_deadline, scope.deadline if scope is not None else None):
             if boundary is not None:
                 self.deadline_clock = min(self.deadline_clock, boundary)
         seconds = self.deadline_clock - now

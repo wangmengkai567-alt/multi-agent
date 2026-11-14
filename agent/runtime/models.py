@@ -6,9 +6,13 @@ from typing import Literal
 
 import httpx
 from deepagents.middleware.summarization import SummarizationMiddleware
+from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import get_buffer_string, trim_messages
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
+from langchain_core.utils.function_calling import convert_to_openai_tool
+from langgraph.types import Command
 
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import ExecutionTerminated
@@ -23,39 +27,146 @@ class BudgetSummarizationMiddleware(SummarizationMiddleware):
 
     def _can_summarize(self):
         context = get_run_context()
-        from agent.runtime.stage_budget import coordination_window, current_stage, stage_remaining
+        from time import monotonic
 
-        remaining = stage_remaining(context, tools=True)
-        minimum = 2 * context.policy.stages.expert_request_min_seconds
-        if context.report_started or remaining is not None and remaining <= minimum:
+        from agent.runtime.stage_budget import current_stage, model_turn_deadline, operation_cost
+
+        if context.report_started:
             return False
-        if current_stage(context) is None and coordination_window(context) <= 0:
+        deadline = model_turn_deadline(context)
+        minimum = context.policy.stages.expert_request_min_seconds
+        if deadline is None or deadline - monotonic() <= 2 * minimum:
             return False
         category = self.model.category
-        return calls_available(category, category, *(("main_model",) if category == "sub_model" else ()))
+        if current_stage(context) is None:
+            return calls_available(category, category, "main_model")
+        return calls_available(
+            category,
+            category,
+            "tool",
+            *(("sub_model",) * operation_cost(context).internal_model_calls),
+            category,
+            "main_model",
+        )
 
     def _should_summarize(self, messages, total_tokens):
         return self._can_summarize() and super()._should_summarize(messages, total_tokens)
 
-    def _create_summary(self, messages_to_summarize):
+    def _summary_input(self, messages):
         from agent.runtime.required_work import summary_work_messages
 
-        return super()._create_summary(summary_work_messages(messages_to_summarize))
+        messages = summary_work_messages(messages)
+        if not messages:
+            return None, "No previous conversation history."
+        helper = self._lc_helper
+        if helper.trim_tokens_to_summarize is not None:
+            messages = trim_messages(
+                messages,
+                max_tokens=helper.trim_tokens_to_summarize,
+                token_counter=helper.token_counter,
+                start_on="human",
+                strategy="last",
+                allow_partial=True,
+                include_system=True,
+            )
+        if not messages:
+            return None, "Previous conversation was too long to summarize."
+        return helper.summary_prompt.format(messages=get_buffer_string(messages)).rstrip(), None
+
+    def _create_summary(self, messages_to_summarize):
+        prompt, empty_summary = self._summary_input(messages_to_summarize)
+        if prompt is None:
+            return empty_summary
+        from agent.runtime.stage_budget import check_model_turn
+
+        context = get_run_context()
+        check_model_turn(context, summary=True, minimum=context.policy.stages.expert_request_min_seconds)
+        response = self.model.invoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+        check_model_turn(context, summary=True)
+        return response.text.strip()
 
     async def _acreate_summary(self, messages_to_summarize):
-        from agent.runtime.required_work import summary_work_messages
+        prompt, empty_summary = self._summary_input(messages_to_summarize)
+        if prompt is None:
+            return empty_summary
+        from agent.runtime.stage_budget import check_model_turn
 
-        return await super()._acreate_summary(summary_work_messages(messages_to_summarize))
+        context = get_run_context()
+        check_model_turn(context, summary=True, minimum=context.policy.stages.expert_request_min_seconds)
+        response = await self.model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+        check_model_turn(context, summary=True)
+        return response.text.strip()
+
+    def _summary_plan(self, request):
+        prepared = request.override(messages=self._get_effective_messages(request))
+        if not self._can_summarize():
+            return prepared, None
+        messages, _ = self._truncate_args(prepared.messages, prepared.system_message, prepared.tools)
+        prepared = prepared.override(messages=messages)
+        counted = [prepared.system_message, *messages] if prepared.system_message is not None else messages
+        total = self.token_counter(counted, tools=prepared.tools)
+        if not self._should_summarize(messages, total):
+            return prepared, None
+        cutoff = self._determine_cutoff_index(messages)
+        if cutoff <= 0:
+            return prepared, None
+        removed, preserved = self._partition_messages(messages, cutoff)
+        return prepared, (removed, preserved, cutoff)
+
+    @staticmethod
+    def _require_history(path):
+        if path is None:
+            raise RuntimeError("摘要历史保存失败，不能继续生成摘要")
+        return path
+
+    def _summary_request(self, request, plan, summary, path):
+        _, preserved, cutoff = plan
+        messages = self._build_new_messages_with_path(summary, path)
+        previous = request.state.get("_summarization_event")
+        event = dict(
+            cutoff_index=previous["cutoff_index"] + cutoff - 1 if previous is not None else cutoff,
+            summary_message=messages[0],
+            file_path=path,
+        )
+        return request.override(messages=[*messages, *preserved]), event
 
     def wrap_model_call(self, request, handler):
-        if not self._can_summarize():
-            return handler(request)
-        return super().wrap_model_call(request, handler)
+        from agent.runtime.stage_budget import check_model_turn, model_turn
+
+        context = get_run_context()
+        names = [convert_to_openai_tool(tool)["function"]["name"] for tool in request.tools]
+        with model_turn(context, names):
+            prepared, plan = self._summary_plan(request)
+            if plan is None:
+                return handler(prepared)
+            backend = self._get_backend(request.state, request.runtime)
+            path = self._require_history(self._offload_to_backend(backend, plan[0]))
+            summary = self._create_summary(plan[0])
+            prepared, event = self._summary_request(prepared, plan, summary, path)
+            check_model_turn(context, minimum=context.policy.stages.expert_request_min_seconds)
+            response = handler(prepared)
+            return ExtendedModelResponse(
+                model_response=response, command=Command(update={"_summarization_event": event})
+            )
 
     async def awrap_model_call(self, request, handler):
-        if not self._can_summarize():
-            return await handler(request)
-        return await super().awrap_model_call(request, handler)
+        from agent.runtime.stage_budget import check_model_turn, model_turn
+
+        context = get_run_context()
+        names = [convert_to_openai_tool(tool)["function"]["name"] for tool in request.tools]
+        with model_turn(context, names):
+            prepared, plan = self._summary_plan(request)
+            if plan is None:
+                return await handler(prepared)
+            backend = self._get_backend(request.state, request.runtime)
+            path = self._require_history(await self._aoffload_to_backend(backend, plan[0]))
+            summary = await self._acreate_summary(plan[0])
+            prepared, event = self._summary_request(prepared, plan, summary, path)
+            check_model_turn(context, minimum=context.policy.stages.expert_request_min_seconds)
+            response = await handler(prepared)
+            return ExtendedModelResponse(
+                model_response=response, command=Command(update={"_summarization_event": event})
+            )
 
 
 class ModelRequestTimeout(TimeoutError):

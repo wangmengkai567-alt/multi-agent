@@ -312,16 +312,26 @@ def request_timeout(maximum=None, *, model_request=False):
     call = active_call.get()
     admitted_deadline = call.workflow_data.get("admitted_deadline") if call and not model_request else None
     remaining = context.remaining() if context.report_started else context.collection_remaining()
-    from agent.runtime.stage_budget import coordination_window, current_stage, expert_request_deadline, stage_remaining
+    from agent.runtime.stage_budget import (
+        coordination_window,
+        current_stage,
+        expert_request_deadline,
+        model_turn_deadline,
+        stage_remaining,
+    )
     from agent.runtime.tool_timeout import active_tool_scope
 
     scope = active_tool_scope.get()
     deadline = None
+    turn_deadline = None
     if model_request:
         from agent.runtime.measurement import active_request
 
         measured = active_request.get()
         deadline = measured.deadline_clock if measured is not None else None
+        turn_deadline = model_turn_deadline(
+            context, summary=measured is not None and measured.row["phase"] == "summarization"
+        )
     stage = current_stage(context)
     if stage is not None:
         from agent.runtime.finalization import finalization_active
@@ -341,8 +351,12 @@ def request_timeout(maximum=None, *, model_request=False):
                 if maximum is not None
                 else context.policy.stages.handoff_seconds
             )
-    elif not context.report_started and deadline is None:
+    elif not context.report_started and deadline is None and turn_deadline is None:
         maximum = min(maximum, coordination_window(context)) if maximum is not None else coordination_window(context)
+    if turn_deadline is not None:
+        from time import monotonic
+
+        remaining = min(value for value in (remaining, turn_deadline - monotonic()) if value is not None)
     if deadline is not None:
         from time import monotonic
 
