@@ -369,7 +369,7 @@ def make_record(call, content, artifact=None):
     """Identity comes from the runtime; adapters may only normalize actual payloads."""
     from agent.results import clean
     from agent.runtime.context import get_run_context
-    from agent.runtime.hooks import error_message
+    from agent.runtime.hooks import error_message, failure_details
 
     context = get_run_context()
     if context is None:
@@ -393,6 +393,7 @@ def make_record(call, content, artifact=None):
             executed=call.executed,
             status=call.status,
             error=error_message(call.error) if call.error is not None else None,
+            failure=failure_details(call) if call.error is not None else None,
             content=content,
             artifact=artifact,
             request_parameters=dict(call.args),

@@ -20,11 +20,17 @@ from agent.reflection import source_urls, tool_evidence
 from agent.results import clean, delegation_context, delegation_payload, sync_result, task_evidence
 from agent.runtime.checkpoints import write_json
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import CollectionEnded, ExecutionTerminated, StageCleanupFailed, StageEnded
+from agent.runtime.errors import (
+    CollectionEnded,
+    EvidenceUnavailable,
+    ExecutionTerminated,
+    StageCleanupFailed,
+    StageEnded,
+)
 from agent.runtime.events import EventPersistenceError, make_event
 from agent.runtime.evidence_protocol import EvidenceError
 from agent.runtime.experts import bind_registry
-from agent.runtime.hooks import HookCall, HookRejected, active_call, error_category, error_message, pipeline
+from agent.runtime.hooks import HookCall, HookRejected, active_call, error_category, failure_details, pipeline
 from agent.runtime.output import cited_urls, source_page
 from agent.runtime.required_work import active_work_item, associate_work_task, required_work_snapshot
 from agent.runtime.skills import skill_scope
@@ -106,6 +112,9 @@ class DelegationRunnable(Runnable):
                 unfinished=[],
                 limitations=[],
                 error_category=None,
+                first_failure=None,
+                budget_handoff=None,
+                evidence_accepted=False,
             )
             if parent:
                 context.delegation_calls.setdefault(parent.call_id, []).append(record)
@@ -143,19 +152,37 @@ class DelegationRunnable(Runnable):
         self.hooks.emit("before_delegate", call)
         self._save(context, call, record, "running")
         call.executed = True
+        call.stage = "execution"
+
+    @staticmethod
+    def _first_failure(row):
+        # 已成功重试的调用不再构成未解决失败；集合已在 task_evidence 边界核验。
+        latest = {entry["call_id"]: entry for entry in row["evidence"]}
+        for entry in row["evidence"]:
+            if latest[entry["call_id"]]["status"] != "completed" and entry["failure"]:
+                return entry["failure"]
+        return row["budget_handoff"] if not row["sources"] or row["unfinished"] else None
 
     def _result(self, context, call, record, result, evidence):
         context.check_active()
+        call.stage = "result_validation"
         sources, unfinished, limitations = task_evidence(evidence, call.task_id)
         row = context.task_results[call.call_id]
-        row.update(sources=sources, evidence=list(evidence), unfinished=unfinished, limitations=limitations)
+        row.update(
+            sources=sources,
+            evidence=list(evidence),
+            unfinished=unfinished,
+            limitations=limitations,
+            evidence_accepted=True,
+        )
+        row["first_failure"] = self._first_failure(row)
         messages = result.get("messages", []) if isinstance(result, dict) else []
         final = messages[-1] if messages else None
         if not isinstance(final, AIMessage) or final.tool_calls or not final.text.strip():
             raise ValueError("Expert did not return a final assistant answer")
         # 需要工具的专家必须取得有效来源；仅有模型文字不能算调查成功。
         if self.spec.tools and not sources:
-            raise ValueError("子任务未取得有效工具结果，不能声明已完成调查")
+            raise EvidenceUnavailable("子任务未取得有效工具来源，不能声明已完成调查")
         # 最终引用只能来自该子任务实际取得的工具结果，不能凭空生成来源链接。
         allowed = set(source_urls(evidence))
         allowed.update(url for row in sources for url in cited_urls(row["content"]))
@@ -179,7 +206,7 @@ class DelegationRunnable(Runnable):
             error = CollectionEnded("取证阶段时限已到；已停止当前分工并保留成功工具证据")
         if isinstance(error, ExecutionTerminated):
             context.terminate(error)
-        record["error"] = error_message(error)
+        record["error"] = failure_details(call, error=error)["message"]
         record["result"] = call.result = None
         call.error = error
         status = context.stop_status or ("cancelled" if isinstance(error, asyncio.CancelledError) else "failed")
@@ -189,10 +216,12 @@ class DelegationRunnable(Runnable):
         row = context.task_results[call.call_id]
         try:
             sources, unfinished, limitations = task_evidence(evidence, call.task_id)
-        except EvidenceError as evidence_error:
+            row["evidence_accepted"] = True
+        except EvidenceError:
+            row["evidence_accepted"] = False
             sources, limitations = [], []
             unfinished = [
-                dict(call_id=call.call_id, tool=self.spec.agent_id, status="failed", reason=str(evidence_error))
+                dict(call_id=call.call_id, tool=self.spec.agent_id, status="failed", reason="工具证据校验未通过")
             ]
         unfinished.append(dict(call_id=call.call_id, tool=self.spec.agent_id, status=status, reason=record["error"]))
         category = (
@@ -200,12 +229,6 @@ class DelegationRunnable(Runnable):
             if context.stop_status == "timed_out"
             else "cancelled"
             if status in ("cancelled", "interrupted")
-            else "stage_cleanup"
-            if isinstance(error, StageCleanupFailed)
-            else "call_budget"
-            if isinstance(error, BudgetExceeded)
-            else "stage_budget"
-            if isinstance(error, StageEnded)
             else error_category(error)
         )
         row.update(
@@ -215,6 +238,7 @@ class DelegationRunnable(Runnable):
             limitations=limitations,
             error_category=category,
         )
+        row["first_failure"] = (self._first_failure(row) if row["evidence_accepted"] else None) or failure_details(call)
         self._save(context, call, record, status)
         if row["work_item_id"] is not None:
             from agent.runtime.required_work import limit_required_work

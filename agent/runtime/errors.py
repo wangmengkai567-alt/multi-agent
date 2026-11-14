@@ -25,5 +25,9 @@ class ContextCapacityExceeded(ExecutionTerminated):
         super().__init__(f"{message}（占用 {used}，上限 {limit}）；请缩小本轮材料或拆分 Skill 参考资源")
 
 
+class EvidenceUnavailable(RuntimeError):
+    """A tool-backed investigation ended without accepted factual sources."""
+
+
 class DependencyUnavailable(RuntimeError):
     """End the affected expert branch; this dependency cannot be fixed by its model."""

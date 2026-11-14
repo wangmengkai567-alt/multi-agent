@@ -52,13 +52,32 @@ class HookCall:
 
 
 def error_category(error):
-    from agent.runtime.policies import classify_tool_error
+    from agent.runtime.errors import (
+        CollectionEnded,
+        ContextCapacityExceeded,
+        EvidenceUnavailable,
+        StageCleanupFailed,
+        StageEnded,
+    )
+    from agent.runtime.evidence_protocol import EvidenceError
+    from agent.runtime.policies import BudgetExceeded, classify_tool_error
     from agent.runtime.recovery import is_transport_timeout
 
     if isinstance(error, HookRejected):
-        return classify_tool_error(error.__cause__) if error.__cause__ else "rejected"
-    if isinstance(error, BaseException) and type(error).__name__ == "CancelledError":
-        return "cancelled"
+        return error_category(error.__cause__) if error.__cause__ else "rejected"
+    for kind, category in (
+        (asyncio.CancelledError, "cancelled"),
+        (StageCleanupFailed, "stage_cleanup"),
+        (ContextCapacityExceeded, "context_capacity"),
+        (ExecutionTerminated, "terminated"),
+        (StageEnded, "stage_budget"),
+        (CollectionEnded, "collection_budget"),
+        (BudgetExceeded, "call_budget"),
+        (EvidenceUnavailable, "no_evidence"),
+        (EvidenceError, "evidence_validation"),
+    ):
+        if isinstance(error, kind):
+            return category
     if is_transport_timeout(error):
         return "timeout"
     if isinstance(error, EventPersistenceError):
@@ -67,7 +86,7 @@ def error_category(error):
 
 
 def error_message(error):
-    if type(error).__name__ == "CancelledError":
+    if isinstance(error, asyncio.CancelledError):
         context = get_run_context()
         if context and context.stop_status == "timed_out":
             return "任务达到总时限，已取消当前操作"
@@ -77,12 +96,68 @@ def error_message(error):
     return redact_text(str(error) or type(error).__name__)
 
 
-def error_details(call):
+def failure_details(call, *, error=None):
+    """Runtime-owned diagnostics contain no provider payloads or model arguments."""
+    from agent.runtime.errors import CollectionEnded, StageEnded
+    from agent.runtime.evidence_protocol import adapter_by_id
+
+    error = call.error if error is None else error
+    category = error_category(error)
+    context = get_run_context()
+    if (
+        isinstance(error, HookRejected)
+        and error.__cause__ is None
+        and context
+        and context.network_policy == "forbidden"
+        and call.evidence_adapter is not None
+        and adapter_by_id(call.evidence_adapter).network
+    ):
+        category = "permission"
+    cause = error
+    while isinstance(cause, HookRejected) and cause.__cause__ is not None:
+        cause = cause.__cause__
+    message = (
+        error_message(cause)
+        if isinstance(cause, StageEnded | CollectionEnded | asyncio.CancelledError)
+        else {
+            "permission": "工具权限校验未通过",
+            "rejected": "工具准入校验未通过",
+            "invalid_argument": "工具参数或返回结果不符合约定",
+            "configuration": "工具依赖或配置不可用",
+            "no_evidence": "子任务未取得有效工具来源，不能声明已完成调查",
+            "evidence_validation": "工具证据校验未通过",
+            "stage_cleanup": "阶段清理未在预留时限内完成",
+            "context_capacity": "请求超过上下文容量上限",
+            "terminated": "运行已终止",
+            "call_budget": "本轮调用额度不足",
+            "timeout": "当前请求超时",
+            "recording": "运行记录保存失败",
+            "rate_limited": "服务请求受到限流",
+            "transient": "服务请求暂时失败",
+            "permanent": "服务拒绝当前请求",
+        }.get(category, "工具或专家执行失败")
+    )
     return dict(
-        error_category=error_category(call.error),
+        code=category,
+        message=message,
         stage=call.stage,
-        tool_name=call.actor.rsplit(":", 1)[-1],
         call_id=call.call_id,
+        task_id=call.task_id,
+        tool_name=call.actor.rsplit(":", 1)[-1]
+        if call.evidence_adapter is not None or call.actor == call.target
+        else "unregistered_tool",
+        executed=call.executed,
+    )
+
+
+def error_details(call):
+    failure = failure_details(call)
+    return dict(
+        error_category=failure["code"],
+        stage=call.stage,
+        tool_name=failure["tool_name"],
+        call_id=call.call_id,
+        failure=failure,
     )
 
 
@@ -104,7 +179,7 @@ def record_hook(name, call):
     if name == "after_subagent":
         data.update(result_length=len(str(call.result)))
     if call.error is not None:
-        data.update(error=error_message(call.error), **error_details(call))
+        data.update(error=failure_details(call)["message"], **error_details(call))
     context.event_sink.submit(
         make_event(
             context.thread_id,
@@ -316,7 +391,7 @@ class HookToolMiddleware(AgentMiddleware):
             content=message,
             tool_call_id=call.call_id,
             status="error",
-            additional_kwargs={"runtime_error": dict(error_details(call), message=error_message(call.error))},
+            additional_kwargs={"runtime_error": dict(error_details(call), message=failure_details(call)["message"])},
         )
 
     # 返回消息必须对应本次调用；显式错误响应即使没有抛异常，也不能记为成功。

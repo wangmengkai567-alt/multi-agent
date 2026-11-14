@@ -53,7 +53,7 @@ def task_evidence(evidence, task_id):
     # 同一调用只按最后一次尝试判断未完成事项；成功重试可消除先前失败。
     latest = {item["call_id"]: item for item in evidence}
     for item in latest.values():
-        reason = item["error"] if item["status"] != "completed" else ""
+        reason = item["failure"]["message"] if item["status"] != "completed" else ""
         if item["status"] == "completed" and item["adapter"] == "document.v1":
             coverage = json.loads(item["evidence_note"])
             limitations.extend(
@@ -166,6 +166,7 @@ def delegation_payload(row):
         limitations=row["limitations"],
         error=row["error"],
         error_category=row["error_category"],
+        first_failure=row["first_failure"],
         document_progress=_document_handoff_progress(row),
     )
 

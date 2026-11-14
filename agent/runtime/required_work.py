@@ -193,6 +193,44 @@ def _completion_errors(context, item, *, delivery_pending=False):
     return errors
 
 
+def _work_diagnostics(context, item, rows):
+    from agent.runtime.document_work import document_progress
+
+    first = next((row["first_failure"] for row in rows if row["first_failure"]), None)
+    reading = []
+    if any(condition["evidence_kind"] == "document" for condition in item.get("completion_conditions", [])):
+        live_task = rows[-1]["call_id"] if rows and rows[-1]["status"] in ("queued", "running") else None
+        reading = [
+            dict(
+                reference=state["reference"],
+                total_pages=state["pages"],
+                paginated=state["paginated"],
+                catalog_read=bool(state["catalog_records"]),
+                read_ranges=state["read_ranges"],
+                unread_ranges=state["unread_ranges"],
+                has_recognition_gaps=bool(state["missing"]),
+            )
+            for state in document_progress(context, item, task_id=live_task)
+            if state["visual"]
+        ]
+    return first, reading
+
+
+def _reading_reason(reading):
+    def ranges_text(ranges):
+        return "、".join(str(start) if start == end else f"{start}–{end}" for start, end in ranges)
+
+    parts = ["目录成功" if reading["catalog_read"] else "目录未读"] if reading["paginated"] else []
+    parts.append("已读取第" + ranges_text(reading["read_ranges"]) + "页" if reading["read_ranges"] else "正文未读")
+    if reading["unread_ranges"]:
+        parts.append("未读第" + ranges_text(reading["unread_ranges"]) + "页")
+    elif reading["total_pages"] is None:
+        parts.append("页数未知")
+    if reading["has_recognition_gaps"]:
+        parts.append("已选范围仍有识别缺口")
+    return "读取范围：" + reading["reference"] + "：" + "；".join(parts)
+
+
 def required_work_summary(context, *, execution_status=None, terminal_reason=None):
     """Public projection only; never expose evidence, source text, parameters or completion claims."""
     from agent.runtime.events import sanitize
@@ -226,6 +264,13 @@ def required_work_summary(context, *, execution_status=None, terminal_reason=Non
                     reasons.extend(row["error"] for row in owned if row.get("error"))
                 else:
                     reasons = []
+                first, reading = _work_diagnostics(context, item, owned)
+                ending = item.get("progress") or next((row["error"] for row in reversed(owned) if row.get("error")), "")
+                if first:
+                    reasons.append("首个失败点：" + first["message"])
+                reasons.extend(_reading_reason(entry) for entry in reading)
+                if ending and state != "completed":
+                    reasons.append("取证结束：" + ending)
                 summary.append(
                     sanitize(
                         dict(
@@ -238,8 +283,14 @@ def required_work_summary(context, *, execution_status=None, terminal_reason=Non
                             if delivery_only
                             else "not_started",
                             task_ids=list(item.get("task_ids", [])),
-                            reason_code=item.get("budget_reason")
+                            reason_code=first["code"]
+                            if first and state != "completed"
+                            else item.get("budget_reason")
                             or ("network_forbidden" if item.get("permission_conflict") else ""),
+                            first_failure=first,
+                            reading=reading,
+                            termination_reason=ending if state != "completed" else "",
+                            termination_code=item.get("budget_reason", ""),
                             reasons=list(dict.fromkeys(reasons)),
                             delivery_required=any(
                                 condition["evidence_kind"] == "delivery"
@@ -261,7 +312,9 @@ def required_work_summary(context, *, execution_status=None, terminal_reason=Non
         for item in summary:
             if item["status"] != "completed" or item["delivery_required"]:
                 item["status"] = "unfinished"
-                item["reasons"] = list(dict.fromkeys([*item["reasons"], sanitize(reason)]))
+                item["termination_reason"] = sanitize(reason)
+                item["termination_code"] = execution_status
+                item["reasons"] = list(dict.fromkeys([*item["reasons"], "最终结束：" + sanitize(reason)]))
                 if item["delegation_status"] in ("queued", "running"):
                     item["delegation_status"] = "cancelled" if execution_status == "cancelled" else "interrupted"
     return summary

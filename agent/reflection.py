@@ -7,7 +7,6 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from agent.runtime.context import get_run_context
-from agent.runtime.hooks import error_category
 
 tool_evidence = ContextVar("delegated_tool_evidence", default=None)
 
@@ -34,7 +33,7 @@ def capture_tool(call):
         raise EvidenceError("Successful tool must return exactly one owned ToolMessage")
     message = matches[0] if matches else None
     item = make_record(call, message.content if message else None, message.artifact if message else None)
-    item["error_category"] = error_category(call.error) if call.error else None
+    item["error_category"] = item["failure"]["code"] if item["failure"] else None
     collector.append(item)
     context = get_run_context()
     from agent.runtime.checkpoints import write_json

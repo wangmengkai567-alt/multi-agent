@@ -423,6 +423,12 @@ def tools_admitted(context, name=None, *, thinking=False, require=False):
             "expert_thinking" if thinking else "expert_tools",
             name,
         )
+        row = context.task_results[call.task_id]
+        if row["budget_handoff"] is None:
+            from agent.runtime.hooks import failure_details
+
+            row["budget_handoff"] = failure_details(call, error=StageEnded(reason))
+            row["budget_handoff"]["stage"] = "disclosure" if thinking else "admission"
         if require:
             raise StageEnded(reason)
     return allowed

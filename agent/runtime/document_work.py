@@ -10,7 +10,7 @@ ENDED_TASKS = frozenset(("completed", "failed", "cancelled", "interrupted"))
 def _records(context, item, task_id):
     for owner in item["task_ids"] if item else ():
         row = context.task_results[owner]
-        if row["status"] in ENDED_TASKS:
+        if row["status"] in ENDED_TASKS and row["evidence_accepted"]:
             for record in row["evidence"]:
                 yield record, row["sources"]
     if task_id is not None:
@@ -19,7 +19,7 @@ def _records(context, item, task_id):
 
         call = active_call.get()
         row = context.task_results[task_id]
-        if item is None and row["status"] in ENDED_TASKS:
+        if item is None and row["status"] in ENDED_TASKS and row["evidence_accepted"]:
             for record in row["evidence"]:
                 yield record, row["sources"]
         elif call and call.task_id == task_id and row["status"] not in ENDED_TASKS:
