@@ -2,7 +2,8 @@
 
 import asyncio
 from concurrent.futures import Future
-from contextvars import copy_context
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from dataclasses import asdict, dataclass
 from threading import Thread
 from time import monotonic
@@ -226,33 +227,135 @@ def check_stage(context):
         raise StageEnded("当前分工阶段预算已到，停止取证并保留截止前有效证据，为后续事项留时")
 
 
-def tools_admitted(context):
-    from agent.runtime.document_work import next_document_step
+@dataclass(frozen=True)
+class OperationCost:
+    seconds: float
+    internal_model_calls: int
 
-    available = stage_remaining(context, tools=True)
-    step = next_document_step(context)
+
+@dataclass(frozen=True)
+class ThinkingWindow:
+    task_id: str
+    deadline: float
+    operation_seconds: float
+
+
+active_thinking_window = ContextVar("expert_thinking_window", default=None)
+
+
+def operation_cost(context, name=None, parameters=None):
+    from pathlib import Path
+
+    from agent.runtime.document_work import next_document_step
+    from tools.document_vision import VISUAL_SUFFIXES
+
+    nested = False
+    if name == "read_document" and parameters is not None:
+        nested = (parameters.get("selection") or {}).get("mode") != "catalog" and (
+            Path(parameters["filename"]).suffix.lower() in VISUAL_SUFFIXES
+        )
+    elif name in (None, "read_document"):
+        step = next_document_step(context)
+        # The disclosed schema can select content even before a catalog is known.
+        nested = step is not None and step["visual"]
     limits = context.policy.stages
-    nested = step is not None and step["visual"] and step["next_selection"]["mode"] != "catalog"
-    minimum = limits.tool_min_seconds + limits.expert_request_min_seconds * (1 + nested)
+    return OperationCost(limits.tool_min_seconds + nested * limits.expert_request_min_seconds, int(nested))
+
+
+@contextmanager
+def expert_tool_turn(context, names):
+    from agent.runtime.hooks import active_call
+    from agent.runtime.tool_timeout import active_tool_scope
+
+    stage = current_stage(context) if context else None
+    window = None
+    if stage is not None:
+        now = monotonic()
+        reserve = max((operation_cost(context, name).seconds for name in names), default=0.0)
+        hard_deadline = stage["tool_deadline"]
+        remaining = context.collection_remaining()
+        if remaining is not None:
+            hard_deadline = min(hard_deadline, now + remaining)
+        scope = active_tool_scope.get()
+        if scope is not None and scope.deadline is not None:
+            hard_deadline = min(hard_deadline, scope.deadline)
+        window = ThinkingWindow(
+            active_call.get().task_id,
+            min(hard_deadline - reserve, now + context.policy.timeouts.request_seconds),
+            reserve,
+        )
+    token = active_thinking_window.set(window)
+    try:
+        yield window
+    finally:
+        active_thinking_window.reset(token)
+
+
+def expert_request_deadline(context):
+    from agent.runtime.hooks import active_call
+    from agent.runtime.tool_timeout import active_tool_scope
+
+    scope = active_tool_scope.get()
+    if scope is not None and scope.deadline is not None:
+        return None  # A nested model shares the parent tool rather than reserving another tool.
+    stage = current_stage(context)
+    if stage is None:
+        return None
+    window = active_thinking_window.get()
+    call = active_call.get()
+    if window is not None and window.task_id == call.task_id:
+        return window.deadline
+    return stage["tool_deadline"] - operation_cost(context).seconds
+
+
+def tools_admitted(context, name=None, *, thinking=False, require=False):
+    from agent.runtime.document_work import next_document_step
+    from agent.runtime.hooks import active_call
+
+    call = active_call.get()
+    parameters = call.args if call and name == call.actor.rsplit(":", 1)[-1] and not thinking else None
+    cost = operation_cost(context, name, parameters)
+    available = stage_remaining(context, tools=True)
+    window = active_thinking_window.get()
+    reserve = max(cost.seconds, window.operation_seconds) if thinking and window is not None else cost.seconds
+    minimum = reserve + (context.policy.stages.expert_request_min_seconds if thinking else 0.0)
     allowed = not context.report_started and (available is None or available >= minimum)
+    thinking_left = window.deadline - monotonic() if thinking and window is not None else None
+    if thinking_left is not None:
+        allowed &= thinking_left >= context.policy.stages.expert_request_min_seconds
     stage = current_stage(context)
     if not allowed and stage is not None:
+        reason = (
+            f"当前分工预算不足：{'思考及下一操作' if thinking else '当前操作'}至少需要{minimum:g}秒，"
+            f"取证窗口剩余{max(0.0, available):.3f}秒"
+            + (f"，本次思考窗口剩余{max(0.0, thinking_left):.3f}秒" if thinking_left is not None else "")
+            + "；保留已得证据和未读范围交接"
+        )
         record_decision(
             context,
             Admission(
                 False,
                 "handoff",
-                "停止追加取证，使用已得证据及缺口完成阶段交接",
+                reason,
                 stage["item_id"],
                 available,
                 0.0,
                 stage["future_reserve_seconds"],
                 0.0,
                 monotonic(),
-                dict(next_document_step=step, minimum_seconds=minimum),
+                dict(
+                    next_document_step=next_document_step(context),
+                    minimum_seconds=minimum,
+                    operation_seconds=cost.seconds,
+                    thinking_deadline=window.deadline if window else None,
+                    thinking_seconds=thinking_left,
+                ),
             ),
-            "expert_tools",
+            "expert_thinking" if thinking else "expert_tools",
+            name,
         )
+        if require:
+            raise StageEnded(reason)
     return allowed
 
 

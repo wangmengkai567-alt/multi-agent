@@ -108,11 +108,11 @@ class BudgetChatModel(BaseChatModel):
             with context.scheduler.provider(context, "models", self.resource_group):
                 measured.admit()
                 admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
-                kwargs["timeout"] = request_timeout(model_request=True)
                 reserve_calls(self.category)
                 measured.start()
                 config = {"callbacks": run_manager.handlers} if run_manager else None
                 kwargs["stream"] = False
+                kwargs["timeout"] = request_timeout(model_request=True)
                 try:
                     message = self.delegate.invoke(messages, config=config, stop=stop, **kwargs)
                 except BaseException as exc:
@@ -141,13 +141,13 @@ class BudgetChatModel(BaseChatModel):
             async with context.scheduler.aprovider(context, "models", self.resource_group):
                 measured.admit()
                 admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
-                kwargs["timeout"] = request_timeout(model_request=True)
                 reserve_calls(self.category)
                 measured.start()
                 config = {"callbacks": run_manager.handlers} if run_manager else None
                 kwargs["stream"] = False
+                kwargs["timeout"] = request_timeout(model_request=True)
                 try:
-                    async with asyncio.timeout(kwargs["timeout"]):
+                    async with asyncio.timeout_at(measured.deadline_clock):
                         message = await self.delegate.ainvoke(messages, config=config, stop=stop, **kwargs)
                 except BaseException as exc:
                     if is_model_timeout(exc):

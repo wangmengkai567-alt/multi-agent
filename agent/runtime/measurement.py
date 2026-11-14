@@ -89,7 +89,17 @@ class RequestMeasurement:
         """Fix the owned request window before queueing; never refresh it on admission."""
         if self.deadline_clock is not None:
             raise RuntimeError("Model request deadline is already fixed")
-        self.deadline_clock = monotonic() + seconds
+        now = monotonic()
+        self.deadline_clock = now + seconds
+        from agent.runtime.stage_budget import expert_request_deadline
+        from agent.runtime.tool_timeout import active_tool_scope
+
+        protected = expert_request_deadline(self.context) if not self.row["finalization"] else None
+        scope = active_tool_scope.get()
+        for boundary in (protected, scope.deadline if scope is not None else None):
+            if boundary is not None:
+                self.deadline_clock = min(self.deadline_clock, boundary)
+        seconds = self.deadline_clock - now
         self.coordination_budget_limited = (
             self.row["category"] == "main_model"
             and self.row["task_id"] is None

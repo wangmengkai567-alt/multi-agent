@@ -17,9 +17,19 @@ class ToolScope:
     def __init__(self, name, seconds):
         self.name, self.seconds = name, seconds
         self.deadline = monotonic() + seconds if seconds is not None else None
+        from agent.runtime.hooks import active_call
         from agent.runtime.stage_budget import current_stage
 
         context = get_run_context()
+        parent = active_tool_scope.get()
+        if parent is not None:
+            parent.check()
+            if parent.deadline is not None:
+                self.deadline = min(self.deadline, parent.deadline) if self.deadline is not None else parent.deadline
+        call = active_call.get()
+        admitted = call.workflow_data.get("admitted_deadline") if call and call.actor == name else None
+        if admitted is not None:
+            self.deadline = min(self.deadline, admitted) if self.deadline is not None else admitted
         stage = current_stage(context) if context else None
         self.stage_deadline = stage["tool_deadline"] if stage else None
         if self.stage_deadline is not None:

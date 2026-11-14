@@ -223,10 +223,8 @@ class HookToolMiddleware(AgentMiddleware):
             from agent.runtime.contracts import assert_contract
 
             assert_contract(context)
-        if context and not tool_available(context, request.tool_call["name"]):
-            raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
-
         tool = getattr(request, "tool", None)
+        network = False
         context = get_run_context()
         if context and hasattr(request, "tool") and tool is None:
             error = ValueError("模型请求了未注册的工具，请选择实际提供的工具")
@@ -239,8 +237,7 @@ class HookToolMiddleware(AgentMiddleware):
             except EvidenceError as exc:
                 raise HookRejected(str(exc)) from exc
             call.evidence_adapter = adapter.adapter_id
-            if context and adapter.network and not tool_available(context, request.tool_call["name"], network=True):
-                raise HookRejected("本轮联网权限不允许执行该工具")
+            network = adapter.network
             try:
                 parsed_args = tool.tool_call_schema.model_validate(call.args).model_dump(exclude_unset=True)
                 # 按工具实际使用的类型解析参数，再进行策略检查，例如把字符串形式的整数转回整数。
@@ -253,6 +250,15 @@ class HookToolMiddleware(AgentMiddleware):
                     for error in exc.errors(include_input=False, include_url=False)[:5]
                 )
                 raise HookRejected("Invalid tool arguments: " + fields) from exc
+        if context and network and context.network_policy == "forbidden":
+            raise HookRejected("本轮联网权限不允许执行该工具")
+        if context and not tool_available(
+            context,
+            request.tool_call["name"],
+            network=network,
+            require_budget=True,
+        ):
+            raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
         if request.tool_call["name"] == "task":
             call.target = call.args.get("subagent_type")
             if not isinstance(call.target, str):
@@ -281,8 +287,8 @@ class HookToolMiddleware(AgentMiddleware):
         name = call.actor.rsplit(":", 1)[-1]
         if name == "task":
             return None  # 委派生命周期统一持有阶段截止与清理边界，不套用普通工具时限。
-        if "admitted_timeout" in call.workflow_data:
-            return call.workflow_data["admitted_timeout"]
+        if "admitted_deadline" in call.workflow_data:
+            return max(0.0, call.workflow_data["admitted_deadline"] - monotonic())
         return request_timeout(policy_for_run().timeouts.tool_seconds) if get_run_context() else None
 
     def _error(self, call, exc):
@@ -423,6 +429,7 @@ class HookToolMiddleware(AgentMiddleware):
                         )
                     )
                 call.attempt += 1
+                call.workflow_data.pop("admitted_deadline", None)
                 call.error, call.status, call.result, call.executed = None, "running", None, False
                 call.execution_status, call.result_status, call.stage = "not_started", "unavailable", "admission"
                 call.terminal_recorded = False
@@ -440,19 +447,19 @@ class HookToolMiddleware(AgentMiddleware):
                 try:
                     self._before(request, call)
                     seconds = self._timeout(call)
-                    call.executed = True
-                    call.execution_status = "running"
-                    call.stage = "execution"
                     from agent.runtime.tool_timeout import bounded_tool
 
-                    with bounded_tool(call.actor, seconds):
-                        if seconds is None:
+                    with bounded_tool(call.actor, seconds) as scope:
+                        call.executed = True
+                        call.execution_status = "running"
+                        call.stage = "execution"
+                        if scope.deadline is None:
                             call.result = await handler(request)
                         else:
                             from agent.runtime.recovery import ToolCallTimeout
 
                             try:
-                                async with asyncio.timeout(seconds):
+                                async with asyncio.timeout_at(scope.deadline):
                                     call.result = await handler(request)
                             except TimeoutError as error:
                                 if isinstance(error, ToolCallTimeout):
@@ -506,6 +513,7 @@ class HookToolMiddleware(AgentMiddleware):
                         )
                     )
                 call.attempt += 1
+                call.workflow_data.pop("admitted_deadline", None)
                 call.error, call.status, call.result, call.executed = None, "running", None, False
                 call.execution_status, call.result_status, call.stage = "not_started", "unavailable", "admission"
                 call.terminal_recorded = False

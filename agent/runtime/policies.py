@@ -310,9 +310,9 @@ def request_timeout(maximum=None, *, model_request=False):
     from agent.runtime.hooks import active_call
 
     call = active_call.get()
-    admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
+    admitted_deadline = call.workflow_data.get("admitted_deadline") if call and not model_request else None
     remaining = context.remaining() if context.report_started else context.collection_remaining()
-    from agent.runtime.stage_budget import coordination_window, current_stage, stage_remaining
+    from agent.runtime.stage_budget import coordination_window, current_stage, expert_request_deadline, stage_remaining
     from agent.runtime.tool_timeout import active_tool_scope
 
     scope = active_tool_scope.get()
@@ -328,8 +328,12 @@ def request_timeout(maximum=None, *, model_request=False):
 
         handing_off = model_request and finalization_active.get()
         stage_left = stage_remaining(context, tools=not handing_off)
-        if model_request and not handing_off and (scope is None or scope.deadline is None):
-            stage_left -= context.policy.stages.tool_min_seconds
+        if model_request and not handing_off:
+            protected_deadline = expert_request_deadline(context)
+            if protected_deadline is not None:
+                from time import monotonic
+
+                stage_left = min(stage_left, protected_deadline - monotonic())
         remaining = stage_left if remaining is None else min(remaining, stage_left)
         if handing_off:
             maximum = (
@@ -352,6 +356,10 @@ def request_timeout(maximum=None, *, model_request=False):
 
             scope_remaining = scope.deadline - monotonic()
             remaining = scope_remaining if remaining is None else min(remaining, scope_remaining)
+    if admitted_deadline is not None:
+        from time import monotonic
+
+        remaining = min(value for value in (remaining, admitted_deadline - monotonic()) if value is not None)
     request_limit = limits.request_seconds
     if model_request and context.report_started and not (call and call.task_id):
         from agent.runtime.finalization import finalization_active
@@ -382,7 +390,7 @@ def request_timeout(maximum=None, *, model_request=False):
         record_decision(context, decision, "request_deadline")
         close_limited_work(context, decision)
         raise CollectionEnded(decision.reason)
-    return min(value for value in (request_limit, maximum, remaining, admitted) if value is not None)
+    return min(value for value in (request_limit, maximum, remaining) if value is not None)
 
 
 SAFE_FUNCTIONS = frozenset(
@@ -662,7 +670,7 @@ def before_tool_policy(call):
             from agent.runtime.capabilities import tool_available
 
             name = call.actor.rsplit(":", 1)[-1]
-            if not tool_available(context, name):
+            if not tool_available(context, name, require_budget=True):
                 raise PolicyError("工具不在当前分工允许的执行阶段内；请根据已有证据返回结论和缺口")
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
@@ -674,7 +682,12 @@ def before_tool_policy(call):
                 and (call.args.get("selection") or {}).get("mode") != "catalog"
             )
             if name != "task":
-                call.workflow_data["admitted_timeout"] = request_timeout(context.policy.timeouts.tool_seconds)
+                from time import monotonic
+
+                admitted_at = monotonic()
+                call.workflow_data["admitted_deadline"] = admitted_at + request_timeout(
+                    context.policy.timeouts.tool_seconds
+                )
             if name in ("internet_search", "read_web_page"):
                 task_key = (owner, name)
                 if not search_call_available(name, owner):

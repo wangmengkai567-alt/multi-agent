@@ -16,12 +16,15 @@ from agent.runtime.experts import append_system
 from agent.runtime.finalization import final_answer_mode, prepare_final_request
 from agent.runtime.hooks import active_call
 from agent.runtime.output import cited_urls
-from agent.runtime.policies import PolicyError, calls_available, search_call_available
+from agent.runtime.policies import PolicyError, calls_available, request_timeout, search_call_available
 from agent.runtime.required_work import active_work_item, required_work_snapshot
 from agent.runtime.stage_budget import (
     admit_stage,
     close_limited_work,
     coordination_window,
+    current_stage,
+    expert_tool_turn,
+    operation_cost,
     record_decision,
     tools_admitted,
 )
@@ -40,7 +43,7 @@ def expert_available(context, spec):
 
 
 # 根据本轮联网权限、输入材料和可用专家判断工具是否可用；network 标识工具实际需要联网。
-def tool_available(context, name, *, network=False, target_specs=None):
+def tool_available(context, name, *, network=False, target_specs=None, disclosure=False, require_budget=False):
     if name in FILE_ACTIONS:
         return False
     if context is None:
@@ -58,7 +61,7 @@ def tool_available(context, name, *, network=False, target_specs=None):
         record_decision(context, decision, "tool_admission")
         close_limited_work(context, decision)
         return False
-    if call and call.task_id and not tools_admitted(context):
+    if call and call.task_id and not tools_admitted(context, name, thinking=disclosure, require=require_budget):
         return False
     if name == "update_required_work" and call and call.task_id:
         return False
@@ -100,7 +103,7 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             category, "tool", category, *(("main_model",) if category == "sub_model" else ())
         )
         if call and call.task_id:
-            can_use_tools &= tools_admitted(context)
+            can_use_tools &= tools_admitted(context, thinking=True)
         elif not context.report_started and coordination_window(context) <= 0:
             decision = admit_stage(context)
             close_limited_work(context, decision)
@@ -160,7 +163,19 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             else:
                 schema = convert_to_openai_tool(tool)
                 name, network = schema["function"]["name"], False
-            if not tool_available(context, name, network=network, target_specs=self.target_specs):
+            if not tool_available(context, name, network=network, target_specs=self.target_specs, disclosure=True):
+                continue
+            if (
+                call
+                and call.task_id
+                and not calls_available(
+                    category,
+                    "tool",
+                    *(("sub_model",) * operation_cost(context, name).internal_model_calls),
+                    category,
+                    "main_model",
+                )
+            ):
                 continue
             if name in NETWORK_ACTIONS and not search_call_available(name, owner):
                 continue
@@ -281,6 +296,9 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
 
     @staticmethod
     def validate_response(request, response):
+        context = get_run_context()
+        if request.tools and context is not None and current_stage(context) is not None:
+            request_timeout(model_request=True)
         result = getattr(response, "model_response", response)
         messages = getattr(result, "result", [result])
         if not request.tools:
@@ -298,11 +316,15 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         return response
 
     def wrap_model_call(self, request, handler):
-        prepared = self.prepare(request)
-        with final_answer_mode(not prepared.tools):
-            return self.validate_response(prepared, handler(prepared))
+        names = [convert_to_openai_tool(tool)["function"]["name"] for tool in request.tools]
+        with expert_tool_turn(get_run_context(), names):
+            prepared = self.prepare(request)
+            with final_answer_mode(not prepared.tools):
+                return self.validate_response(prepared, handler(prepared))
 
     async def awrap_model_call(self, request, handler):
-        prepared = self.prepare(request)
-        with final_answer_mode(not prepared.tools):
-            return self.validate_response(prepared, await handler(prepared))
+        names = [convert_to_openai_tool(tool)["function"]["name"] for tool in request.tools]
+        with expert_tool_turn(get_run_context(), names):
+            prepared = self.prepare(request)
+            with final_answer_mode(not prepared.tools):
+                return self.validate_response(prepared, await handler(prepared))
