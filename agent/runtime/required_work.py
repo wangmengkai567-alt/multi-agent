@@ -23,13 +23,20 @@ class WorkInput(BaseModel):
 
 class CompletionCondition(WorkInput):
     description: str = Field(min_length=1)
-    evidence_kind: Literal["document", "record", "web", "sql", "calculation", "delivery"]
-    page_required: bool = False
+    evidence_kind: Literal["document", "record", "web", "sql", "calculation", "delivery"] = Field(
+        description="必填来源类型：上传文档及PDF用document，联网核验用web，文件交付用delivery；其余为record/sql/calculation。"
+    )
+    page_required: bool = Field(
+        default=False,
+        description="仅web证据要求读取网页正文时为true。PDF页码/章节写入description，document必须为false。",
+    )
 
     @model_validator(mode="after")
     def valid_page_requirement(self):
-        if not self.description.strip() or self.page_required and self.evidence_kind != "web":
-            raise ValueError("Completion conditions require text; page_required applies only to web evidence")
+        if not self.description.strip():
+            raise ValueError("完成条件description不能为空")
+        if self.page_required and self.evidence_kind != "web":
+            raise ValueError("page_required仅用于web网页正文；PDF页码/章节写入description，document应设为false")
         return self
 
 

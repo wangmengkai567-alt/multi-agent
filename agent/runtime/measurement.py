@@ -85,6 +85,32 @@ class RequestMeasurement:
         self.token = active_request.set(self)
         self.wait_started = monotonic()
 
+    def set_deadline(self, seconds):
+        """Fix the owned request window before queueing; never refresh it on admission."""
+        if self.deadline_clock is not None:
+            raise RuntimeError("Model request deadline is already fixed")
+        self.deadline_clock = monotonic() + seconds
+        self.coordination_budget_limited = (
+            self.row["category"] == "main_model"
+            and self.row["task_id"] is None
+            and not self.context.report_started
+            and seconds < self.context.policy.timeouts.request_seconds
+        )
+        with self.context.budget_lock:
+            self.row.update(
+                request_window_seconds=seconds,
+                coordination_budget_limited=self.coordination_budget_limited,
+            )
+            persist(self.context)
+
+    def check_timeout(self):
+        """A spent collection window ends collection; provider failures stay failures."""
+        self.context.check_active()
+        if self.coordination_budget_limited and monotonic() >= self.deadline_clock:
+            from agent.runtime.policies import request_timeout
+
+            request_timeout(model_request=True)
+
     def admit(self):
         with self.context.budget_lock:
             self.row["queue_wait_ms"] = round((monotonic() - self.wait_started) * 1000)

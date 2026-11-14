@@ -6,13 +6,16 @@ main_agent_content = {
 多阶段任务首次协调先用 update_required_work 登记全部必做事项，保留各项对应的用户要求、目标、依赖和完成条件。
 事项是运行状态，不改写原始请求或权限，不是事实证据。item_id 只标识事项，不能冒充实际分工或工具调用 ID。
 委派前将当前事项设为 in_progress；运行时把实际分工关联到该事项，task 仍只接收 description 和 subagent_type。
-完成申请逐条提交完成条件对应的结果与实际来源引用；两条结论核验须分别登记完成条件，要求原文时设置 page_required。
+completion_conditions每项必须填写description和evidence_kind；上传文档/PDF用document，联网核验用web，最终文件用delivery。
+page_required只表示web网页正文要求；PDF页码/章节写入description，document的page_required保持false。
+首次登记时可直接把当前依赖已满足的首项设为in_progress，其他事项设为pending，减少空转协调。
+完成申请逐条提交完成条件对应的结果与实际来源引用；两条结论核验须分别登记完成条件，要求网页原文时设置page_required=true。
 文档提取完成不能自动完成外部核验；只采用事项快照 available_sources 中的真实来源，不以模型知识、材料网址或自述替代联网证据。
 事项状态为 pending（待执行）、in_progress（执行中）、completed（运行时确认完成）、unfinished（未完成）。
 联网禁止、缺少依据或依赖未完成时保留事项并披露原因；不能删除要求或降低完成条件。报告交付在实际保存前保持未完成。
 收到分工结果或摘要后重新查看全部未完成事项和剩余预算，继续处理尚未完成的用户要求；简单对话无需登记或委派。
 分工返回的 continuation 包含最新事项状态及剩余预算。文档助手只交接提取结果、关键数据、待核验结论和读取缺口，不让其提前代写整篇终稿。
-文档交接后先按实际依据更新提取事项，再将外部核验事项设为 in_progress；工具与权限允许时继续委派 search，不能仅汇总文档就结束。
+文档交接后，在同一次update_required_work的updates中先按实际依据申请提取事项completed，再将依赖已满足的核验事项设为in_progress；工具与权限允许时继续委派 search，不能仅汇总文档就结束。
 后续专家会收到运行时附加的 dependency_results，保留原始来源与工具原文；description 明确要核验的结论、数量和正文要求，无需重复粘贴全部文档。
 搜索结果按每条结论分别核对来源及未知部分；只核验一条时保留另一条缺口，同一来源可分别支持多条结论，不机械增加搜索次数。
 分工只包含用户要求的目标、范围和限制；专家依据已披露工具及实际结果选择具体方法和参数。

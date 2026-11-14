@@ -66,21 +66,29 @@ def admit_stage(context, spec=None):
             if remaining is not None
             else context.policy.timeouts.total_seconds - context.policy.timeouts.report_reserve_seconds
         )
-        allocation = min(
-            (usable - limits.coordination_seconds) * minimum / max(minimum, sum(minimums.values())),
-            usable - future - limits.coordination_seconds,
-        )
-        # The configured coordination value is an admission reserve, not a request cap.
-        # A coordinator request may use spare collection time while preserving current
-        # expert work and every later stage's full minimum (including coordination).
+        expert_minimum = minimum - limits.coordination_seconds if planned else 0.0
+        request_limit = context.policy.timeouts.request_seconds
+        # Future minima guide allocation; they cannot veto an affordable current stage.
+        # Share spare time between one coordination request and the later stages, while
+        # retaining the current expert's tools, handoff and cleanup minimum.
         coordination = max(
             0.0,
             min(
-                context.policy.timeouts.request_seconds,
-                usable - future - (minimum - limits.coordination_seconds),
+                request_limit,
+                usable - expert_minimum,
+                max(
+                    limits.coordination_seconds,
+                    (usable - expert_minimum) * request_limit / (request_limit + future),
+                ),
             ),
         )
-        code, reason = "allowed", "本阶段与后续协调、取证、交接及清理均有预算"
+        allocation = (
+            max(0.0, min(usable - coordination, max(expert_minimum, usable - coordination - future)))
+            if planned
+            else 0.0
+        )
+        future_reserve = max(0.0, usable - coordination - allocation) if planned else 0.0
+        code, reason = "allowed", "当前协调、取证、交接及清理有预算；后续事项逐阶段重新准入"
         if context.stop_status:
             code, reason = (
                 "cancelled" if context.stop_status == "cancelled" else "run_stopped",
@@ -97,16 +105,16 @@ def admit_stage(context, spec=None):
             code, reason = "network_forbidden", "本轮禁止联网，外部核验保留未完成"
         elif items and not scheduled and all(value["permission_conflict"] for value in items.values()):
             code, reason = "network_forbidden", "剩余外部核验事项与本轮联网权限冲突"
-        elif usable < minimum + future:
-            code, reason = "time_budget", "剩余阶段预算不足以覆盖协调、专家取证、交接、清理及后续事项"
+        elif usable < minimum:
+            code, reason = "time_budget", "剩余阶段预算不足以覆盖当前协调、专家取证、交接及清理"
         elif len(context.task_results) >= context.policy.search.max_tasks_per_run:
             code, reason = "task_limit", "本轮委派数量额度已耗尽"
         elif not calls_available_for(
             context,
             *(
-                ("main_model",) * (len(planned) + 1)
-                + ("sub_model",) * sum(count + 1 for count in tool_counts.values())
-                + ("tool",) * sum(count + 2 for count in tool_counts.values())
+                ("main_model", "main_model")
+                + ("sub_model",) * (tool_counts[selected] + 1)
+                + ("tool",) * (tool_counts[selected] + 2)
                 if planned
                 else ("main_model", "main_model", "tool")
             ),
@@ -119,7 +127,15 @@ def admit_stage(context, spec=None):
         elif item and any(context.required_work[key]["status"] != "completed" for key in item["dependencies"]):
             code, reason = "dependency_incomplete", "前置事项尚未满足，不能启动后续核验"
         return Admission(
-            code == "allowed", code, reason, item_id, remaining, max(0.0, allocation), future, coordination, decided_at
+            code == "allowed",
+            code,
+            reason,
+            item_id,
+            remaining,
+            max(0.0, allocation),
+            future_reserve,
+            coordination,
+            decided_at,
         )
 
 

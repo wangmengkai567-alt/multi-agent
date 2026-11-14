@@ -104,9 +104,7 @@ class BudgetChatModel(BaseChatModel):
         measured = self._measurement(messages, run_manager)
         message, error = None, None
         try:
-            from time import monotonic
-
-            measured.deadline_clock = monotonic() + request_timeout(model_request=True)
+            measured.set_deadline(request_timeout(model_request=True))
             with context.scheduler.provider(context, "models", self.resource_group):
                 measured.admit()
                 admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
@@ -119,7 +117,7 @@ class BudgetChatModel(BaseChatModel):
                     message = self.delegate.invoke(messages, config=config, stop=stop, **kwargs)
                 except BaseException as exc:
                     if is_model_timeout(exc):
-                        context.check_active()
+                        measured.check_timeout()
                         raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
                     raise
                 context.check_active()
@@ -139,9 +137,7 @@ class BudgetChatModel(BaseChatModel):
         measured = self._measurement(messages, run_manager)
         message, error = None, None
         try:
-            from time import monotonic
-
-            measured.deadline_clock = monotonic() + request_timeout(model_request=True)
+            measured.set_deadline(request_timeout(model_request=True))
             async with context.scheduler.aprovider(context, "models", self.resource_group):
                 measured.admit()
                 admit_context(measured, prepared_payload(messages, self.delegate, kwargs))
@@ -155,7 +151,7 @@ class BudgetChatModel(BaseChatModel):
                         message = await self.delegate.ainvoke(messages, config=config, stop=stop, **kwargs)
                 except BaseException as exc:
                     if is_model_timeout(exc):
-                        context.check_active()
+                        measured.check_timeout()
                         raise ModelRequestTimeout(self.category, kwargs["timeout"]) from exc
                     raise
                 context.check_active()

@@ -312,6 +312,12 @@ def request_timeout(maximum=None, *, model_request=False):
     remaining = context.remaining() if context.report_started else context.collection_remaining()
     from agent.runtime.stage_budget import coordination_window, current_stage, stage_remaining
 
+    deadline = None
+    if model_request:
+        from agent.runtime.measurement import active_request
+
+        measured = active_request.get()
+        deadline = measured.deadline_clock if measured is not None else None
     stage = current_stage(context)
     if stage is not None:
         from agent.runtime.finalization import finalization_active
@@ -327,17 +333,14 @@ def request_timeout(maximum=None, *, model_request=False):
                 if maximum is not None
                 else context.policy.stages.handoff_seconds
             )
-    elif not context.report_started:
+    elif not context.report_started and deadline is None:
         maximum = min(maximum, coordination_window(context)) if maximum is not None else coordination_window(context)
-    if model_request:
+    if deadline is not None:
         from time import monotonic
 
-        from agent.runtime.measurement import active_request
-
-        measured = active_request.get()
-        deadline = measured.deadline_clock if measured is not None else None
-        if deadline is not None:
-            remaining = min(value for value in (remaining, deadline - monotonic()) if value is not None)
+        # An admitted request owns its fixed window, even after its call is charged.
+        # Re-admitting here would reserve the same MAIN call twice and lose valid replies.
+        remaining = min(value for value in (remaining, deadline - monotonic()) if value is not None)
     from agent.runtime.tool_timeout import active_tool_scope
 
     scope = active_tool_scope.get()

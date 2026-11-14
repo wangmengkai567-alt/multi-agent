@@ -69,12 +69,19 @@ class GuardedFilesystemBackend(BackendProtocol):
     def write(self, file_path, content):
         if self._write_denied(file_path):
             return WriteResult(error="Directory is read-only")
-        return self.delegate.write(self.virtual_path(self.resolve_path(file_path)), content)
+        # FilesystemBackend writes native newlines and reads with universal-newline
+        # translation. Normalize input once so existing CRLF does not become CRCRLF.
+        return self.delegate.write(self.virtual_path(self.resolve_path(file_path)), content.replace("\r\n", "\n"))
 
     def edit(self, file_path, old_string, new_string, replace_all=False):
         if self._write_denied(file_path):
             return EditResult(error="Directory is read-only")
-        return self.delegate.edit(self.virtual_path(self.resolve_path(file_path)), old_string, new_string, replace_all)
+        return self.delegate.edit(
+            self.virtual_path(self.resolve_path(file_path)),
+            old_string.replace("\r\n", "\n"),
+            new_string.replace("\r\n", "\n"),
+            replace_all,
+        )
 
     def upload_files(self, files):
         responses = []
