@@ -7,7 +7,7 @@ from typing import Literal
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from agent.runtime.checkpoints import write_json
 from agent.runtime.context import get_run_context
@@ -94,6 +94,7 @@ def _owned_sources(context, item):
             or row["run_id"] != context.run_id
             or row["thread_id"] != context.thread_id
             or row["call_id"] != task_id
+            or row["work_item_id"] != item["item_id"]
         ):
             raise EvidenceError("事项关联的分工不属于本轮运行")
         if row["status"] not in ("completed", "failed", "cancelled", "interrupted"):
@@ -121,22 +122,39 @@ def _owned_sources(context, item):
     return sources
 
 
-def _completion_errors(context, item):
-    conditions, basis = item["completion_conditions"], item["completion_basis"]
+def _completion_errors(context, item, *, delivery_pending=False):
+    try:
+        conditions = [CompletionCondition.model_validate(value).model_dump() for value in item["completion_conditions"]]
+        basis = [CompletionBasis.model_validate(value).model_dump() for value in item["completion_basis"]]
+    except (KeyError, TypeError, ValidationError) as error:
+        return ["完成条件或依据无法核实：" + str(error)]
+    if not conditions:
+        return ["事项缺少完成条件，不能确认完成"]
     indexes = [entry["condition_index"] for entry in basis]
     if sorted(indexes) != list(range(len(conditions))):
-        return ["每条完成条件必须分别提交一份完成依据，不能遗漏、重复或引用不存在的条件"]
+        errors = [
+            f"完成条件 {index + 1}（{condition['description']}）：缺少单独的完成依据"
+            for index, condition in enumerate(conditions)
+            if index not in indexes
+        ]
+        return errors + (
+            ["完成依据重复或引用不存在的条件"]
+            if len(set(indexes)) != len(indexes) or set(indexes) - set(range(len(conditions)))
+            else []
+        )
     try:
         sources = _owned_sources(context, item)
-    except EvidenceError as error:
-        return [str(error)]
+    except (EvidenceError, KeyError, TypeError, ValidationError, OSError) as error:
+        return ["完成依据无法核实：" + str(error)]
     errors = []
     for entry in basis:
         condition = conditions[entry["condition_index"]]
-        label = f"完成条件 {entry['condition_index'] + 1}："
+        label = f"完成条件 {entry['condition_index'] + 1}（{condition['description']}）："
         if not entry["result"].strip():
             errors.append(label + "缺少实际结果说明")
         if condition["evidence_kind"] == "delivery":
+            if delivery_pending:
+                continue
             draft = context.delivery_draft
             path = context.work_dir / "answer.md"
             artifact = (draft or {}).get("artifact", {})
@@ -173,6 +191,104 @@ def _save(context, items):
         context.work_dir / "results" / "required_work.json", dict(run_id=context.run_id, items=list(items.values()))
     )
     context.required_work = items
+
+
+def review_required_work(context, *, delivery_pending=False):
+    """Recheck every requirement; only file delivery may be deferred until the atomic save."""
+    with context.budget_lock:
+        if not isinstance(context.required_work, dict):
+            raise PolicyError("运行级事项状态缺失，不能确认完整完成")
+        items = deepcopy(context.required_work)
+        checked, visiting, pending_delivery = set(), set(), []
+
+        def confirm(key):
+            if key in checked:
+                return
+            if key in visiting:
+                raise PolicyError("必做事项依赖不能形成循环")
+            visiting.add(key)
+            item = items[key]
+            errors = []
+            try:
+                update = WorkUpdate.model_validate(
+                    {
+                        name: item[name]
+                        for name in ("item_id", "status", *DEFINITION_FIELDS, "progress", "completion_basis")
+                    }
+                )
+                if (
+                    update.item_id != key
+                    or not update.goal
+                    or not update.user_requirement
+                    or update.dependencies is None
+                ):
+                    raise ValueError("事项身份或定义缺失")
+                if not update.completion_conditions:
+                    raise ValueError("事项缺少完成条件")
+            except (KeyError, TypeError, ValueError) as error:
+                errors.append("事项状态或定义无法核实：" + str(error))
+            else:
+                for dependency in item["dependencies"]:
+                    if dependency in items:
+                        confirm(dependency)
+                    if dependency not in items or items[dependency]["status"] != "completed":
+                        errors.append("前置事项尚未完成：" + dependency)
+                conditions = item["completion_conditions"]
+                delivery_indexes = [
+                    i for i, condition in enumerate(conditions) if condition["evidence_kind"] == "delivery"
+                ]
+                if delivery_indexes:
+                    # Only the runtime can supply delivery evidence, after validating the exact saved body.
+                    item["completion_basis"] = [
+                        entry for entry in item["completion_basis"] if entry["condition_index"] not in delivery_indexes
+                    ] + [
+                        dict(condition_index=i, result="本轮最终正文与 answer.md 字节及交付记录一致", sources=[])
+                        for i in delivery_indexes
+                    ]
+                elif item["status"] != "completed":
+                    state = "尚未启动" if not item["task_ids"] else "已委派，但尚未确认完成"
+                    errors.extend(item["validation_errors"] or [item["progress"] or state])
+                if (
+                    any(condition["evidence_kind"] == "web" for condition in conditions)
+                    and not context.task_contract.network_allowed
+                ):
+                    errors.append("用户要求外部核验，但本轮禁止联网")
+                errors.extend(_completion_errors(context, item, delivery_pending=delivery_pending))
+                if delivery_indexes and delivery_pending and not errors:
+                    pending_delivery.append(key)
+            item.update(
+                status="unfinished" if errors else "completed",
+                ready_for_delegation=False,
+                validation_errors=list(dict.fromkeys(errors)),
+            )
+            visiting.remove(key)
+            checked.add(key)
+
+        for key in items:
+            confirm(key)
+        unfinished = [
+            dict(
+                item_id=key,
+                goal=item.get("goal") or key,
+                user_requirement=item.get("user_requirement") or "事项要求缺失",
+                task_ids=list(item.get("task_ids", [])),
+                reasons=item["validation_errors"],
+            )
+            for key, item in items.items()
+            if item["status"] != "completed"
+        ]
+        return dict(items=items, unfinished=unfinished, pending_delivery=pending_delivery)
+
+
+def confirm_required_work_delivery(context, answer):
+    """Commit rechecked work only after the final Markdown and body actually agree."""
+    from agent.runtime.completion import validate_delivery
+
+    with context.budget_lock:
+        validate_delivery(context, answer)
+        review = review_required_work(context)
+        _save(context, review["items"])
+        return review
 
 
 def associate_work_task(context, item_id, task_id):

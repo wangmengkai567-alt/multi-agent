@@ -14,7 +14,9 @@ def validate_delivery(context, answer):
         raise RuntimeError("Final answer does not match the delivered content")
     path = context.work_dir / "answer.md"
     if (
-        artifact["status"] != "completed"
+        artifact.get("path") != "answer.md"
+        or artifact["status"] != "completed"
+        or artifact.get("content_digest") != digest
         or artifact["file_digest"] != digest
         or not path.is_file()
         or path.read_bytes() != answer.encode("utf-8")
@@ -24,6 +26,9 @@ def validate_delivery(context, answer):
 
 # 汇总执行状态、覆盖情况与文件交付状态；只有成功终态才发布交付文件信息。
 def completion_snapshot(context, execution_status):
+    from agent.runtime.evidence_protocol import fingerprint
+
+    execution_status = getattr(context, "stop_status", None) or execution_status
     draft = getattr(context, "delivery_draft", None) or {}
     # Prepared files become delivery artifacts only for the committed success path.
     artifact = deepcopy(draft.get("artifact")) if execution_status == "completed" else None
@@ -31,6 +36,14 @@ def completion_snapshot(context, execution_status):
     if artifact:
         delivery_status = artifact["status"]
     coverage = getattr(context, "coverage", "unknown")
+    items = getattr(context, "required_work", None)
+    if coverage == "complete" and (
+        items is None
+        or draft.get("coverage") != coverage
+        or draft.get("required_work_digest") != fingerprint(items)
+        or any(item.get("status") != "completed" for item in items.values())
+    ):
+        coverage = context.coverage = "unknown"
     status = execution_status
     if execution_status == "completed":
         status = coverage if artifact and draft.get("delivered_content_digest") else "unknown"
@@ -40,5 +53,6 @@ def completion_snapshot(context, execution_status):
         coverage=coverage,
         delivery_status=delivery_status,
         artifact=artifact,
+        unfinished_work=deepcopy(draft.get("unfinished_work", [])),
         error=None,
     )

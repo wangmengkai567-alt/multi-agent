@@ -10,6 +10,7 @@ from langgraph.types import Command
 from agent.runtime.context import get_run_context
 from agent.runtime.events import redact_text
 from agent.runtime.output import cited_urls, source_page
+from agent.runtime.required_work import confirm_required_work_delivery, review_required_work
 from utils.secure_paths import confined_path, resolve_run_path
 
 
@@ -123,8 +124,9 @@ async def finalize_answer(context, answer):
     assert_contract(context)
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("Final answer must not be empty")
-    from agent.results import delegation_payload
+    from agent.results import clean, delegation_payload
 
+    review = review_required_work(context, delivery_pending=True)
     rows = list(context.task_results.values())
     handoffs = [(row, delegation_payload(row)) for row in rows]
     observed = [(row, payload) for row, payload in handoffs if payload["observations"]]
@@ -132,17 +134,22 @@ async def finalize_answer(context, answer):
     failures = [row for row in rows if row["status"] != "completed"]
     obtained = {context.expert_contract[row["target"]]["execution"]["source_kind"] for row, _ in observed}
     missing = sorted(required_sources(context) - obtained)
-    unread = [
-        name
-        for name in context.required_uploads
-        if str(confined_path("uploads/" + name, context.work_dir)) not in context.upload_reads
-    ]
+    unread = []
+    for name in context.required_uploads:
+        file = confined_path("uploads/" + name, context.work_dir)
+        if not file.is_file() or context.upload_reads.get(str(file)) != sha256(file.read_bytes()).hexdigest():
+            unread.append(name)
     # 成功工具证据可以支撑部分报告；既无分工结果也无有效证据时仍拒绝交付。
     investigation = (
         rows
         or context.task_rejections
         or missing
         or unread
+        or any(
+            condition["evidence_kind"] != "delivery"
+            for item in review["items"].values()
+            for condition in item.get("completion_conditions", [])
+        )
         or (context.collection_timed_out and context.task_contract.materials)
     )
     if investigation and not successes and not observed:
@@ -177,6 +184,17 @@ async def finalize_answer(context, answer):
         notices.append("尚未取得结果的必需来源：" + "、".join(missing))
     if unread:
         notices.append("尚未完整读取的必需文件：" + "、".join(unread))
+    for item in review["unfinished"]:
+        notices.append(
+            "未完成的必做事项："
+            + item["goal"]
+            + "；对应要求："
+            + item["user_requirement"]
+            + "；"
+            + "；".join(item["reasons"])
+        )
+    if review["unfinished"]:
+        notices.append("上述要求尚未满足；相关分析仅限于实际取得的结果，不能视为已完成这些步骤或已证实相关结论。")
     if notices:
         answer += "\n\n【部分完成】\n\n" + "\n\n".join(notices)
     limitations = [
@@ -203,13 +221,23 @@ async def finalize_answer(context, answer):
         with context.budget_lock:
             context.check_active()
             temporary.replace(path)
-            context.coverage = "partial" if notices else "complete"
             digest = sha256(raw).hexdigest()
             context.delivery_draft = dict(
                 delivered_content_digest=digest,
                 artifact=dict(
                     kind="markdown", path="answer.md", status="completed", content_digest=digest, file_digest=digest
                 ),
+            )
+            committed = confirm_required_work_delivery(context, answer)
+            if committed["unfinished"] != review["unfinished"]:
+                raise RuntimeError("保存后事项核对与正文的未完成说明不一致，不能发布成功交付")
+            from agent.runtime.evidence_protocol import fingerprint
+
+            context.coverage = "partial" if notices else "complete"
+            context.delivery_draft.update(
+                coverage=context.coverage,
+                required_work_digest=fingerprint(context.required_work),
+                unfinished_work=clean(committed["unfinished"]),
             )
     finally:
         temporary.unlink(missing_ok=True)

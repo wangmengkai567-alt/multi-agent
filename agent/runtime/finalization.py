@@ -14,7 +14,7 @@ from agent.runtime.contracts import assert_contract
 from agent.runtime.experts import append_system
 from agent.runtime.hooks import active_call
 from agent.runtime.policies import PolicyError
-from agent.runtime.required_work import required_work_snapshot
+from agent.runtime.required_work import required_work_snapshot, review_required_work
 
 finalization_active = ContextVar("finalization_active", default=False)
 
@@ -53,6 +53,12 @@ def prepare_final_request(request):
         # Rebuild handoffs from validated observations, including failed tasks with accepted evidence.
         payload["task_results"] = [delegation_payload(row) for row in context.task_results.values()]
         payload["required_work"] = required_work_snapshot(context)
+        review = review_required_work(context, delivery_pending=True)
+        payload["completion_review"] = dict(
+            unfinished=review["unfinished"],
+            pending_delivery=review["pending_delivery"],
+            rule="再次对照原始请求检查遗漏；逐项说明未执行、执行失败、证据不足及其对结论的影响。交付待确认不代表调查完成；实际核验后仍不能确定时保留未知，不能编造确定答案。",
+        )
     settings = dict(request.model_settings)
     for name in ("tools", "functions", "function_call", "parallel_tool_calls"):
         settings.pop(name, None)
