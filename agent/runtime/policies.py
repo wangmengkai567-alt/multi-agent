@@ -160,7 +160,9 @@ class TimeoutLimits(StrictConfig):
 
 
 class StageLimits(StrictConfig):
-    coordination_seconds: float = Field(default=10.0, gt=0, le=300)
+    coordination_seconds: float = Field(
+        default=10.0, gt=0, le=300, description="Stage admission coordination reserve, not a per-request timeout"
+    )
     expert_request_min_seconds: float = Field(default=10.0, gt=0, le=300)
     tool_min_seconds: float = Field(default=5.0, gt=0, le=300)
     handoff_seconds: float = Field(default=10.0, gt=0, le=300)

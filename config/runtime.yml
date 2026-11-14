@@ -7,6 +7,7 @@ timeouts:
   report_reserve_seconds: 90.0
 stages:
   # Minimum admission windows, not predictions of provider latency. All actual deadlines are hard bounds.
+  # Coordination reserve used for stage admission; root requests use spare time up to request_seconds.
   coordination_seconds: 10.0
   expert_request_min_seconds: 10.0
   tool_min_seconds: 5.0

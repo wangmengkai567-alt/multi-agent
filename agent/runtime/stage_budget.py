@@ -19,7 +19,7 @@ class Admission:
     remaining_seconds: float | None
     stage_seconds: float
     future_reserve_seconds: float
-    coordination_seconds: float
+    coordination_window_seconds: float
     decided_at: float
 
 
@@ -70,10 +70,13 @@ def admit_stage(context, spec=None):
             (usable - limits.coordination_seconds) * minimum / max(minimum, sum(minimums.values())),
             usable - future - limits.coordination_seconds,
         )
+        # The configured coordination value is an admission reserve, not a request cap.
+        # A coordinator request may use spare collection time while preserving current
+        # expert work and every later stage's full minimum (including coordination).
         coordination = max(
             0.0,
             min(
-                limits.coordination_seconds,
+                context.policy.timeouts.request_seconds,
                 usable - future - (minimum - limits.coordination_seconds),
             ),
         )
@@ -115,8 +118,6 @@ def admit_stage(context, spec=None):
             code, reason = "handoff_pending", "当前分工已签发，先按实际交接确认事项或明确申请新的分工"
         elif item and any(context.required_work[key]["status"] != "completed" for key in item["dependencies"]):
             code, reason = "dependency_incomplete", "前置事项尚未满足，不能启动后续核验"
-        if not scheduled and context.required_work:
-            coordination = min(limits.coordination_seconds, max(0.0, usable))
         return Admission(
             code == "allowed", code, reason, item_id, remaining, max(0.0, allocation), future, coordination, decided_at
         )
@@ -315,4 +316,4 @@ def coordination_window(context):
     record_decision(context, decision, "coordination")
     if decision.code in ("time_budget", "call_budget", "task_limit", "network_forbidden"):
         return 0.0
-    return decision.coordination_seconds
+    return decision.coordination_window_seconds
