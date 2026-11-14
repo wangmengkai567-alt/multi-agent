@@ -457,6 +457,10 @@ def apply_work_updates(context, updates):
                 raise PolicyError("只有请求确认完成时才提交完成依据")
             if update.status == "unfinished" and not update.progress.strip():
                 raise PolicyError("标记未完成时必须说明进度及未完成原因")
+            if update.status == "in_progress" and items[key]["task_ids"]:
+                from agent.runtime.document_work import check_work_continuation
+
+                check_work_continuation(context, items[key])
             items[key].update(
                 status=update.status,
                 ready_for_delegation=update.status == "in_progress",

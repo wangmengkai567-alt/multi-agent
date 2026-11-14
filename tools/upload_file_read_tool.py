@@ -93,6 +93,9 @@ async def read_document(
     from tools.document_vision import VISUAL_SUFFIXES, read_visual
 
     selected = selection.model_dump() if isinstance(selection, DocumentSelection) else selection
+    from agent.runtime.document_work import check_continuation_selection
+
+    check_continuation_selection(context, relative, selected)
     if file.suffix.lower() in VISUAL_SUFFIXES:
         raw, result = await read_visual(file, context.policy.files.max_upload_bytes, selected)
     else:

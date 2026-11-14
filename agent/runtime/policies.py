@@ -173,12 +173,14 @@ class StageLimits(StrictConfig):
             raise ValueError("Stage handoff must cover an expert answer request")
         return self
 
-    def expert_minimum(self, cleanup, tools=1):
-        return (
-            (tools + 1) * self.expert_request_min_seconds
-            + tools * self.tool_min_seconds
-            + self.handoff_seconds
-            + cleanup
+    def expert_cost(self, cleanup, tools=1, internal_models=0):
+        return dict(
+            thinking=tools * self.expert_request_min_seconds,
+            result_review=self.expert_request_min_seconds,
+            native_or_rendering=tools * self.tool_min_seconds,
+            internal_vision=internal_models * self.expert_request_min_seconds,
+            handoff=self.handoff_seconds,
+            cleanup=cleanup,
         )
 
 
@@ -311,7 +313,9 @@ def request_timeout(maximum=None, *, model_request=False):
     admitted = call.workflow_data.get("admitted_timeout") if call and not model_request else None
     remaining = context.remaining() if context.report_started else context.collection_remaining()
     from agent.runtime.stage_budget import coordination_window, current_stage, stage_remaining
+    from agent.runtime.tool_timeout import active_tool_scope
 
+    scope = active_tool_scope.get()
     deadline = None
     if model_request:
         from agent.runtime.measurement import active_request
@@ -324,7 +328,7 @@ def request_timeout(maximum=None, *, model_request=False):
 
         handing_off = model_request and finalization_active.get()
         stage_left = stage_remaining(context, tools=not handing_off)
-        if model_request and not handing_off:
+        if model_request and not handing_off and (scope is None or scope.deadline is None):
             stage_left -= context.policy.stages.tool_min_seconds
         remaining = stage_left if remaining is None else min(remaining, stage_left)
         if handing_off:
@@ -341,9 +345,6 @@ def request_timeout(maximum=None, *, model_request=False):
         # An admitted request owns its fixed window, even after its call is charged.
         # Re-admitting here would reserve the same MAIN call twice and lose valid replies.
         remaining = min(value for value in (remaining, deadline - monotonic()) if value is not None)
-    from agent.runtime.tool_timeout import active_tool_scope
-
-    scope = active_tool_scope.get()
     if scope is not None:
         scope.check()
         if scope.deadline is not None:
@@ -673,8 +674,7 @@ def before_tool_policy(call):
                 and (call.args.get("selection") or {}).get("mode") != "catalog"
             )
             if name != "task":
-                maximum = context.policy.timeouts.request_seconds if visual else context.policy.timeouts.tool_seconds
-                call.workflow_data["admitted_timeout"] = request_timeout(maximum)
+                call.workflow_data["admitted_timeout"] = request_timeout(context.policy.timeouts.tool_seconds)
             if name in ("internet_search", "read_web_page"):
                 task_key = (owner, name)
                 if not search_call_available(name, owner):

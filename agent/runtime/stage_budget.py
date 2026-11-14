@@ -21,6 +21,7 @@ class Admission:
     future_reserve_seconds: float
     coordination_window_seconds: float
     decided_at: float
+    execution_unit: dict | None = None
 
 
 def investigation_items(context):
@@ -33,6 +34,7 @@ def investigation_items(context):
 
 
 def admit_stage(context, spec=None):
+    from agent.runtime.document_work import execution_unit
     from agent.runtime.policies import calls_available_for
     from agent.runtime.required_work import active_work_item
 
@@ -50,14 +52,10 @@ def admit_stage(context, spec=None):
             and (value["ready_for_delegation"] or value["status"] == "pending" or not value["task_ids"])
         }
         planned = scheduled if scheduled else ({None: None} if not context.required_work else {})
-        tool_counts = {
-            key: 2 if value and any(condition["page_required"] for condition in value["completion_conditions"]) else 1
-            for key, value in planned.items()
+        units = {
+            key: execution_unit(context, value, spec if key == item_id else None) for key, value in planned.items()
         }
-        minimums = {
-            key: limits.coordination_seconds + limits.expert_minimum(context.policy.timeouts.shutdown_seconds, count)
-            for key, count in tool_counts.items()
-        }
+        minimums = {key: limits.coordination_seconds + sum(unit["seconds"].values()) for key, unit in units.items()}
         selected = item_id if item_id in minimums else next(iter(minimums), None)
         minimum = minimums[selected] if minimums else limits.coordination_seconds
         future = sum(value for key, value in minimums.items() if key != selected)
@@ -105,6 +103,8 @@ def admit_stage(context, spec=None):
             code, reason = "network_forbidden", "本轮禁止联网，外部核验保留未完成"
         elif items and not scheduled and all(value["permission_conflict"] for value in items.values()):
             code, reason = "network_forbidden", "剩余外部核验事项与本轮联网权限冲突"
+        elif planned and units[selected]["kind"] == "document_no_unread_range":
+            code, reason = "document_gap", "材料没有可接续的未读页；已读证据和识别缺口保留，不重复失败操作"
         elif usable < minimum:
             code, reason = "time_budget", "剩余阶段预算不足以覆盖当前协调、专家取证、交接及清理"
         elif len(context.task_results) >= context.policy.search.max_tasks_per_run:
@@ -113,8 +113,9 @@ def admit_stage(context, spec=None):
             context,
             *(
                 ("main_model", "main_model")
-                + ("sub_model",) * (tool_counts[selected] + 1)
-                + ("tool",) * (tool_counts[selected] + 2)
+                + ("sub_model",)
+                * (units[selected]["thinking_model_calls"] + units[selected]["internal_model_calls"] + 1)
+                + ("tool",) * (units[selected]["tool_calls"] + 2)
                 if planned
                 else ("main_model", "main_model", "tool")
             ),
@@ -136,6 +137,7 @@ def admit_stage(context, spec=None):
             future_reserve,
             coordination,
             decided_at,
+            units[selected] if planned else None,
         )
 
 
@@ -172,6 +174,7 @@ def begin_stage(context, task_id, decision):
         handoff_deadline=now + decision.stage_seconds - context.policy.timeouts.shutdown_seconds,
         tool_deadline=now + decision.stage_seconds - context.policy.timeouts.shutdown_seconds - limits.handoff_seconds,
         future_reserve_seconds=decision.future_reserve_seconds,
+        execution_unit=decision.execution_unit,
     )
     context.task_results[task_id]["stage_budget"] = stage
     record_decision(context, decision, "allocation:" + task_id, context.task_results[task_id]["target"])
@@ -201,6 +204,8 @@ def stage_remaining(context, *, tools=False):
 
 
 def stage_snapshot(context):
+    from agent.runtime.document_work import next_document_step
+
     stage = current_stage(context)
     if stage is None:
         return None
@@ -210,6 +215,8 @@ def stage_snapshot(context):
         handoff_seconds=max(0.0, stage_remaining(context)),
         cleanup_deadline_seconds=max(0.0, stage["deadline"] - monotonic()),
         future_reserve_seconds=stage["future_reserve_seconds"],
+        execution_unit=stage.get("execution_unit"),
+        next_document_step=next_document_step(context),
     )
 
 
@@ -220,11 +227,14 @@ def check_stage(context):
 
 
 def tools_admitted(context):
+    from agent.runtime.document_work import next_document_step
+
     available = stage_remaining(context, tools=True)
-    allowed = not context.report_started and (
-        available is None
-        or available >= context.policy.stages.tool_min_seconds + context.policy.stages.expert_request_min_seconds
-    )
+    step = next_document_step(context)
+    limits = context.policy.stages
+    nested = step is not None and step["visual"] and step["next_selection"]["mode"] != "catalog"
+    minimum = limits.tool_min_seconds + limits.expert_request_min_seconds * (1 + nested)
+    allowed = not context.report_started and (available is None or available >= minimum)
     stage = current_stage(context)
     if not allowed and stage is not None:
         record_decision(
@@ -239,6 +249,7 @@ def tools_admitted(context):
                 stage["future_reserve_seconds"],
                 0.0,
                 monotonic(),
+                dict(next_document_step=step, minimum_seconds=minimum),
             ),
             "expert_tools",
         )

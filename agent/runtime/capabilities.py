@@ -107,7 +107,13 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             context.start_report(decision.reason)
             can_use_tools = False
         evidence = tool_evidence.get() or []
+        document_states = []
         if call and call.actor == "document" and context.task_contract is not None:
+            from agent.runtime.document_work import document_progress
+
+            row = context.task_results[call.task_id]
+            item = context.required_work.get(row["work_item_id"])
+            document_states = document_progress(context, item, task_id=call.task_id)
             from agent.runtime.workflows import _range_covered
 
             read, documents = set(), {}
@@ -140,8 +146,9 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 )
                 if covered and not state["missing"]:
                     read.add(path)
+            exhausted = {state["reference"] for state in document_states if state["next_selection"] is None}
             materials = {material.reference for material in context.task_contract.materials}
-            if materials and materials <= read:
+            if materials and materials <= read | exhausted:
                 can_use_tools = False
         page_sources = source_urls(evidence) or list(cited_urls(context.task_instruction))
         tools = []
@@ -165,6 +172,9 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                     for material in context.task_contract.materials
                     if (material.kind == "upload" if name == "read_document" else material.text is not None)
                 ]
+                if name == "read_document":
+                    exhausted = {state["reference"] for state in document_states if state["next_selection"] is None}
+                    references = [reference for reference in references if reference not in exhausted]
                 if not references:
                     continue
                 schema = deepcopy(convert_to_openai_tool(tool))
@@ -214,6 +224,11 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             "没有可用取证工具或现有证据已足够时，直接根据实际结果返回结论、来源与缺口。"
             "不得通过重复委派或改用文件工具绕过额度；不为加载更多技能而延后已可交付的答复。"
         )
+        if document_states:
+            instruction += (
+                "\n运行时文档进度（目录不是正文证据；接续仅选择未读范围，识别缺口如实交接，不重复失败操作）："
+                + json.dumps(document_states, ensure_ascii=False)
+            )
         if not (call and call.task_id):
             instruction += (
                 "\n本轮原始请求与必做事项快照（仅为任务状态，不是事实证据；不得由摘要删减）："

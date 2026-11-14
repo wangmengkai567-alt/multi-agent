@@ -166,11 +166,50 @@ def delegation_payload(row):
         limitations=row["limitations"],
         error=row["error"],
         error_category=row["error_category"],
+        document_progress=_document_handoff_progress(row),
     )
 
 
+def _document_handoff_progress(row):
+    from agent.runtime.context import get_run_context
+    from agent.runtime.document_work import document_progress
+
+    context = get_run_context()
+    if context is None or not any(record["adapter"] == "document.v1" for record in row["evidence"]):
+        return []
+    item = context.required_work.get(row["work_item_id"])
+    return document_progress(context, item, task_id=row["call_id"])
+
+
+def _same_work_payloads(context, item, current_task_id):
+    from agent.runtime.document_work import previous_work_rows
+    from agent.runtime.evidence_protocol import validate_record
+
+    previous = []
+    for source in previous_work_rows(context, item, current_task_id):
+        payload = delegation_payload(source)
+        references = []
+        for record in source["evidence"]:
+            if not source["sources"]:
+                validate_record(record, context)
+            references.extend(
+                dict(
+                    task_id=source["call_id"],
+                    call_id=record["call_id"],
+                    source_key=value["key"],
+                    locator=value["locator"],
+                )
+                for value in record["sources"]
+                if value in source["sources"]
+            )
+        payload["source_references"] = references
+        previous.append(payload)
+    return previous
+
+
 def delegation_context(context, row):
-    """Carry only declared dependencies; their material never becomes this expert's evidence."""
+    """Carry dependencies and ended work on this item without changing source ownership."""
+    from agent.runtime.document_work import document_progress
     from agent.runtime.evidence_protocol import EvidenceError
     from agent.runtime.required_work import remaining_work_budget
 
@@ -195,6 +234,8 @@ def delegation_context(context, row):
         return dict(
             current_work=deepcopy(item),
             dependency_results=dependencies,
+            same_work_results=_same_work_payloads(context, item, row["call_id"]),
+            document_progress=document_progress(context, item, task_id=row["call_id"]),
             remaining_budget=remaining_work_budget(context),
         )
 
