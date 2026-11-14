@@ -153,6 +153,12 @@ class EventSink:
                 self.queue.task_done()
 
     def submit_subtask(self, record, event):
+        from agent.runtime.context import get_run_context
+        from agent.runtime.required_work import required_work_summary
+
+        context = get_run_context()
+        if context is not None and (context.run_id, context.thread_id) == (record["run_id"], record["thread_id"]):
+            event = dict(event, data=dict(event["data"], required_work=required_work_summary(context)))
         self.submit(dict(event, _subtask=dict(record)))
 
     async def flush(self, run_id=None):
@@ -200,7 +206,8 @@ class EventSink:
         data = {"result": answer} if status == "completed" else {"error": error}
         from agent.runtime.completion import completion_snapshot
 
-        data["completion"] = completion_snapshot(context, status)
+        data["completion"] = completion_snapshot(context, status, terminal_reason=error)
+        data["required_work"] = data["completion"]["required_work"]
         data["coverage"] = getattr(context, "coverage", "unknown")
         if hasattr(context, "call_counts"):
             data["call_counts"] = dict(context.call_counts)
@@ -214,7 +221,11 @@ class EventSink:
             context.thread_id,
             context.run_id,
             kind,
-            "任务执行完成" if status == "completed" else "任务执行结束",
+            "任务部分完成"
+            if status == "completed" and data["completion"]["coverage"] == "partial"
+            else "任务执行完成"
+            if status == "completed"
+            else "任务执行结束",
             status=status,
             call_id=context.run_id,
         )
@@ -235,7 +246,8 @@ class EventSink:
         return bool(saved)
 
     async def interrupt_active(self, reason):
-        for record in await self.store.list_active():
+        for active in await self.store.list_active():
+            record = await self.store.get(active["run_id"])
             context = SimpleNamespace(**record)
             await self.finish(context, "interrupted", error=reason)
 

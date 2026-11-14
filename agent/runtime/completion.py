@@ -25,8 +25,9 @@ def validate_delivery(context, answer):
 
 
 # 汇总执行状态、覆盖情况与文件交付状态；只有成功终态才发布交付文件信息。
-def completion_snapshot(context, execution_status):
+def completion_snapshot(context, execution_status, *, terminal_reason=None):
     from agent.runtime.evidence_protocol import fingerprint
+    from agent.runtime.required_work import required_work_summary
 
     execution_status = getattr(context, "stop_status", None) or execution_status
     draft = getattr(context, "delivery_draft", None) or {}
@@ -38,7 +39,7 @@ def completion_snapshot(context, execution_status):
     coverage = getattr(context, "coverage", "unknown")
     items = getattr(context, "required_work", None)
     if coverage == "complete" and (
-        items is None
+        not isinstance(items, dict)
         or draft.get("coverage") != coverage
         or draft.get("required_work_digest") != fingerprint(items)
         or any(item.get("status") != "completed" for item in items.values())
@@ -53,6 +54,8 @@ def completion_snapshot(context, execution_status):
         coverage=coverage,
         delivery_status=delivery_status,
         artifact=artifact,
-        unfinished_work=deepcopy(draft.get("unfinished_work", [])),
+        required_work=required_work_summary(
+            context, execution_status=execution_status, terminal_reason=terminal_reason
+        ),
         error=None,
     )

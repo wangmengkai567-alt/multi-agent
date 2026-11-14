@@ -16,6 +16,10 @@ const activeStates = new Set(['queued', 'running']);
 const statusNames = {queued:'等待执行', running:'执行中', completed:'已完成', failed:'执行失败',
   rejected:'已拒绝', cancelled:'已取消', timed_out:'已超时', interrupted:'执行中断', partial:'部分完成', unknown:'状态待同步', coverage_unknown:'完成情况待确认'};
 const actors = {main:'任务协调助手', db:'数据库查询助手', search:'联网搜索助手', document:'材料分析助手', delivery:'文件交付'};
+const workStatusNames = {pending:'待执行', in_progress:'执行中', completed:'已完成', unfinished:'未完成', unknown:'状态未确认'};
+const delegationStatusNames = {not_started:'未启动委派', not_required:'无需专家委派', queued:'委派已排队', running:'委派执行中',
+  completed:'委派已完成', failed:'已委派，执行失败', cancelled:'已委派，已取消', interrupted:'已委派，执行中断', unknown:'委派状态未确认'};
+const deliveryStatusNames = {completed:'已交付', not_delivered:'未交付', not_requested:'尚无交付记录'};
 const skills = Object.create(null);
 let skillCatalog = null;
 let selectedUploads = [];
@@ -227,7 +231,7 @@ async function loadSkillCatalog() {
 function createSession(threadId, query, runId, select = true) {
   if (sessions[runId]) { if (select) switchSession(runId); return sessions[runId]; }
   const session = {id:threadId, runId, query, logs:[], seen:new Set(), stream:null, ws:null,
-    status:'unknown', statusSeq:0, answer:null, error:null, recordingIncomplete:false};
+    status:'unknown', statusSeq:0, coverage:'unknown', requiredWork:null, requiredWorkSeq:0, answer:null, error:null, recordingIncomplete:false};
   sessions[runId] = session;
   if (select) switchSession(runId);
   persist();
@@ -243,7 +247,7 @@ function applyEvent(session, event) {
   const data = event.data || {};
   const lifecycle = ['run_queued','run_started','task_result','error','run_cancelled','run_timed_out','run_interrupted'];
   const currentState = lifecycle.includes(event.event) && event.event_seq > session.statusSeq;
-  if (currentState) { session.statusSeq = event.event_seq; session.completion = data.completion; }
+  if (currentState) { session.statusSeq = event.event_seq; session.completion = data.completion; session.coverage = data.coverage ?? 'unknown'; }
   if (currentState && event.event === 'run_queued') session.status = 'queued';
   if (currentState && event.event === 'run_started') session.status = 'running';
   if (currentState && event.event === 'task_result') {
@@ -254,6 +258,13 @@ function applyEvent(session, event) {
     session.status = event.status; session.error = data.error;
     session.answer = null;
   }
+  const terminalSnapshot = currentState && !activeStates.has(session.status);
+  if (Object.hasOwn(data, 'required_work') && (Array.isArray(data.required_work) || data.required_work === null) &&
+      (terminalSnapshot || event.event_seq > session.requiredWorkSeq) &&
+      (activeStates.has(session.status) || session.status === 'unknown' || event.event_seq <= session.statusSeq)) {
+    session.requiredWork = data.required_work;
+    session.requiredWorkSeq = event.event_seq;
+  }
   if (!activeStates.has(session.status) && session.status !== 'unknown') {
     if (session.stream) session.stream.close();
     refreshFiles();
@@ -263,8 +274,10 @@ function applyEvent(session, event) {
 }
 function displayStatus(session) {
   if (session.status !== 'completed') return session.status;
-  if (!session.completion) return 'coverage_unknown';
-  return ({complete:'completed', unknown:'coverage_unknown'}[session.completion.status] || session.completion.status);
+  if (session.coverage === 'partial' || session.completion?.coverage === 'partial' || session.completion?.status === 'partial') return 'partial';
+  if (session.coverage === 'complete' && session.completion?.status === 'complete' &&
+      session.completion.delivery_status === 'completed') return 'completed';
+  return 'coverage_unknown';
 }
 async function syncSession(session) {
   if (!authenticated || sessions[session.runId] !== session) return;
@@ -278,11 +291,18 @@ async function syncSession(session) {
       Number.isSafeInteger(event.event_seq) && event.event_seq > seq ? event.event_seq : seq, 0);
     for (const e of history.events) applyEvent(session, e);
     // 历史查询不能覆盖更新的实时状态；持久化终态快照则提供完整的最终输出。
-    if (session.status === 'unknown' || !activeStates.has(history.run.status) ||
-        (activeStates.has(session.status) && historySeq >= session.statusSeq)) {
-      session.statusSeq = Math.max(session.statusSeq, historySeq);
+    const snapshotSeq = activeStates.has(history.run.status) ? historySeq : history.run.terminal_event_seq;
+    const applySnapshot = session.status === 'unknown' || (snapshotSeq >= session.statusSeq &&
+      (activeStates.has(session.status) || !activeStates.has(history.run.status)));
+    if (applySnapshot) {
+      session.statusSeq = Math.max(session.statusSeq, snapshotSeq);
       session.status = history.run.status;
       session.completion = history.run.completion;
+      session.coverage = history.run.coverage;
+      if (history.run.required_work_seq >= session.requiredWorkSeq || !activeStates.has(history.run.status)) {
+        session.requiredWork = history.run.required_work;
+        session.requiredWorkSeq = history.run.required_work_seq;
+      }
       session.answer = history.run.answer;
       session.error = history.run.error;
     }
@@ -337,6 +357,11 @@ function renderTabs() {
 }
 function describeEvent(event) {
   const d = event.data || {}, who = d.assistant_name || actors[event.actor] || '助手';
+  if (event.event === 'required_work_updated') return '必做事项：' + d.required_work
+    .filter(item => d.changed_items.includes(item.item_id))
+    .map(item => `${item.goal} · ${workStatusNames[item.status] || '状态未确认'} · ${delegationStatusNames[item.delegation_status] || '委派状态未确认'}${item.reasons.length ? '：' + item.reasons.join('；') : ''}`).join('；');
+  if (event.event === 'stage_admission') return d.allowed ? '阶段预算允许继续执行' : '后续工作受限：' + d.reason;
+  if (event.event === 'report_started') return '开始整理最终报告：' + d.reason;
   if (event.event === 'model_request') return ({research:'资料收集（模型）',coordination:'任务协调（模型）',
     summarization:'上下文摘要（模型）'}[d.phase] || '模型请求');
   if (event.event === 'skill_state') return `Skill ${skills[d.skill_id] || d.skill_id}：` +
@@ -363,6 +388,14 @@ function describeEvent(event) {
     run_cancelled:'任务已取消',run_timed_out:'任务超过总时限',run_interrupted:'服务中断了本轮执行'}[event.event] || '运行状态更新');
   return event.message || '执行进度更新';
 }
+function renderRequiredWork(session) {
+  if (session.requiredWork === null || session.requiredWork === undefined) return '<p>该轮尚无已记录的事项摘要。</p>';
+  if (!session.requiredWork.length) return '';
+  const complete = session.requiredWork.filter(item => item.status === 'completed').length;
+  return `<details class="work-summary" open><summary>必做事项 · ${complete}/${session.requiredWork.length} 已完成</summary><ul>` +
+    session.requiredWork.map(item => `<li><strong>${escapeHtml(item.goal)}</strong> · ${escapeHtml(workStatusNames[item.status] || '状态未确认')}
+      <p>${escapeHtml(delegationStatusNames[item.delegation_status] || '委派状态未确认')}${item.reasons.length ? '；' + escapeHtml(item.reasons.join('；')) : ''}</p></li>`).join('') + '</ul></details>';
+}
 function renderLog(session) {
   const answer = $('#answer');
   if (!session) {
@@ -374,6 +407,8 @@ function renderLog(session) {
   $('#runSummary').innerHTML = `<strong>${statusNames[state] || '状态待同步'}</strong>${partialWork ? ' · 已有部分助手结果，见执行记录' : ''}
     <button class="btn btn-ghost" id="cancelBtn" ${activeStates.has(session.status) ? '' : 'disabled'}>取消本轮</button>
     <button class="btn btn-ghost" id="syncBtn">重新读取记录</button>
+    ${session.completion ? `<p>执行：${escapeHtml(statusNames[session.status] || '状态待同步')} · 要求覆盖：${escapeHtml(session.coverage === 'complete' ? '完整' : session.coverage === 'partial' ? '部分完成' : '未确认')} · 文件交付：${escapeHtml(deliveryStatusNames[session.completion.delivery_status] || '未确认')}</p>` : ''}
+    ${renderRequiredWork(session)}
     ${session.error ? `<p>${escapeHtml(session.error)}</p>` : ''}
     ${session.completion?.error ? `<p>${escapeHtml(typeof session.completion.error === 'string' ? session.completion.error : session.completion.error.message)}</p>` : ''}
     ${session.syncError ? `<p>${escapeHtml(session.syncError)}</p>` : ''}
@@ -534,6 +569,7 @@ async function cancelRun() {
   try {
     const record = await request('/api/runs/' + encodeURIComponent(session.runId) + '/cancel', {method:'POST'});
     session.status = record.status; session.answer = record.answer; session.error = record.error; session.completion = record.completion;
+    session.coverage = record.coverage; session.requiredWork = record.required_work; session.requiredWorkSeq = record.required_work_seq;
     if (session.stream) { session.stream.close(); session.stream = null; }
     await syncSession(session); notify('当前状态：' + (statusNames[displayStatus(session)] || record.status));
   } catch (error) { notify('取消请求失败：' + error.message); renderLog(session); }

@@ -613,6 +613,17 @@ class RunStore:
             if event is not None:
                 record["completion"] = json.loads(event["data"]).get("completion")
                 record["terminal_event_seq"] = event["event_seq"]
+        # Read the saved public projection, never live mutable context or raw work/evidence files.
+        # Once terminal, a late progress event cannot replace the winning terminal summary.
+        cutoff = record["terminal_event_seq"] if record["status"] in TERMINAL else 9223372036854775807
+        async with self.connection.execute(
+            "SELECT data,event_seq FROM events WHERE run_id=? AND event_seq<=? "
+            "AND json_type(data,'$.required_work')='array' ORDER BY event_seq DESC LIMIT 1",
+            (run_id, cutoff),
+        ) as cursor:
+            work = await cursor.fetchone()
+        record["required_work"] = json.loads(work["data"])["required_work"] if work is not None else None
+        record["required_work_seq"] = work["event_seq"] if work is not None else 0
         return record
 
     async def get(self, run_id: str) -> dict | None:

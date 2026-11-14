@@ -124,7 +124,7 @@ async def finalize_answer(context, answer):
     assert_contract(context)
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("Final answer must not be empty")
-    from agent.results import clean, delegation_payload
+    from agent.results import delegation_payload
 
     review = review_required_work(context, delivery_pending=True)
     rows = list(context.task_results.values())
@@ -237,7 +237,6 @@ async def finalize_answer(context, answer):
             context.delivery_draft.update(
                 coverage=context.coverage,
                 required_work_digest=fingerprint(context.required_work),
-                unfinished_work=clean(committed["unfinished"]),
             )
     finally:
         temporary.unlink(missing_ok=True)

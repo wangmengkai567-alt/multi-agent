@@ -183,7 +183,10 @@
   .upload-list li { display:flex; align-items:center; gap:8px; min-width:0; max-width:100%; padding:6px 10px; background:var(--panel); border:1px solid var(--border); border-radius:7px; }
   .upload-name { overflow-wrap:anywhere; }
   .upload-list .btn { padding:3px 8px; font-size:12px; }
-  .run-summary { padding:12px 20px; border-bottom:1px solid var(--border); font-size:13px; }
+  .run-summary { padding:12px 20px; border-bottom:1px solid var(--border); font-size:13px; max-height:40vh; overflow:auto; }
+  .work-summary ul { padding-left:20px; }
+  .work-summary li { margin:8px 0; overflow-wrap:anywhere; }
+  .work-summary li p { margin-top:3px; }
   .answer { white-space:normal; overflow-wrap:anywhere; padding:16px 20px; line-height:1.7; border-bottom:1px solid var(--border); max-height:32vh; overflow:auto; }
   details { color:var(--text-dim); margin-top:6px; font-size:12px; }
   details pre { white-space:pre-wrap; overflow-wrap:anywhere; }
@@ -282,6 +285,6 @@
 <script src="/static/run-events.js?v=owner-session-v1"></script>
 <script src="/static/vendor/marked.umd.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
-<script src="/static/app.js?v=file-upload-v1"></script>
+<script src="/static/app.js?v=required-work-v1"></script>
 </body>
 </html>

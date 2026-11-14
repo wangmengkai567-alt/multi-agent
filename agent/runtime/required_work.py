@@ -186,11 +186,104 @@ def _completion_errors(context, item, *, delivery_pending=False):
     return errors
 
 
+def required_work_summary(context, *, execution_status=None, terminal_reason=None):
+    """Public projection only; never expose evidence, source text, parameters or completion claims."""
+    from agent.runtime.events import sanitize
+
+    items = getattr(context, "required_work", None)
+    if items is None:
+        return None  # Historical runs without a recorded summary remain unknown.
+    if isinstance(items, list):
+        # Service interruption reads the already-public durable projection, without restoring execution state.
+        summary = deepcopy(items)
+    else:
+        with context.budget_lock:
+            summary = []
+            for key, item in items.items():
+                rows = [context.task_results.get(task_id) for task_id in item.get("task_ids", [])]
+                owned = [
+                    row
+                    for row in rows
+                    if row
+                    and row.get("run_id") == context.run_id
+                    and row.get("thread_id") == context.thread_id
+                    and row.get("work_item_id") == key
+                ]
+                delivery_only = bool(item.get("completion_conditions")) and all(
+                    condition["evidence_kind"] == "delivery" for condition in item["completion_conditions"]
+                )
+                state = item.get("status", "unknown")
+                reasons = list(item.get("validation_errors", []))
+                if state != "completed":
+                    reasons.extend(value for value in (item.get("permission_conflict"), item.get("progress")) if value)
+                    reasons.extend(row["error"] for row in owned if row.get("error"))
+                else:
+                    reasons = []
+                summary.append(
+                    sanitize(
+                        dict(
+                            item_id=key,
+                            goal=item.get("goal") or key,
+                            status=state,
+                            delegation_status=(owned[-1]["status"] if owned else "unknown")
+                            if rows
+                            else "not_required"
+                            if delivery_only
+                            else "not_started",
+                            task_ids=list(item.get("task_ids", [])),
+                            reason_code=item.get("budget_reason")
+                            or ("network_forbidden" if item.get("permission_conflict") else ""),
+                            reasons=list(dict.fromkeys(reasons)),
+                            delivery_required=any(
+                                condition["evidence_kind"] == "delivery"
+                                for condition in item.get("completion_conditions", [])
+                            ),
+                        )
+                    )
+                )
+    if execution_status in ("cancelled", "timed_out", "interrupted", "failed"):
+        reason = (
+            terminal_reason
+            or {
+                "cancelled": "本轮已由用户取消",
+                "timed_out": "本轮达到总时限",
+                "interrupted": "本轮执行被中断",
+                "failed": "本轮执行失败",
+            }[execution_status]
+        )
+        for item in summary:
+            if item["status"] != "completed" or item["delivery_required"]:
+                item["status"] = "unfinished"
+                item["reasons"] = list(dict.fromkeys([*item["reasons"], sanitize(reason)]))
+                if item["delegation_status"] in ("queued", "running"):
+                    item["delegation_status"] = "cancelled" if execution_status == "cancelled" else "interrupted"
+    return summary
+
+
 def _save(context, items):
+    from agent.runtime.events import make_event
+
+    previous = required_work_summary(context)
     write_json(
         context.work_dir / "results" / "required_work.json", dict(run_id=context.run_id, items=list(items.values()))
     )
     context.required_work = items
+    summary = required_work_summary(context)
+    if context.event_sink and summary != previous:
+        old = {item["item_id"]: item for item in previous}
+        event = make_event(
+            context.thread_id,
+            context.run_id,
+            "required_work_updated",
+            "必做事项状态已更新",
+            call_id=context.run_id,
+        )
+        # Each item is already sanitized; retain the full list rather than truncating it at the event list limit.
+        event["data"] = dict(
+            required_work=summary,
+            changed_items=[item["item_id"] for item in summary if old.get(item["item_id"]) != item],
+        )
+        context.event_sink.submit(event)
 
 
 def review_required_work(context, *, delivery_pending=False):
