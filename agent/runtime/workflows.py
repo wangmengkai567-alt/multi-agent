@@ -124,7 +124,7 @@ async def finalize_answer(context, answer):
     assert_contract(context)
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("Final answer must not be empty")
-    from agent.results import delegation_payload
+    from agent.results import current_unfinished_reasons, delegation_payload
 
     review = review_required_work(context, delivery_pending=True)
     rows = list(context.task_results.values())
@@ -169,8 +169,7 @@ async def finalize_answer(context, answer):
     notices = []
     if context.collection_timed_out:
         notices.append("取证阶段已达到时限；本报告仅依据截止前实际取得的证据，未完成的核验保留为未知。")
-    for row in rows:
-        reasons = [item["reason"] for item in row["unfinished"] if item["reason"] != row["error"]]
+    for row, reasons in current_unfinished_reasons(rows):
         if reasons:
             notices.append(row["display_name"] + "的未完成事项：" + "；".join(reasons))
     if failures:

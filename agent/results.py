@@ -35,12 +35,75 @@ def clean(value):
     return str(value)
 
 
+def _document_identity(document):
+    return document["path"], document["sha256"], document["parser"]
+
+
+def _merge_document(documents, item, coverage):
+    from agent.runtime.evidence_protocol import EvidenceError
+
+    identity = _document_identity(item["artifact"]["document"])
+    state = documents.setdefault(
+        identity,
+        dict(extents=coverage["extents"], ranges={}, missing=set(), complete=False, full_read=False, item=item),
+    )
+    if state["extents"] != coverage["extents"]:
+        raise EvidenceError("Document coverage changed for the same input snapshot")
+    state["complete"] |= coverage["complete"]
+    state["full_read"] |= coverage["scope"] == "supported_content"
+    state["missing"].update(coverage["missing"])
+    for target, bounds in coverage["read_ranges"].items():
+        state["ranges"].setdefault(target, []).append(bounds)
+
+
+def _document_covered(state):
+    from agent.runtime.workflows import _range_covered
+
+    return (
+        state["complete"]
+        or bool(state["ranges"])
+        and all(_range_covered(extent, state["ranges"].get(target, [])) for target, extent in state["extents"].items())
+    )
+
+
+def _document_scope(row):
+    return ("work", row["work_item_id"]) if row["work_item_id"] is not None else ("task", row["call_id"])
+
+
+def current_unfinished_reasons(rows):
+    """Resolve only document gaps covered by accepted evidence of the same work and snapshot."""
+    documents = {}
+    for row in rows:
+        if not row["evidence_accepted"]:
+            continue
+        scoped = documents.setdefault(_document_scope(row), {})
+        latest = {item["call_id"]: item for item in row["evidence"]}
+        for item in latest.values():
+            if item["adapter"] == "document.v1" and item["status"] == "completed" and item["executed"]:
+                _merge_document(scoped, item, json.loads(item["evidence_note"]))
+    resolved = {
+        (scope, identity)
+        for scope, scoped in documents.items()
+        for identity, state in scoped.items()
+        if not state["missing"] and _document_covered(state)
+    }
+    for row in rows:
+        reasons = []
+        for issue in row["unfinished"]:
+            if issue["reason"] == row["error"]:
+                continue
+            gap = issue.get("document_gap")
+            if gap is not None and (_document_scope(row), _document_identity(gap)) in resolved:
+                continue
+            reasons.append(issue["reason"])
+        yield row, reasons
+
+
 # 核对 evidence 属于 task_id，返回来源、未完成事项和读取限制三个列表。
 def task_evidence(evidence, task_id):
     """Accept only this task's observations and retain unresolved execution limits."""
     from agent.runtime.context import get_run_context
     from agent.runtime.evidence_protocol import EvidenceError, source_rows, validate_record
-    from agent.runtime.workflows import _range_covered
 
     context = get_run_context()
     for item in evidence:
@@ -59,38 +122,28 @@ def task_evidence(evidence, task_id):
             limitations.extend(
                 dict(call_id=item["call_id"], tool=item["name"], reason=note) for note in coverage["limitations"]
             )
-            document = item["artifact"]["document"]
-            identity = (document["path"], document["sha256"], document["parser"])
-            state = documents.setdefault(
-                identity,
-                dict(extents=coverage["extents"], ranges={}, missing=set(), complete=False, full_read=False, item=item),
-            )
-            if state["extents"] != coverage["extents"]:
-                raise EvidenceError("Document coverage changed within the delegated task")
-            state["complete"] |= coverage["complete"]
-            state["full_read"] |= coverage["scope"] == "supported_content"
-            state["missing"].update(coverage["missing"])
-            for target, bounds in coverage["read_ranges"].items():
-                state["ranges"].setdefault(target, []).append(bounds)
+            _merge_document(documents, item, coverage)
             reason = ""
         elif item["status"] == "completed" and item["adapter"] not in ("control.v1", "network-control.v1"):
             reason = item["evidence_note"]
         if reason:
             unfinished.append(dict(call_id=item["call_id"], tool=item["name"], status=item["status"], reason=reason))
-    for (path, _, _), state in documents.items():
-        covered = (
-            state["complete"]
-            or bool(state["ranges"])
-            and all(
-                _range_covered(extent, state["ranges"].get(target, [])) for target, extent in state["extents"].items()
-            )
-        )
+    for (path, digest, parser), state in documents.items():
+        covered = _document_covered(state)
         item = state["item"]
         requires_full = state["full_read"] or path in {"uploads/" + name for name in context.required_uploads}
         # 区分局部读取限制与未完成事项；缺口、要求完整读取或没有读取范围时需报告。
         if state["missing"] or not covered and (requires_full or not state["ranges"]):
             reason = path + "：" + "；".join(sorted(state["missing"]) or ["材料尚未完整读取"])
-            unfinished.append(dict(call_id=item["call_id"], tool=item["name"], status=item["status"], reason=reason))
+            unfinished.append(
+                dict(
+                    call_id=item["call_id"],
+                    tool=item["name"],
+                    status=item["status"],
+                    reason=reason,
+                    document_gap=dict(path=path, sha256=digest, parser=parser),
+                )
+            )
         elif not covered:
             limitations.append(
                 dict(
