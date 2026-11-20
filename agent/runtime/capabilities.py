@@ -115,24 +115,31 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             can_use_tools = False
         evidence = tool_evidence.get() or []
         document_states = []
+        issued = None
         if call and call.actor == "document" and context.task_contract is not None:
             from agent.runtime.document_work import document_progress
 
             row = context.task_results[call.task_id]
             item = context.required_work.get(row["work_item_id"])
             document_states = document_progress(context, item, task_id=call.task_id)
-            if budget_handoff and row["budget_handoff"] and not context.report_started:
+            stage = row["stage_budget"]
+            issued = stage.get("document_selection")
+            if (issued is not None or budget_handoff and row["budget_handoff"]) and not context.report_started:
                 latest = {record["call_id"]: record["status"] for record in evidence}
                 if all(status == "completed" for status in latest.values()) and any(
-                    state["paginated"]
-                    and state["unread_ranges"]
+                    (
+                        state["reference"] == issued["filename"]
+                        if issued
+                        else state["paginated"] and state["unread_ranges"]
+                    )
                     and any(source["task_id"] == call.task_id for source in state["sources"])
                     for state in document_states
                 ):
                     context.check_active()
-                    stage = row["stage_budget"]
                     stage["execution_unit"] = dict(stage["execution_unit"], handoff_model_calls=0)
-                    return ModelResponse(result=[AIMessage(content="本分工已有 PDF 正文证据，按阶段预算交接未读页。")])
+                    return ModelResponse(
+                        result=[AIMessage(content="本分工已有 PDF 正文证据，交接实际读取范围和缺口。")]
+                    )
             from agent.runtime.workflows import _range_covered
 
             read, documents = set(), {}
@@ -205,7 +212,11 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 ]
                 if name == "read_document":
                     exhausted = {state["reference"] for state in document_states if state["next_selection"] is None}
-                    references = [reference for reference in references if reference not in exhausted]
+                    references = [
+                        reference
+                        for reference in references
+                        if reference not in exhausted and (issued is None or reference == issued["filename"])
+                    ]
                 if not references:
                     continue
                 schema = deepcopy(convert_to_openai_tool(tool))

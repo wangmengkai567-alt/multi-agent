@@ -154,6 +154,12 @@ def _completion_errors(context, item, *, delivery_pending=False):
     except (EvidenceError, KeyError, TypeError, ValidationError, OSError) as error:
         return ["完成依据无法核实：" + str(error)]
     errors = []
+    if any(condition["evidence_kind"] == "document" for condition in conditions):
+        from agent.runtime.document_work import incomplete_required_pdfs
+
+        errors.extend(
+            "必需 PDF 尚未完整读取或仍有识别缺口：" + reference for reference in incomplete_required_pdfs(context, item)
+        )
     for entry in basis:
         condition = conditions[entry["condition_index"]]
         label = f"完成条件 {entry['condition_index'] + 1}（{condition['description']}）："

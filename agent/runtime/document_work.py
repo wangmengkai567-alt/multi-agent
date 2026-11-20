@@ -128,7 +128,7 @@ def unread_bound_text(context, item, task_id=None):
     return sorted(remaining)
 
 
-def execution_unit(context, item, spec=None):
+def execution_unit(context, item, spec=None, *, document_selection=None):
     """Unknown targets use requirement kinds; selected experts use their actual tools."""
     names = {tool.name for tool in spec.tools} if spec is not None else None
     conditions = item["completion_conditions"] if item else ()
@@ -140,6 +140,8 @@ def execution_unit(context, item, spec=None):
     tools, nested, kind, documents = 1, 0, "native_or_query", []
     if document:
         documents = document_progress(context, item)
+        if document_selection is not None:
+            documents = [state for state in documents if state["reference"] == document_selection["filename"]]
         pending = [state for state in documents if state["next_selection"] is not None]
         pdf = next((state for state in pending if state["paginated"] and state["pages"] is None), None)
         visual = next((state for state in pending if state["visual"]), None)
@@ -172,15 +174,62 @@ def next_document_step(context):
     if call is None or call.task_id is None:
         return None
     row = context.task_results[call.task_id]
-    unit = row["stage_budget"].get("execution_unit")
+    stage = row["stage_budget"]
+    unit = stage.get("execution_unit")
     if unit is None or not unit["documents"]:
         return None
     item = context.required_work[row["work_item_id"]] if row["work_item_id"] else None
     states = document_progress(context, item, task_id=call.task_id)
-    pending = [state for state in states if state["next_selection"] is not None]
+    issued = stage.get("document_selection")
+    pending = [
+        state
+        for state in states
+        if state["next_selection"] is not None and (issued is None or state["reference"] == issued["filename"])
+    ]
     return max(
         pending, key=lambda state: state["visual"] and state["next_selection"]["mode"] != "catalog", default=None
     )
+
+
+def _required_pdf(context, state):
+    return state["paginated"] and state["reference"].removeprefix("uploads/") in context.required_uploads
+
+
+def incomplete_required_pdfs(context, item):
+    return [
+        state["reference"]
+        for state in document_progress(context, item)
+        if _required_pdf(context, state) and (state["sources"] or state["catalog_records"]) and not state["complete"]
+    ]
+
+
+def next_pdf_batch(context, row):
+    item = context.required_work.get(row["work_item_id"])
+    if (
+        context.report_started
+        or row["target"] != "document"
+        or row["status"] != "completed"
+        or item is None
+        or item["status"] != "in_progress"
+        or item["ready_for_delegation"]
+        or item["task_ids"][-1] != row["call_id"]
+    ):
+        return None
+    stage = row["stage_budget"]
+    issued = stage.get("document_selection")
+    if issued is None and not (row["budget_handoff"] and stage["execution_unit"]["handoff_model_calls"] == 0):
+        return None
+    if row["first_failure"] and row["first_failure"] != row["budget_handoff"]:
+        return None
+    for state in document_progress(context, item):
+        if (
+            _required_pdf(context, state)
+            and state["unread_ranges"]
+            and (issued is None or state["reference"] == issued["filename"])
+            and any(source["task_id"] == row["call_id"] for source in state["sources"])
+        ):
+            return dict(filename=state["reference"], selection=state["next_selection"])
+    return None
 
 
 def check_continuation_selection(context, reference, selection):
@@ -195,6 +244,12 @@ def check_continuation_selection(context, reference, selection):
     item = context.required_work.get(row["work_item_id"])
     if item is None or not any(owner != call.task_id for owner in item["task_ids"]):
         return
+    selected = selection or {}
+    issued = row["stage_budget"].get("document_selection")
+    if issued is not None and (
+        reference != issued["filename"] or any(selected.get(key) != value for key, value in issued["selection"].items())
+    ):
+        raise PolicyError("续读必须使用本分工已签发的文件和页段")
     state = next(
         state for state in document_progress(context, item, task_id=call.task_id) if state["reference"] == reference
     )
@@ -202,7 +257,6 @@ def check_continuation_selection(context, reference, selection):
         raise PolicyError("同事项已没有该材料的未读范围；保留原证据和识别缺口，不重复读取")
     if not state["paginated"]:
         return
-    selected = selection or {}
     if selected.get("mode") == "catalog":
         if state["pages"] is not None:
             raise PolicyError("同事项已有目录，后续分工仅处理未读页，不能重复读取目录")

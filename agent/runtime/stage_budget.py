@@ -34,7 +34,7 @@ def investigation_items(context):
     }
 
 
-def admit_stage(context, spec=None):
+def admit_stage(context, spec=None, *, document_selection=None):
     from agent.runtime.document_work import execution_unit
     from agent.runtime.policies import calls_available_for
     from agent.runtime.required_work import active_work_item
@@ -50,11 +50,22 @@ def admit_stage(context, spec=None):
             key: value
             for key, value in items.items()
             if not value["permission_conflict"]
-            and (value["ready_for_delegation"] or value["status"] == "pending" or not value["task_ids"])
+            and (
+                value["ready_for_delegation"]
+                or value["status"] == "pending"
+                or not value["task_ids"]
+                or (document_selection is not None and key == item_id)
+            )
         }
         planned = scheduled if scheduled else ({None: None} if not context.required_work else {})
         units = {
-            key: execution_unit(context, value, spec if key == item_id else None) for key, value in planned.items()
+            key: execution_unit(
+                context,
+                value,
+                spec if key == item_id else None,
+                document_selection=document_selection if key == item_id else None,
+            )
+            for key, value in planned.items()
         }
         minimums = {key: limits.coordination_seconds + sum(unit["seconds"].values()) for key, unit in units.items()}
         selected = item_id if item_id in minimums else next(iter(minimums), None)
@@ -128,7 +139,7 @@ def admit_stage(context, spec=None):
             code, reason = "call_budget", "剩余调用额度不足以覆盖专家取证及最终答复"
         elif context.required_work and item is None:
             code, reason = "work_not_selected", "先确认前置事项并选择当前执行事项"
-        elif item and not item["ready_for_delegation"]:
+        elif item and not item["ready_for_delegation"] and document_selection is None:
             code, reason = "handoff_pending", "当前分工已签发，先按实际交接确认事项或明确申请新的分工"
         elif item and any(context.required_work[key]["status"] != "completed" for key in item["dependencies"]):
             code, reason = "dependency_incomplete", "前置事项尚未满足，不能启动后续核验"
