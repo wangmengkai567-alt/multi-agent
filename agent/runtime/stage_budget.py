@@ -46,6 +46,17 @@ def admit_stage(context, spec=None, *, document_selection=None):
         items = investigation_items(context)
         item_id = active_work_item(context)
         item = items.get(item_id)
+        handoff_items = (item,) if item is not None else items.values()
+        awaiting_handoff = (
+            spec is None
+            and document_selection is None
+            and any(
+                not work["ready_for_delegation"]
+                and work["task_ids"]
+                and context.task_results[work["task_ids"][-1]]["status"] in ("completed", "failed")
+                for work in handoff_items
+            )
+        )
         scheduled = {
             key: value
             for key, value in items.items()
@@ -58,6 +69,9 @@ def admit_stage(context, spec=None, *, document_selection=None):
             )
         }
         planned = scheduled if scheduled else ({None: None} if not context.required_work else {})
+        if awaiting_handoff:
+            # Confirm returned work before reserving time for a dependent expert.
+            planned = {}
         units = {
             key: execution_unit(
                 context,
@@ -97,7 +111,7 @@ def admit_stage(context, spec=None, *, document_selection=None):
             if planned
             else 0.0
         )
-        future_reserve = max(0.0, usable - coordination - allocation) if planned else 0.0
+        future_reserve = max(0.0, usable - coordination - allocation) if planned or awaiting_handoff else 0.0
         code, reason = "allowed", "当前协调、取证、交接及清理有预算；后续事项逐阶段重新准入"
         if context.stop_status:
             code, reason = (
