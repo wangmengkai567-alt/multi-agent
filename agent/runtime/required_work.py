@@ -630,7 +630,11 @@ def summary_work_messages(messages):
 @evidence_tool("control.v1")
 @tool
 def update_required_work(updates: list[WorkUpdate]) -> str:
-    """主 Agent 登记或更新必做事项。多阶段首次协调先登记全部要求；用稳定 item_id 关联依赖。
+    """主 Agent 登记或更新必做事项。
+
+    参数形状为 {"updates": [...]}。updates 直接接收事项更新对象的 JSON 数组，单条更新也使用数组。
+    运行时快照中的 required_work.items 用于查看事项状态。
+    多阶段首次协调在一次调用中登记全部必做事项，用稳定的 item_id 关联依赖。
 
     新增时提供 goal、user_requirement、dependencies 和 completion_conditions；已有定义不可改写或删除。
     status 为 pending/in_progress/completed/unfinished；委派前将当前事项设为 in_progress。
