@@ -303,7 +303,7 @@ def _reserve_calls(context, *kinds, charge):
 
 
 # 单次请求取所有适用时限的最小值，不能超过整轮剩余时间。
-def request_timeout(maximum=None, *, model_request=False):
+def request_timeout(maximum=None, *, model_request=False, tool_includes_model=False):
     context = get_run_context()
     context.check_active()
     limits = policy_for_run().timeouts
@@ -375,6 +375,8 @@ def request_timeout(maximum=None, *, model_request=False):
 
         remaining = min(value for value in (remaining, admitted_deadline - monotonic()) if value is not None)
     request_limit = limits.request_seconds
+    if tool_includes_model:
+        request_limit += limits.tool_seconds
     if model_request and context.report_started and not (call and call.task_id):
         from agent.runtime.finalization import finalization_active
 
@@ -698,10 +700,10 @@ def before_tool_policy(call):
             if name != "task":
                 from time import monotonic
 
+                limits = context.policy.timeouts
                 admitted_at = monotonic()
-                call.workflow_data["admitted_deadline"] = admitted_at + request_timeout(
-                    context.policy.timeouts.tool_seconds
-                )
+                seconds = request_timeout(None if visual else limits.tool_seconds, tool_includes_model=visual)
+                call.workflow_data["admitted_deadline"] = admitted_at + seconds
             if name in ("internet_search", "read_web_page"):
                 task_key = (owner, name)
                 if not search_call_available(name, owner):

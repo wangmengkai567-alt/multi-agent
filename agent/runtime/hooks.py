@@ -533,11 +533,12 @@ class HookToolMiddleware(AgentMiddleware):
                         else:
                             from agent.runtime.recovery import ToolCallTimeout
 
+                            timeout = asyncio.timeout_at(scope.deadline)
                             try:
-                                async with asyncio.timeout_at(scope.deadline):
+                                async with timeout:
                                     call.result = await handler(request)
                             except TimeoutError as error:
-                                if isinstance(error, ToolCallTimeout):
+                                if not timeout.expired():
                                     raise
                                 raise ToolCallTimeout(request.tool_call["name"], seconds) from error
                     call.execution_status = "completed"
