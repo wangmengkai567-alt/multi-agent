@@ -115,7 +115,11 @@ def admit_stage(context, spec=None):
             *(
                 ("main_model", "main_model")
                 + ("sub_model",)
-                * (units[selected]["thinking_model_calls"] + units[selected]["internal_model_calls"] + 1)
+                * (
+                    units[selected]["thinking_model_calls"]
+                    + units[selected]["internal_model_calls"]
+                    + units[selected]["handoff_model_calls"]
+                )
                 + ("tool",) * (units[selected]["tool_calls"] + 2)
                 if planned
                 else ("main_model", "main_model", "tool")

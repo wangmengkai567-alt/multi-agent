@@ -5,6 +5,7 @@ from copy import deepcopy
 from urllib.parse import urlsplit
 
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -103,8 +104,10 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         can_use_tools = calls_available(
             category, "tool", category, *(("main_model",) if category == "sub_model" else ())
         )
+        budget_handoff = False
         if call and call.task_id:
-            can_use_tools &= tools_admitted(context, thinking=True)
+            budget_handoff = not tools_admitted(context, thinking=True)
+            can_use_tools &= not budget_handoff
         elif not context.report_started and coordination_window(context) <= 0:
             decision = admit_stage(context)
             close_limited_work(context, decision)
@@ -118,6 +121,18 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             row = context.task_results[call.task_id]
             item = context.required_work.get(row["work_item_id"])
             document_states = document_progress(context, item, task_id=call.task_id)
+            if budget_handoff and row["budget_handoff"] and not context.report_started:
+                latest = {record["call_id"]: record["status"] for record in evidence}
+                if all(status == "completed" for status in latest.values()) and any(
+                    state["paginated"]
+                    and state["unread_ranges"]
+                    and any(source["task_id"] == call.task_id for source in state["sources"])
+                    for state in document_states
+                ):
+                    context.check_active()
+                    stage = row["stage_budget"]
+                    stage["execution_unit"] = dict(stage["execution_unit"], handoff_model_calls=0)
+                    return ModelResponse(result=[AIMessage(content="本分工已有 PDF 正文证据，按阶段预算交接未读页。")])
             from agent.runtime.workflows import _range_covered
 
             read, documents = set(), {}
@@ -324,6 +339,8 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         names = [convert_to_openai_tool(tool)["function"]["name"] for tool in request.tools]
         with expert_tool_turn(get_run_context(), names):
             prepared = self.prepare(request)
+            if isinstance(prepared, ModelResponse):
+                return prepared
             with final_answer_mode(not prepared.tools):
                 return self.validate_response(prepared, handler(prepared))
 
@@ -331,5 +348,7 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         names = [convert_to_openai_tool(tool)["function"]["name"] for tool in request.tools]
         with expert_tool_turn(get_run_context(), names):
             prepared = self.prepare(request)
+            if isinstance(prepared, ModelResponse):
+                return prepared
             with final_answer_mode(not prepared.tools):
                 return self.validate_response(prepared, await handler(prepared))
