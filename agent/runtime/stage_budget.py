@@ -34,7 +34,7 @@ def investigation_items(context):
     }
 
 
-def admit_stage(context, spec=None, *, document_selection=None):
+def admit_stage(context, spec=None, *, document_selection=None, delegation_committed=False):
     from agent.runtime.document_work import execution_unit
     from agent.runtime.policies import calls_available_for
     from agent.runtime.required_work import active_work_item
@@ -81,7 +81,14 @@ def admit_stage(context, spec=None, *, document_selection=None):
             )
             for key, value in planned.items()
         }
-        minimums = {key: limits.coordination_seconds + sum(unit["seconds"].values()) for key, unit in units.items()}
+        # A received task call or a runtime-issued PDF batch needs no further coordinator request.
+        needs_coordination = document_selection is None and not delegation_committed
+        coordination_reserve = limits.coordination_seconds if needs_coordination else 0.0
+        minimums = {
+            key: (coordination_reserve if key == item_id else limits.coordination_seconds)
+            + sum(unit["seconds"].values())
+            for key, unit in units.items()
+        }
         selected = item_id if item_id in minimums else next(iter(minimums), None)
         minimum = minimums[selected] if minimums else limits.coordination_seconds
         future = sum(value for key, value in minimums.items() if key != selected)
@@ -90,22 +97,24 @@ def admit_stage(context, spec=None, *, document_selection=None):
             if remaining is not None
             else context.policy.timeouts.total_seconds - context.policy.timeouts.report_reserve_seconds
         )
-        expert_minimum = minimum - limits.coordination_seconds if planned else 0.0
+        expert_minimum = sum(units[selected]["seconds"].values()) if planned else 0.0
         request_limit = context.policy.timeouts.request_seconds
         # Future minima guide allocation; they cannot veto an affordable current stage.
         # Share spare time between one coordination request and the later stages, while
         # retaining the current expert's tools, handoff and cleanup minimum.
-        coordination = max(
-            0.0,
-            min(
-                request_limit,
-                usable - expert_minimum,
-                max(
-                    limits.coordination_seconds,
-                    (usable - expert_minimum) * request_limit / (request_limit + future),
+        coordination = 0.0
+        if needs_coordination:
+            coordination = max(
+                0.0,
+                min(
+                    request_limit,
+                    usable - expert_minimum,
+                    max(
+                        limits.coordination_seconds,
+                        (usable - expert_minimum) * request_limit / (request_limit + future),
+                    ),
                 ),
-            ),
-        )
+            )
         allocation = (
             max(0.0, min(usable - coordination, max(expert_minimum, usable - coordination - future)))
             if planned

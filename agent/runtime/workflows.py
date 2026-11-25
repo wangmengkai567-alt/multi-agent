@@ -119,11 +119,15 @@ def required_sources(context):
 async def finalize_answer(context, answer):
     from agent.runtime.completion import validate_delivery
     from agent.runtime.contracts import assert_contract
+    from agent.runtime.required_work import apply_final_verification
 
     context.check_active()
     assert_contract(context)
     if not isinstance(answer, str) or not answer.strip():
         raise ValueError("Final answer must not be empty")
+    if context.final_verification_items:
+        answer = apply_final_verification(context, answer)
+
     from agent.results import current_unfinished_reasons, delegation_payload
 
     review = review_required_work(context, delivery_pending=True)
@@ -167,7 +171,7 @@ async def finalize_answer(context, answer):
         raise ValueError("最终答复包含实际输入和工具结果中不存在的来源 URL")
     # 分工失败、缺少必需来源或材料未读全时，保留有效结果并在正文中明确标注部分完成。
     notices = []
-    if context.collection_timed_out:
+    if context.collection_timed_out and (review["unfinished"] or failures or missing or unread):
         notices.append("取证阶段已达到时限；本报告仅依据截止前实际取得的证据，未完成的核验保留为未知。")
     for row, reasons in current_unfinished_reasons(rows):
         if reasons:

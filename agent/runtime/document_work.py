@@ -217,7 +217,7 @@ def next_pdf_batch(context, row):
         return None
     stage = row["stage_budget"]
     issued = stage.get("document_selection")
-    if issued is None and not (row["budget_handoff"] and stage["execution_unit"]["handoff_model_calls"] == 0):
+    if issued is None and stage["execution_unit"]["handoff_model_calls"] != 0:
         return None
     if row["first_failure"] and row["first_failure"] != row["budget_handoff"]:
         return None

@@ -327,13 +327,6 @@ class HookToolMiddleware(AgentMiddleware):
                 raise HookRejected("Invalid tool arguments: " + fields) from exc
         if context and network and context.network_policy == "forbidden":
             raise HookRejected("本轮联网权限不允许执行该工具")
-        if context and not tool_available(
-            context,
-            request.tool_call["name"],
-            network=network,
-            require_budget=True,
-        ):
-            raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
         if request.tool_call["name"] == "task":
             call.target = call.args.get("subagent_type")
             if not isinstance(call.target, str):
@@ -347,9 +340,33 @@ class HookToolMiddleware(AgentMiddleware):
                 call.source_kind = spec.execution.source_kind
                 if context and not expert_available(context, spec):
                     raise HookRejected("专家不在当前契约、权限或执行阶段允许的范围内")
-            if not self.managed_delegation:
-                self.hooks.emit("before_delegate", call)
+            if "handoff" in call.args:
+                from agent.runtime.policies import PolicyError
+                from agent.runtime.required_work import apply_verification_handoff
+
+                if not (context and self.managed_delegation and not call.task_id and call.target == "search"):
+                    raise HookRejected("只有主助手能在委派联网核验时合并事项交接")
+                if set(call.args) != {"subagent_type", "description", "handoff"}:
+                    raise HookRejected("合并交接只接受 handoff、description 和 subagent_type")
+                try:
+                    apply_verification_handoff(context, call.args["handoff"])
+                except ValidationError as error:
+                    raise HookRejected("handoff 的参数格式不符合要求") from error
+                except PolicyError as error:
+                    raise HookRejected("联网核验交接被拒绝：" + str(error)) from error
+                call.args = {key: value for key, value in call.args.items() if key != "handoff"}
+                request = request.override(tool_call={**request.tool_call, "args": call.args})
+        if context and not tool_available(
+            context,
+            request.tool_call["name"],
+            network=network,
+            require_budget=True,
+        ):
+            raise HookRejected("工具不在当前契约、权限或执行阶段允许的范围内")
+        if request.tool_call["name"] == "task" and not self.managed_delegation:
+            self.hooks.emit("before_delegate", call)
         self.hooks.emit("before_tool", call)
+        return request
 
     def _retry_delay(self, request, call, exc):
         from agent.runtime.recovery import retry_delay
@@ -449,7 +466,7 @@ class HookToolMiddleware(AgentMiddleware):
             while True:
                 started = monotonic()
                 try:
-                    self._before(request, call)
+                    request = self._before(request, call)
                     seconds = self._timeout(call)
                     call.stage = "execution"
                     from agent.runtime.tool_timeout import bounded_tool
@@ -520,7 +537,7 @@ class HookToolMiddleware(AgentMiddleware):
             while True:
                 started = monotonic()
                 try:
-                    self._before(request, call)
+                    request = self._before(request, call)
                     seconds = self._timeout(call)
                     from agent.runtime.tool_timeout import bounded_tool_async
 

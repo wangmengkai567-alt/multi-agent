@@ -99,7 +99,7 @@ class DelegationRunnable(Runnable):
         )
         with context.budget_lock:
             context.check_active()
-            decision = admit_stage(context, self.spec, document_selection=document_selection)
+            decision = admit_stage(context, self.spec, document_selection=document_selection, delegation_committed=True)
             entry = "execution" if document_selection is None else "document_continuation"
             record_decision(context, decision, entry, self.spec.agent_id)
             if not decision.allowed:
@@ -295,12 +295,21 @@ class DelegationRunnable(Runnable):
         token = active_call.set(call)
         try:
             row = context.task_results[call.call_id]
-            payload = dict(delegation_payload(row), continuation=required_work_snapshot(context))
+            payload = dict(
+                delegation_payload(row, compact_document=len(stages) > 1), continuation=required_work_snapshot(context)
+            )
             if len(stages) > 1:
-                payload["same_work_results"] = [
-                    delegation_payload(context.task_results[previous.call_id]) for _, previous, _ in stages[:-1]
+                prior = [
+                    delegation_payload(context.task_results[previous.call_id], compact_document=True)
+                    for _, previous, _ in stages[:-1]
                 ]
-            return {"messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False))]}
+                for batch in prior:
+                    del batch["document_progress"]
+                for item in payload["continuation"]["items"]:
+                    for source in item.get("available_sources", ()):
+                        del source["evidence_note"]  # Each observation already retains its note.
+                payload["same_work_results"] = prior
+            return {"messages": [AIMessage(content=json.dumps(payload, ensure_ascii=False, separators=(",", ":")))]}
         finally:
             active_call.reset(token)
 

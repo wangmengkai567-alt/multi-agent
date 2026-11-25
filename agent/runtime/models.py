@@ -17,7 +17,7 @@ from langgraph.types import Command
 from agent.runtime.context import get_run_context
 from agent.runtime.errors import ExecutionTerminated
 from agent.runtime.governance import register_turn
-from agent.runtime.model_context import admit_context, prepared_payload
+from agent.runtime.model_context import admit_context, context_status, prepared_payload
 from agent.runtime.output import normalize_model_message
 from agent.runtime.policies import calls_available, request_timeout, reserve_calls
 
@@ -97,6 +97,30 @@ class BudgetSummarizationMiddleware(SummarizationMiddleware):
         check_model_turn(context, summary=True)
         return response.text.strip()
 
+    def _evidence_review_fits(self, request, messages):
+        from agent.reflection import tool_evidence
+        from agent.runtime.hooks import active_call
+
+        context = get_run_context()
+        call = active_call.get()
+        if call and call.task_id:
+            reviewing = call.actor == "search" and any(
+                row["status"] == "completed" and row["executed"] and row["sources"] for row in tool_evidence.get() or ()
+            )
+        else:
+            with context.budget_lock:
+                reviewing = any(
+                    context.task_results[task_id]["evidence_accepted"] and context.task_results[task_id]["sources"]
+                    for item in context.required_work.values()
+                    if item["status"] != "completed" and not item["ready_for_delegation"]
+                    for task_id in item["task_ids"]
+                )
+        if not reviewing:
+            return False
+        settings = {**request.model_settings, "tools": [convert_to_openai_tool(tool) for tool in request.tools]}
+        payload = prepared_payload(messages, self.model.delegate, settings)
+        return context_status(payload)["admitted"]
+
     def _summary_plan(self, request):
         prepared = request.override(messages=self._get_effective_messages(request))
         if not self._can_summarize():
@@ -105,7 +129,7 @@ class BudgetSummarizationMiddleware(SummarizationMiddleware):
         prepared = prepared.override(messages=messages)
         counted = [prepared.system_message, *messages] if prepared.system_message is not None else messages
         total = self.token_counter(counted, tools=prepared.tools)
-        if not self._should_summarize(messages, total):
+        if not self._should_summarize(messages, total) or self._evidence_review_fits(prepared, counted):
             return prepared, None
         cutoff = self._determine_cutoff_index(messages)
         if cutoff <= 0:

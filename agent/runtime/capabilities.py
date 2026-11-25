@@ -18,13 +18,19 @@ from agent.runtime.finalization import final_answer_mode, prepare_final_request
 from agent.runtime.hooks import active_call
 from agent.runtime.output import cited_urls
 from agent.runtime.policies import PolicyError, calls_available, request_timeout, search_call_available
-from agent.runtime.required_work import active_work_item, required_work_snapshot
+from agent.runtime.required_work import (
+    VerificationHandoff,
+    active_work_item,
+    required_work_snapshot,
+    verification_handoff,
+)
 from agent.runtime.stage_budget import (
     admit_stage,
     close_limited_work,
     coordination_window,
     current_stage,
     expert_tool_turn,
+    investigation_items,
     model_turn_deadline,
     operation_cost,
     record_decision,
@@ -55,10 +61,10 @@ def tool_available(context, name, *, network=False, target_specs=None, disclosur
     remaining = context.collection_remaining()
     if context.report_started or remaining is not None and remaining <= 0:
         return False
-    if name == "task" and not context.can_delegate():
+    if name == "task" and not admit_stage(context, delegation_committed=require_budget).allowed:
         return False
     call = active_call.get()
-    if not (call and call.task_id) and coordination_window(context) <= 0:
+    if not (call and call.task_id) and not (name == "task" and require_budget) and coordination_window(context) <= 0:
         decision = admit_stage(context)
         record_decision(context, decision, "tool_admission")
         close_limited_work(context, decision)
@@ -108,11 +114,15 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
         if call and call.task_id:
             budget_handoff = not tools_admitted(context, thinking=True)
             can_use_tools &= not budget_handoff
-        elif not context.report_started and coordination_window(context) <= 0:
-            decision = admit_stage(context)
-            close_limited_work(context, decision)
-            context.start_report(decision.reason)
-            can_use_tools = False
+        elif not context.report_started:
+            if context.required_work and not investigation_items(context):
+                context.start_report("必做取证事项已确认完成")
+                can_use_tools = False
+            elif coordination_window(context) <= 0:
+                decision = admit_stage(context)
+                close_limited_work(context, decision)
+                context.start_report(decision.reason)
+                can_use_tools = False
         evidence = tool_evidence.get() or []
         document_states = []
         issued = None
@@ -124,7 +134,15 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             document_states = document_progress(context, item, task_id=call.task_id)
             stage = row["stage_budget"]
             issued = stage.get("document_selection")
-            if (issued is not None or budget_handoff and row["budget_handoff"]) and not context.report_started:
+            first_required_pdf = (
+                item is not None
+                and len(context.task_contract.materials) == 1
+                and context.required_uploads
+                and any(condition["evidence_kind"] == "document" for condition in item["completion_conditions"])
+            )
+            if (
+                issued is not None or first_required_pdf or budget_handoff and row["budget_handoff"]
+            ) and not context.report_started:
                 latest = {record["call_id"]: record["status"] for record in evidence}
                 if all(status == "completed" for status in latest.values()) and any(
                     (
@@ -176,6 +194,11 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             materials = {material.reference for material in context.task_contract.materials}
             if materials and materials <= read | exhausted:
                 can_use_tools = False
+        handoff = (
+            verification_handoff(context)
+            if not (call and call.task_id) and "search" in self.target_specs and can_use_tools
+            else None
+        )
         page_sources = source_urls(evidence) or list(cited_urls(context.task_instruction))
         tools = []
         for tool in request.tools:
@@ -186,7 +209,11 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             else:
                 schema = convert_to_openai_tool(tool)
                 name, network = schema["function"]["name"], False
-            if not tool_available(context, name, network=network, target_specs=self.target_specs, disclosure=True):
+            if handoff and name != "task":
+                continue
+            if not handoff and not tool_available(
+                context, name, network=network, target_specs=self.target_specs, disclosure=True
+            ):
                 continue
             if (
                 call
@@ -233,11 +260,14 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 }
                 for target, spec in self.target_specs.items():
                     record_decision(context, admit_stage(context, spec), "disclosure", target)
+                if handoff:
+                    targets = {"search": self.target_specs["search"]}
                 if not targets:
                     continue
                 schema = deepcopy(convert_to_openai_tool(tool))
                 function = schema["function"]
-                function["parameters"]["properties"]["subagent_type"] = {"type": "string", "enum": list(targets)}
+                properties = function["parameters"]["properties"]
+                properties["subagent_type"] = {"type": "string", "enum": list(targets)}
                 function["parameters"]["additionalProperties"] = False
                 function["description"] = (
                     "仅委派当前允许的专家；description 包含目标、范围和限制，具体方法由专家选择。\n"
@@ -251,6 +281,14 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                         for target, spec in targets.items()
                     )
                 )
+                if handoff:
+                    properties["handoff"] = convert_to_openai_tool(VerificationHandoff)["function"]["parameters"]
+                    function["parameters"]["required"].append("handoff")
+                    function["description"] += (
+                        f"\n用 handoff 逐项确认 {handoff[0]} 的完成条件，仅填写必要来源的 source_index，"
+                        f"并用 next_item_id 选择 {'、'.join(handoff[1])} 中的一项。"
+                        "description 写待核验的具体结论。交接校验通过后直接委派。"
+                    )
                 tool = (
                     tool.model_copy(
                         update={"description": function["description"], "args_schema": function["parameters"]}
@@ -259,6 +297,34 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                     else schema
                 )
             tools.append(tool)
+        if call and call.task_id and call.actor == "search":
+            row = context.task_results[call.task_id]
+            item = context.required_work.get(row["work_item_id"])
+            checks = (
+                [condition for condition in item["completion_conditions"] if condition["evidence_kind"] == "web"]
+                if item
+                else []
+            )
+            sources = [
+                record
+                for record in evidence
+                if record["status"] == "completed"
+                and record["executed"]
+                and record["sources"]
+                and record["name"] in ("internet_search", "read_web_page")
+            ]
+            searches = sum(record["name"] == "internet_search" for record in sources)
+            page_reads = sum(record["name"] == "read_web_page" for record in sources)
+            if (
+                checks
+                and (not tools or len(checks) > 1)
+                and searches >= len(checks)
+                and page_reads >= sum(check["page_required"] for check in checks)
+            ):
+                context.check_active()
+                return ModelResponse(
+                    result=[AIMessage(content="本分工已取得实际联网依据。按已保存的检索与页面记录逐项核对结论。")]
+                )
         settings = dict(request.model_settings)
         choice = request.tool_choice
         instruction = (
@@ -285,6 +351,8 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
                 + "\n多阶段任务先登记全部必做事项，再逐项执行；最后再次对照原始请求检查遗漏。"
                 "只有运行时已确认的 completed 才表示该事项完成；保留其他事项及原因。"
             )
+        if handoff:
+            instruction += "当前有可接续的联网核验。用一次 task 的 handoff 确认证据并选择下一项，按来源序号引用，不重复抄写来源标识。"
         if not tools:
             instruction += "当前已进入最终答复回合，请输出自然语言结论正文，不输出函数调用；明确披露未完成事项。"
         if any(convert_to_openai_tool(tool)["function"]["name"] in NETWORK_ACTIONS for tool in request.tools):

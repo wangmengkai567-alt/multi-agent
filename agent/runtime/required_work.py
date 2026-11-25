@@ -3,7 +3,7 @@
 import json
 from copy import deepcopy
 from hashlib import sha256
-from typing import Literal
+from typing import Annotated, Literal
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -50,6 +50,29 @@ class CompletionBasis(WorkInput):
     condition_index: int = Field(ge=0)
     result: str = Field(min_length=1)
     sources: list[SourceReference] = Field(default_factory=list)
+
+
+class VerificationBasis(WorkInput):
+    condition_index: int = Field(ge=0)
+    result: str = Field(min_length=1, description="一句话说明本条件的实际结果及范围。")
+    source_indexes: list[Annotated[int, Field(ge=0)]] = Field(
+        min_length=1, description="填当前事项 available_sources 中的 source_index；只引用支持本条结果的必要来源。"
+    )
+
+
+class VerificationHandoff(WorkInput):
+    next_item_id: str = Field(min_length=1, description="下一项已具备前置执行条件的核验事项 ID。")
+    completion_basis: list[VerificationBasis] = Field(min_length=1, description="当前事项每条条件的结果及来源序号。")
+
+
+class FinalVerification(WorkInput):
+    item_id: str
+    completion_basis: list[VerificationBasis] = Field(min_length=1)
+
+
+class VerificationReport(WorkInput):
+    answer: str = Field(min_length=1)
+    verification: list[FinalVerification] = Field(default_factory=list)
 
 
 class WorkUpdate(WorkInput):
@@ -473,7 +496,7 @@ def associate_work_task(context, item_id, task_id):
         _save(context, items)
 
 
-def apply_work_updates(context, updates):
+def apply_work_updates(context, updates, *, transition=None, final_verification=False):
     """Definitions are append-only; only runtime-validated claims can reach completed."""
     call = active_call.get()
     if call and call.task_id:
@@ -481,7 +504,7 @@ def apply_work_updates(context, updates):
     with context.budget_lock:
         context.check_active()
         assert_contract(context)
-        if context.report_started:
+        if context.report_started and not final_verification:
             raise PolicyError("最终汇总已开始，不能再更新事项或启动分工")
         if not updates or len({update.item_id for update in updates}) != len(updates):
             raise PolicyError("事项更新不能为空，也不能重复更新同一事项")
@@ -558,8 +581,122 @@ def apply_work_updates(context, updates):
             confirm(key)
         if sum(item["status"] == "in_progress" for item in items.values()) > 1:
             raise PolicyError("串行委派同一时刻只能有一个执行中的事项")
+        if transition is not None:
+            current, following = (items[key] for key in transition)
+            if current["status"] != "completed" or following["status"] != "in_progress":
+                reasons = current["validation_errors"] + following["validation_errors"]
+                raise PolicyError("本次交接未通过证据校验：" + "；".join(reasons))
         _save(context, items)
         return required_work_snapshot(context)
+
+
+def verification_handoff(context):
+    """Find web work that the coordinator can select while confirming its current evidence."""
+    from agent.runtime.document_work import incomplete_required_pdfs
+
+    with context.budget_lock:
+        if context.report_started or context.task_contract is None or not context.task_contract.network_allowed:
+            return None
+        current_id = active_work_item(context)
+        if current_id is None:
+            return None
+        current = context.required_work[current_id]
+        if current["ready_for_delegation"] or not current["task_ids"]:
+            return None
+        task = context.task_results[current["task_ids"][-1]]
+        if (
+            task["target"] not in ("document", "search")
+            or task["status"] not in ("completed", "failed")
+            or not task["evidence_accepted"]
+            or not task["sources"]
+            or incomplete_required_pdfs(context, current)
+        ):
+            return None
+        candidates = [
+            item_id
+            for item_id, row in context.required_work.items()
+            if row["status"] == "pending"
+            and any(condition["evidence_kind"] == "web" for condition in row["completion_conditions"])
+            and all(
+                dep == current_id or context.required_work[dep]["status"] == "completed" for dep in row["dependencies"]
+            )
+        ]
+        return (current_id, candidates) if candidates else None
+
+
+def apply_verification_handoff(context, handoff):
+    request = VerificationHandoff.model_validate(handoff)
+    with context.budget_lock:
+        selection = verification_handoff(context)
+        if selection is None:
+            raise PolicyError("当前没有可在证据交接后立即委派的核验事项")
+        current_id, candidates = selection
+        if request.next_item_id not in candidates:
+            raise PolicyError("只能选择当前可接续的核验事项")
+        updates = [
+            _indexed_completion(context, current_id, request.completion_basis),
+            WorkUpdate(item_id=request.next_item_id, status="in_progress"),
+        ]
+        apply_work_updates(context, updates, transition=(current_id, request.next_item_id))
+
+
+def _indexed_completion(context, item_id, entries):
+    item = context.required_work[item_id]
+    available = _owned_sources(context, item)
+    conditions = item["completion_conditions"]
+    basis = []
+    for entry in entries:
+        if entry.condition_index >= len(conditions):
+            raise PolicyError("完成依据引用了不存在的条件")
+        if any(index >= len(available) for index in entry.source_indexes):
+            raise PolicyError("完成依据的 source_index 超出当前事项已核验的来源范围")
+        page_required = conditions[entry.condition_index]["page_required"]
+        references = [
+            SourceReference(**{key: available[index][key] for key in SourceReference.model_fields})
+            for index in entry.source_indexes
+            if not page_required or available[index]["retrieval"] == "page"
+        ]
+        basis.append(CompletionBasis(condition_index=entry.condition_index, result=entry.result, sources=references))
+    return WorkUpdate(item_id=item_id, status="completed", completion_basis=basis)
+
+
+def final_verification_items(snapshot):
+    completed = {item["item_id"] for item in snapshot["items"] if item["status"] == "completed"}
+    return tuple(
+        item["item_id"]
+        for item in snapshot["items"]
+        if item["status"] != "completed"
+        and item["completion_conditions"]
+        and all(condition["evidence_kind"] == "web" for condition in item["completion_conditions"])
+        and all(dependency in completed for dependency in item["dependencies"])
+        and all(
+            any(
+                source["kind"] == "web" and (not condition["page_required"] or source["retrieval"] == "page")
+                for source in item.get("available_sources", ())
+            )
+            for condition in item["completion_conditions"]
+        )
+    )
+
+
+def apply_final_verification(context, response):
+    report = VerificationReport.model_validate_json(response)
+    if not report.answer.strip():
+        raise PolicyError("最终报告正文为空")
+    allowed = context.final_verification_items
+    item_ids = [entry.item_id for entry in report.verification]
+    if len(set(item_ids)) != len(item_ids) or any(item_id not in allowed for item_id in item_ids):
+        raise PolicyError("最终报告只能确认获准的核验事项，每项只能提交一次")
+    with context.budget_lock:
+        updates = []
+        for entry in report.verification:
+            try:
+                updates.append(_indexed_completion(context, entry.item_id, entry.completion_basis))
+            except PolicyError as error:
+                limit_required_work(context, [entry.item_id], "evidence_validation", str(error))
+        if updates:
+            apply_work_updates(context, updates, final_verification=True)
+    return report.answer
 
 
 def remaining_work_budget(context):
@@ -600,7 +737,9 @@ def required_work_snapshot(context):
         items = deepcopy(list(context.required_work.values()))
         for item in items:
             try:
-                item["available_sources"] = _owned_sources(context, item)
+                item["available_sources"] = [
+                    dict(source, source_index=index) for index, source in enumerate(_owned_sources(context, item))
+                ]
             except EvidenceError as error:
                 item["available_sources"] = []
                 item["evidence_error"] = str(error)

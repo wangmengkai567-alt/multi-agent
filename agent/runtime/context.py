@@ -29,6 +29,7 @@ class RunContext:
     deadline_clock: float | None = None
     stop_status: str | None = None
     report_started: bool = False
+    final_verification_items: tuple[str, ...] = ()
     report_reason: str = ""
     collection_timed_out: bool = False
     terminal_error: ExecutionTerminated | None = field(default=None, repr=False)

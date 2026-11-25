@@ -199,7 +199,7 @@ def indexed_evidence_payload(evidence, task_id):
 
 
 # 将子任务记录整理成返回给主助手的状态、结论、证据片段、来源和限制。
-def delegation_payload(row):
+def delegation_payload(row, *, compact_document=False):
     """Keep task failure separate from accepted successful-tool observations."""
     # A collection rejected during evidence validation has no accepted factual sources.
     accepted = (
@@ -207,6 +207,9 @@ def delegation_payload(row):
         if row["sources"]
         else dict(sources=[], observations=[])
     )
+    if compact_document and row["target"] == "document":
+        for source in accepted["sources"]:
+            del source["inputs"], source["provenance"]
     return dict(
         task_id=row["call_id"],
         work_item_id=row["work_item_id"],
