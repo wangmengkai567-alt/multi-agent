@@ -325,7 +325,9 @@ class DelegationRunnable(Runnable):
 
     @staticmethod
     def _cleanup_failed(context, error):
-        failure = StageCleanupFailed("阶段清理未在预留时限内完成，不能启动后续取证或重复最终报告")
+        if context.terminal_error is not None:
+            raise context.terminal_error
+        failure = StageCleanupFailed("阶段终态事件未能确认落库，不能启动后续取证或重复最终报告")
         context.terminate(failure)
         raise failure from error
 
@@ -413,7 +415,7 @@ class DelegationRunnable(Runnable):
                             context.event_sink,
                             timeout=self._cleanup_seconds(context, call),
                         )
-                    except TimeoutError as error:
+                    except (TimeoutError, EventPersistenceError) as error:
                         self._cleanup_failed(context, error)
             finally:
                 tool_evidence.reset(evidence_token)
@@ -468,7 +470,7 @@ class DelegationRunnable(Runnable):
                     try:
                         async with asyncio.timeout(self._cleanup_seconds(context, call)):
                             await context.event_sink.flush(context.run_id)
-                    except TimeoutError as error:
+                    except (TimeoutError, EventPersistenceError) as error:
                         self._cleanup_failed(context, error)
             finally:
                 tool_evidence.reset(evidence_token)

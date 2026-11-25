@@ -491,7 +491,10 @@ async def run_stage(context, task_id, operation):
                 context.terminate(error)
                 raise error
         if not task.cancelled():
-            task.exception()
+            error = task.exception()
+            if isinstance(error, StageCleanupFailed):
+                context.terminate(error)
+                raise error
 
 
 def run_stage_sync(context, task_id, operation):
@@ -533,6 +536,11 @@ def run_stage_sync(context, task_id, operation):
                     raise error from None
             except BaseException:
                 pass  # The original stage/cancellation boundary remains the owning outcome.
+        if result.done():
+            error = result.exception()
+            if isinstance(error, StageCleanupFailed):
+                context.terminate(error)
+                raise error
 
 
 def close_limited_work(context, decision, item_ids=None):

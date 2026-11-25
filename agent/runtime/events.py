@@ -104,6 +104,7 @@ class EventSink:
         self.deliver = deliver
         self.loop = asyncio.get_running_loop()
         self.queue = asyncio.Queue()
+        self.pending = {}
         self.failures = []
         self.accepting = True
         self.submission_lock = Lock()
@@ -122,19 +123,17 @@ class EventSink:
         with self.submission_lock:
             if not self.accepting or self.loop.is_closed():
                 raise EventPersistenceError("Event outlet is closed; event was not saved")
-            try:
-                same_loop = asyncio.get_running_loop() is self.loop
-            except RuntimeError:
-                same_loop = False
-            if same_loop:
-                self.queue.put_nowait(event)
-            else:
-                self.loop.call_soon_threadsafe(self.queue.put_nowait, event)
+            self.loop.call_soon_threadsafe(self._enqueue, event)
+
+    def _enqueue(self, event):
+        committed = self.loop.create_future()
+        self.pending[event["run_id"]] = committed
+        self.queue.put_nowait((event, committed))
 
     # 单个消费者按提交顺序持久化事件，数据库为每轮事件生成可回放的递增序号。
     async def _consume(self):
         while True:
-            event = await self.queue.get()
+            event, committed = await self.queue.get()
             try:
                 if event is None:
                     return
@@ -150,6 +149,11 @@ class EventSink:
                 self.failures.append((event["run_id"], exc))
                 logger.exception("Event was NOT saved: run=%s", event["run_id"])
             finally:
+                if committed is not None:
+                    run_id = event["run_id"]
+                    if self.pending[run_id] is committed:
+                        del self.pending[run_id]
+                    committed.set_result(None)
                 self.queue.task_done()
 
     def submit_subtask(self, record, event):
@@ -162,9 +166,12 @@ class EventSink:
         self.submit(dict(event, _subtask=dict(record)))
 
     async def flush(self, run_id=None):
-        # 先让同步工具线程安排的入队回调执行，再等待队列中的事件全部落库。
+        # 等待调用前提交的本轮事件落库；其他运行的后续事件不占用本轮清理时间。
         await asyncio.sleep(0)
-        await self.queue.join()
+        if run_id is None:
+            await self.queue.join()
+        elif committed := self.pending.get(run_id):
+            await asyncio.shield(committed)
         failures = [item for item in self.failures if run_id is None or item[0] == run_id]
         self.failures = [item for item in self.failures if run_id is not None and item[0] != run_id]
         if failures:
@@ -259,5 +266,5 @@ class EventSink:
         try:
             await self.flush()
         finally:
-            self.queue.put_nowait(None)
+            self.queue.put_nowait((None, None))
             await self.worker

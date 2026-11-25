@@ -9,7 +9,7 @@ from threading import BoundedSemaphore, Thread
 from time import monotonic
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated
+from agent.runtime.errors import DependencyUnavailable, ExecutionTerminated, StageCleanupFailed
 from agent.runtime.processes import OwnedProcess
 from agent.runtime.recovery import ToolCallTimeout
 from agent.runtime.tool_timeout import active_tool_scope
@@ -44,13 +44,19 @@ def run_operation(operation, payload, *, seconds, on_event=None):
     while not _slots.acquire(timeout=0.02):
         check()
     owned, reader, writer = None, None, None
+    completion, cleanup_error = None, None
     try:
         check()
-        owned = OwnedProcess(
-            [sys.executable, "-B", "-m", "agent.runtime.worker"], cwd=Path(__file__).resolve().parents[2]
-        )
         if scope is not None:
-            scope.attach(owned)
+            completion = scope.register_worker()
+        try:
+            owned = OwnedProcess(
+                [sys.executable, "-B", "-m", "agent.runtime.worker"], cwd=Path(__file__).resolve().parents[2]
+            )
+        except ExecutionTerminated as error:
+            cleanup_error = StageCleanupFailed("无法确认启动失败的工具工作进程已退出")
+            raise cleanup_error from error
+        check()
         process, received = owned.process, queue.Queue()
 
         def read():
@@ -108,17 +114,23 @@ def run_operation(operation, payload, *, seconds, on_event=None):
             else:
                 raise WorkerOperationError(dict(category="execution", message="Worker exited without a valid result"))
     finally:
-        # 无论成功失败都先确认子进程结束，再关闭管道并归还容量；回收失败不能继续放行。
-        if owned is not None:
-            owned.close()  # A failed reap retains its capacity slot and stops the run.
-        if scope is not None and owned is not None:
-            scope.detach(owned)
-        for thread in (writer, reader):
-            if thread is not None and thread.ident is not None:
-                thread.join(timeout=1)
-                if thread.is_alive():
-                    raise ExecutionTerminated("Contained worker pipe did not close after process termination")
-        if owned is not None:
-            for stream in (owned.process.stdin, owned.process.stdout):
-                stream.close()
-        _slots.release()
+        # 工作线程负责回收进程和管道，确认后才归还容量并通知调用者。
+        try:
+            if owned is not None:
+                owned.close()
+            for thread in (writer, reader):
+                if thread is not None and thread.ident is not None:
+                    thread.join(timeout=1)
+                    if thread.is_alive():
+                        raise ExecutionTerminated("Contained worker pipe did not close after process termination")
+            if owned is not None:
+                for stream in (owned.process.stdin, owned.process.stdout):
+                    stream.close()
+            if cleanup_error is None:
+                _slots.release()
+        except Exception as error:
+            cleanup_error = StageCleanupFailed("工具工作进程或管道清理失败")
+            raise cleanup_error from error
+        finally:
+            if completion is not None:
+                completion.set_result(cleanup_error)

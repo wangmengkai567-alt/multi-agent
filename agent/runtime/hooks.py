@@ -522,9 +522,9 @@ class HookToolMiddleware(AgentMiddleware):
                 try:
                     self._before(request, call)
                     seconds = self._timeout(call)
-                    from agent.runtime.tool_timeout import bounded_tool
+                    from agent.runtime.tool_timeout import bounded_tool_async
 
-                    with bounded_tool(call.actor, seconds) as scope:
+                    async with bounded_tool_async(call.actor, seconds) as scope:
                         call.executed = True
                         call.execution_status = "running"
                         call.stage = "execution"

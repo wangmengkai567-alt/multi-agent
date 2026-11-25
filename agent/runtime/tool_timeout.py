@@ -1,12 +1,14 @@
 """Cooperative tool deadlines; blocking providers run in owned, killable processes."""
 
-from contextlib import contextmanager
+import asyncio
+from concurrent.futures import Future, wait
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from threading import Event, RLock
+from threading import Event, Lock
 from time import monotonic
 
 from agent.runtime.context import get_run_context
-from agent.runtime.errors import StageEnded
+from agent.runtime.errors import StageCleanupFailed, StageEnded
 from agent.runtime.recovery import ToolCallTimeout
 
 active_tool_scope = ContextVar("active_tool_scope", default=None)
@@ -32,11 +34,12 @@ class ToolScope:
             self.deadline = min(self.deadline, admitted) if self.deadline is not None else admitted
         stage = current_stage(context) if context else None
         self.stage_deadline = stage["tool_deadline"] if stage else None
+        self.stage_cleanup_deadline = stage["deadline"] if stage else None
         if self.stage_deadline is not None:
             self.deadline = (
                 min(self.deadline, self.stage_deadline) if self.deadline is not None else self.stage_deadline
             )
-        self.cancelled, self.lock, self.workers = Event(), RLock(), set()
+        self.cancelled, self.lock, self.workers = Event(), Lock(), []
 
     def check(self):
         context = get_run_context()
@@ -47,40 +50,92 @@ class ToolScope:
         if self.cancelled.is_set() or self.deadline is not None and monotonic() >= self.deadline:
             raise ToolCallTimeout(self.name, self.seconds or 0)
 
-    def attach(self, worker):
+    def register_worker(self):
         with self.lock:
             self.check()
-            self.workers.add(worker)
+            completion = Future()
+            self.workers.append(completion)
+            return completion
 
-    def detach(self, worker):
+    def _stop_workers(self):
         with self.lock:
-            self.workers.discard(worker)
+            self.cancelled.set()
+            return tuple(self.workers)
+
+    def _cleanup_deadline(self):
+        from agent.runtime.policies import policy_for_run
+
+        context = get_run_context()
+        now = monotonic()
+        remaining = context.remaining()
+        return min(
+            limit
+            for limit in (
+                now + policy_for_run().timeouts.shutdown_seconds,
+                self.stage_cleanup_deadline,
+                now + remaining if remaining is not None else None,
+            )
+            if limit is not None
+        )
+
+    @staticmethod
+    def _confirm_cleanup(workers):
+        for completion in workers:
+            if not completion.done():
+                raise StageCleanupFailed("工具工作进程未在清理时限内退出")
+            if error := completion.result():
+                raise error
 
     def close(self):
-        self.cancelled.set()
-        with self.lock:
-            workers = list(self.workers)
-        failure = None
-        for worker in workers:
-            try:
-                worker.close()
-            except Exception as error:
-                failure = error
-        if failure is not None:
-            raise failure
+        workers = self._stop_workers()
+        pending = [worker for worker in workers if not worker.done()]
+        if pending:
+            wait(pending, timeout=max(0.0, self._cleanup_deadline() - monotonic()))
+        self._confirm_cleanup(workers)
+
+    async def aclose(self):
+        workers = self._stop_workers()
+        pending = [asyncio.wrap_future(worker) for worker in workers if not worker.done()]
+        try:
+            if pending:
+                deadline = self._cleanup_deadline()
+                try:
+                    await asyncio.wait(pending, timeout=max(0.0, deadline - monotonic()))
+                except asyncio.CancelledError:
+                    # 阶段取消时，同一截止时间内仍需确认进程已退出。
+                    await asyncio.wait(pending, timeout=max(0.0, deadline - monotonic()))
+                    raise
+        finally:
+            self._confirm_cleanup(workers)
 
 
-# 在工具执行前后检查期限，并在退出时关闭该调用持有的子进程。
 @contextmanager
-def bounded_tool(name, seconds):
+def _active_scope(name, seconds):
     scope = ToolScope(name, seconds)
     token = active_tool_scope.set(scope)
     try:
-        scope.check()
         yield scope
-        scope.check()
     finally:
+        active_tool_scope.reset(token)
+
+
+@contextmanager
+def bounded_tool(name, seconds):
+    with _active_scope(name, seconds) as scope:
         try:
-            scope.close()
+            scope.check()
+            yield scope
+            scope.check()
         finally:
-            active_tool_scope.reset(token)
+            scope.close()
+
+
+@asynccontextmanager
+async def bounded_tool_async(name, seconds):
+    with _active_scope(name, seconds) as scope:
+        try:
+            scope.check()
+            yield scope
+            scope.check()
+        finally:
+            await scope.aclose()
