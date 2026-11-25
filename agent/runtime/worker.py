@@ -25,7 +25,7 @@ def dispatch(operation, payload):
             importlib.import_module(module)
         return {"available": True}
     if operation == "document_render":
-        from tools.document_vision import render_upload
+        from tools.document_render import render_upload
 
         path = Path(payload["path"])
         with path.open("rb") as stream:

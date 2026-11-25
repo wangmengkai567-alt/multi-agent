@@ -690,7 +690,7 @@ def before_tool_policy(call):
                 raise PolicyError("工具不在当前分工允许的执行阶段内；请根据已有证据返回结论和缺口")
             if context.turn_counts.get(turn, 0) >= context.policy.budgets.tools_per_turn:
                 raise PolicyError("单次模型回合工具调用次数已达到上限")
-            from tools.document_vision import VISUAL_SUFFIXES
+            from tools.document_render import VISUAL_SUFFIXES
 
             visual = (
                 name == "read_document"

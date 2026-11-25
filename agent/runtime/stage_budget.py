@@ -276,7 +276,7 @@ def operation_cost(context, name=None, parameters=None):
     from pathlib import Path
 
     from agent.runtime.document_work import next_document_step
-    from tools.document_vision import VISUAL_SUFFIXES
+    from tools.document_render import VISUAL_SUFFIXES
 
     nested = False
     if name == "read_document" and parameters is not None:

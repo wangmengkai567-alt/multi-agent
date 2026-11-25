@@ -16,6 +16,7 @@ from agent.runtime.skills import stage_read
 from api.context import get_session_context
 from api.monitor import monitor
 from tools.document_parser import DocumentSelection, extract_document
+from tools.document_render import VISUAL_SUFFIXES
 from utils.path_utils import resolve_path
 from utils.secure_paths import PathDenied, resolve_run_path
 
@@ -90,13 +91,13 @@ async def read_document(
         raise PathDenied("Document is not a bound input of the current task")
     if file.stat().st_size > context.policy.files.max_upload_bytes:
         raise ValueError("Original document exceeds the configured upload size limit")
-    from tools.document_vision import VISUAL_SUFFIXES, read_visual
-
     selected = selection.model_dump() if isinstance(selection, DocumentSelection) else selection
     from agent.runtime.document_work import check_continuation_selection
 
     check_continuation_selection(context, relative, selected)
     if file.suffix.lower() in VISUAL_SUFFIXES:
+        from tools.document_vision import read_visual
+
         raw, result = await read_visual(file, context.policy.files.max_upload_bytes, selected)
     else:
         raw, result = await asyncio.to_thread(_read, file, context.policy.files.max_upload_bytes, selected)

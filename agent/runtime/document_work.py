@@ -40,7 +40,7 @@ def _unread(total, ranges):
 
 def document_progress(context, item=None, *, task_id=None):
     """Internal records are already normalized; catalogs never add read ranges or sources."""
-    from tools.document_vision import MAX_PAGES, VISUAL_SUFFIXES
+    from tools.document_render import MAX_PAGES, VISUAL_SUFFIXES
 
     contract = context.task_contract
     states = (
