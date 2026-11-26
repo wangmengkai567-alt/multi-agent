@@ -315,12 +315,13 @@ class CapabilityDisclosureMiddleware(AgentMiddleware):
             ]
             searches = sum(record["name"] == "internet_search" for record in sources)
             page_reads = sum(record["name"] == "read_web_page" for record in sources)
-            if (
-                checks
-                and (not tools or len(checks) > 1)
-                and searches >= len(checks)
-                and page_reads >= sum(check["page_required"] for check in checks)
-            ):
+            # An operation can support multiple conditions; the handoff target must fit the tool quotas.
+            limits = context.policy.search
+            search_target = min(len(checks), limits.calls_per_task, limits.calls_per_run)
+            page_target = min(
+                sum(check["page_required"] for check in checks), limits.page_reads_per_task, limits.calls_per_run
+            )
+            if checks and (not tools or len(checks) > 1) and searches >= search_target and page_reads >= page_target:
                 context.check_active()
                 return ModelResponse(
                     result=[AIMessage(content="本分工已取得实际联网依据。按已保存的检索与页面记录逐项核对结论。")]

@@ -9,7 +9,7 @@ main_agent_content = {
 completion_conditions每项必须填写description和evidence_kind；上传文档/PDF用document，联网核验用web，最终文件用delivery。
 page_required只表示web网页正文要求；PDF页码/章节写入description，document的page_required保持false。
 首次登记时可直接把当前依赖已满足的首项设为in_progress，其他事项设为pending，减少空转协调。
-同一材料的多条结论若共享前置事项，登记为一项联网核验，逐条登记完成条件与实际依据；用户指定不同分工时遵守。要求网页原文时设置 page_required=true。
+同一材料的多条结论若共享前置事项，登记为一项联网核验，每条结论各设一个完成条件。支持程度、来源和统计口径写入对应条件；报告结构写入交付事项。用户指定不同分工时遵守。要求网页原文时设置 page_required=true。
 文档提取完成不能自动完成外部核验；只采用事项快照 available_sources 中的真实来源，不以模型知识、材料网址或自述替代联网证据。
 事项状态为 pending（待执行）、in_progress（执行中）、completed（运行时确认完成）、unfinished（未完成）。
 联网禁止、缺少依据或依赖未完成时保留事项并披露原因；不能删除要求或降低完成条件。报告交付在实际保存前保持未完成。
